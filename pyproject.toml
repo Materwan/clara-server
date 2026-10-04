@@ -15,6 +15,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "prompt_toolkit>=3.0",
     "pypdf>=4.0",  # the text of PDF documents attached on the web site
+    "cryptography>=3.1",  # pypdf needs it for the PDFs encrypted with AES (most of the "protected" ones)
     "tzdata; sys_platform == 'win32'",  # Windows has no timezone database of its own
 ]
 

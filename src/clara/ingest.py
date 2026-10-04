@@ -121,7 +121,7 @@ def pdf_text(data: bytes) -> tuple[str, int]:
     """The text of a PDF's pages, and how many pages it has."""
     try:
         from pypdf import PdfReader
-        from pypdf.errors import PdfReadError
+        from pypdf.errors import DependencyError, PdfReadError
     except ImportError:
         raise IngestError("Reading PDF files needs pypdf on the server: pip install pypdf") from None
     try:
@@ -131,6 +131,8 @@ def pdf_text(data: bytes) -> tuple[str, int]:
         pages = [(page.extract_text() or "").strip() for page in reader.pages]
     except IngestError:
         raise
+    except DependencyError:  # an AES-encrypted PDF, and the `cryptography` package is not installed
+        raise IngestError("This PDF is encrypted, and reading it needs cryptography on the server: pip install cryptography") from None
     except (PdfReadError, ValueError, KeyError, TypeError, OSError, AttributeError) as error:
         raise IngestError(f"This file could not be read as a PDF ({error}).") from None
     if not any(pages):
