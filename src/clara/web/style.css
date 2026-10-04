@@ -736,3 +736,10 @@ dialog .actions { display: flex; justify-content: flex-end; gap: .55rem; margin-
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
+
+/* formulas (KaTeX): a long one scrolls instead of widening the page */
+.md .math { white-space: normal; }
+.md .math:not(.typeset) { font-family: var(--font-mono, ui-monospace, monospace); font-size: .9em; color: var(--text-2); }
+.md .math-block { display: block; margin: .5em 0 .9em; overflow-x: auto; overflow-y: hidden; text-align: center; }
+.md .math-block .katex-display { margin: 0; }
+.md .katex { font-size: 1.08em; }

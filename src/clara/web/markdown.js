@@ -1,6 +1,7 @@
 // A small Markdown renderer that builds DOM nodes (never HTML strings), so nothing in an answer can become
 // markup or script. Covers what a chat needs: headings, paragraphs, lists, quotes, code, tables, rules, links,
-// bold, italic, strikethrough and inline code. Links open only http(s) and mailto addresses.
+// bold, italic, strikethrough and inline code. Links open only http(s) and mailto addresses. Formulas ($x^2$,
+// \(x^2\), $$...$$, \[...\]) are typeset by KaTeX, loaded the first time one shows up (see math below).
 
 import { copy, h, icon } from "./ui.js";
 
@@ -40,6 +41,10 @@ function blocks(lines, parent) {
     } else if (!line.trim()) {
       flush();
       i++;
+    } else if ((m = mathBlock(lines, i))) {
+      flush();
+      parent.append(math(m.tex, true));
+      i = m.end;
     } else if ((m = /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line))) {
       flush();
       const level = Math.min(m[1].length + 1, 4); // an answer's # is a section, not the page's title
@@ -153,6 +158,12 @@ const INLINE = new RegExp(
     "\\[([^\\]\\n]+)\\]\\(([^)\\s]+)(?:\\s+\"[^\"]*\")?\\)", // 8,9 link
     "<(https?:\\/\\/[^>\\s]+)>", // 10 <autolink>
     "(https?:\\/\\/[^\\s<>()\\[\\]]+[^\\s<>()\\[\\].,;:!?'\"])", // 11 bare url
+    "\\\\\\$", // an escaped dollar sign: \$ (no group)
+    "\\$\\$([^`]+?)\\$\\$", // 12 $$ display $$
+    "\\\\\\[([\\s\\S]+?)\\\\\\]", // 13 \[ display \]
+    "\\\\\\(([\\s\\S]+?)\\\\\\)", // 14 \( inline \)
+    // 15 $ inline $: it hugs its formula and no digit follows, so "from $5 to $10" is not one
+    "\\$(?![\\s$])((?:[^$`\\\\\\n]|\\\\[\\s\\S])+?)(?<!\\s)\\$(?!\\d)",
   ].join("|"),
 );
 
@@ -169,7 +180,10 @@ export function inline(text, parent) {
     else if (m[8] !== undefined) {
       if (SAFE_LINK.test(m[9])) wrap("a", m[8], parent, { href: m[9], target: "_blank", rel: "noopener noreferrer nofollow" });
       else parent.append(m[0]);
-    } else link(m[10] ?? m[11], parent);
+    } else if (m[10] !== undefined || m[11] !== undefined) link(m[10] ?? m[11], parent);
+    else if (m[12] !== undefined || m[13] !== undefined) parent.append(math(m[12] ?? m[13], true));
+    else if (m[14] !== undefined || m[15] !== undefined) parent.append(math(m[14] ?? m[15], false));
+    else parent.append("$");
     rest = rest.slice(m.index + m[0].length);
   }
   if (rest) parent.append(rest);
@@ -183,4 +197,79 @@ function wrap(tag, text, parent, props) {
 
 function link(url, parent) {
   parent.append(h("a", { href: url, target: "_blank", rel: "noopener noreferrer nofollow" }, url));
+}
+
+// ---- formulas -------------------------------------------------------------------------------------------
+// KaTeX (web/katex/) builds DOM nodes, never HTML strings, so what the model writes cannot become markup, and the
+// page's strict Content-Security-Policy holds. Its script is only fetched once an answer has a formula; until it is
+// there the formulas show their source. An answer is repainted as it streams, so each formula is typeset once.
+
+const KATEX_SCRIPT = "/katex/katex.min.js";
+const waiting = new Set(); // formulas on screen that are waiting for KaTeX
+const typeset = new Map(); // "d|tex" -> its nodes: what a streaming answer repaints is taken from here
+let loading = null;
+
+function loadKatex() {
+  if (window.katex || loading) return;
+  const script = document.createElement("script");
+  script.src = KATEX_SCRIPT;
+  script.onload = () => {
+    for (const node of waiting) paintMath(node);
+    waiting.clear();
+  };
+  script.onerror = () => { loading = null; }; // the formulas stay as source; the next answer tries again
+  loading = script;
+  document.head.append(script);
+}
+
+/** A formula as a node: typeset when KaTeX is there, else its source for now. */
+function math(tex, display) {
+  tex = tex.trim();
+  const node = h("span", { class: display ? "math math-block" : "math" }, tex);
+  node.dataset.tex = tex;
+  if (window.katex) paintMath(node);
+  else {
+    waiting.add(node);
+    loadKatex();
+  }
+  return node;
+}
+
+function paintMath(node) {
+  const display = node.classList.contains("math-block");
+  const key = (display ? "d|" : "i|") + node.dataset.tex;
+  let done = typeset.get(key);
+  if (!done) {
+    const target = document.createElement("span");
+    try {
+      window.katex.render(node.dataset.tex, target, { displayMode: display, throwOnError: true, strict: "ignore", trust: false, maxExpand: 1000 });
+      done = [...target.childNodes];
+    } catch {
+      return; // not (yet) a formula: half of one while it streams in. Its source stays
+    }
+    if (typeset.size > 300) typeset.clear();
+    typeset.set(key, done);
+  }
+  node.replaceChildren(...done.map((child) => child.cloneNode(true)));
+  node.classList.add("typeset");
+}
+
+/** Display math that starts at lines[start] and is alone in its lines: {tex, end}, or null if it is not one. */
+function mathBlock(lines, start) {
+  const opener = /^\s*(\$\$|\\\[)/.exec(lines[start]);
+  if (!opener) return null;
+  const closer = opener[1] === "$$" ? "$$" : "\\]";
+  const body = [lines[start].slice(opener[0].length)];
+  for (let i = start; i < lines.length; i++) {
+    if (i > start) body.push(lines[i]);
+    const last = body[body.length - 1];
+    const at = last.indexOf(closer);
+    if (at !== -1) {
+      if (last.slice(at + closer.length).trim()) return null; // text follows the formula: it is part of a paragraph
+      body[body.length - 1] = last.slice(0, at);
+      return { tex: body.join("\n"), end: i + 1 };
+    }
+    if (i > start && !last.trim()) return null; // a blank line cannot be in a formula: it was never closed
+  }
+  return { tex: body.join("\n"), end: lines.length }; // not closed yet: the answer is still being written
 }

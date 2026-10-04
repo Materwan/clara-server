@@ -543,7 +543,8 @@ desktop app both manage them).
 
 `http://127.0.0.1:8765/` (or the Tailscale address) opens Clara in a browser, with the surface `web`:
 
-- **Chat**: answers stream in as Markdown; your conversations at the side (search, pin, rename, delete, titles
+- **Chat**: answers stream in as Markdown, with LaTeX formulas (`$x^2$`, `\(x^2\)`, `$$…$$`, `\[…\]`) typeset by KaTeX
+  (vendored in `web/katex/`, so it works offline; the script is only loaded once an answer has a formula); your conversations at the side (search, pin, rename, delete, titles
   written by Clara); a bar showing how full the context is and *Summarise* to compact it; documents with 📎, by
   drag and drop or by pasting: PDFs are read by the server (`pypdf`), text and code in the browser, as in the desktop app.
   The conversations of projects are not in the list at the side (they are on their project's page), unless a search

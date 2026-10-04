@@ -33,7 +33,7 @@ clara-discord = "clara.discord_bot.standalone:run"
 where = ["src"]
 
 [tool.setuptools.package-data]
-clara = ["web/*", "web/fonts/*"]  # the web site and its fonts
+clara = ["web/*", "web/fonts/*", "web/katex/*", "web/katex/fonts/*"]  # the web site, its fonts, and KaTeX (formulas)
 
 [tool.ruff]
 line-length = 120

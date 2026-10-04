@@ -11,7 +11,8 @@ import { clear, confirmDialog, h, pageHead, parseDate, popupMenu, promptDialog, 
 const SURFACE = "web";
 const INSTRUCTIONS =
   "You are talking through Clara's web site, in a chat window. Markdown is displayed, but keep answers " +
-  "short and conversational. The user can attach files (PDF, code, Markdown, text): their content comes in the " +
+  "short and conversational. Write mathematical formulas in LaTeX: $...$ inline and $$...$$ on their own lines " +
+  "(they are typeset). The user can attach files (PDF, code, Markdown, text): their content comes in the " +
   'message, each inside <document name="..." type="..."> tags. Refer to them by name.';
 
 function greeting() {
