@@ -78,6 +78,7 @@ from .tailscale import Tailscale
 from .tools import default_toolbox
 from .traffic import TrafficLog, TrafficMiddleware
 from .users import Users
+from .web import WebClient
 from .webapi import install, install_web
 
 log = logging.getLogger("clara")
@@ -261,10 +262,11 @@ def create_app(
     providers.traffic = traffic
     notifier = Notifier(memory)
     reminders = ReminderService(memory, notifier=notifier)
+    web = WebClient(settings.ollama_api_key) if settings.web_tools and settings.ollama_api_key else None
     agent = Agent(
         memory,
         providers,
-        default_toolbox(),
+        default_toolbox(web),
         SystemPrompt(settings.system_prompt_file),
         history_turns=settings.history_turns,
         max_concurrent_llm=settings.max_concurrent_llm,

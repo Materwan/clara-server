@@ -7,6 +7,7 @@ import pytest
 from conftest import FakeBackend, call, say, untimed
 
 from clara.agent import Agent, ChatRequest, ClientToolTimeout, NothingToCompact
+from clara.llm import LlmChunk
 from clara.prompt import SystemPrompt
 from clara.tools import default_toolbox
 
@@ -145,7 +146,11 @@ async def test_a_silent_client_times_out(memory, tmp_path):
     with pytest.raises(ClientToolTimeout):
         async for _ in agent.turn(request(tools=(READ_FILE,)), "console"):
             pass
-    assert memory.messages_after("console:erwan") == []  # nothing half-finished is stored
+    # what was done stays known: the call, a note instead of its result, and why the answer stopped
+    stored = memory.messages_after("console:erwan")
+    assert [(m.role, m.tool_name) for m in stored] == [("user", None), ("assistant", None), ("tool", "read_file"), ("assistant", None)]
+    assert stored[2].content == "[not run: the answer was interrupted]"
+    assert stored[3].content.startswith("[This answer was interrupted: The client did not return its tool results")
     assert agent._pending == {}
 
 
@@ -158,6 +163,8 @@ async def test_a_client_that_leaves_cleans_up(memory, tmp_path):
     await stream.aclose()
     assert agent._pending == {}
     assert agent.stats.active == 0
+    stored = memory.messages_after("console:erwan")
+    assert stored[-1].content == "[This answer was interrupted: the connection to the client was lost.]"
     # and the conversation is free again
     agent.backend.rounds.append(say("hello again"))
     events = await drive(agent, request())
@@ -277,3 +284,69 @@ async def test_a_failing_automatic_compaction_is_a_warning_not_an_error(memory, 
     events = await drive(agent, request(message="q"))
     assert [e["type"] for e in events][-2:] == ["warning", "done"]
     assert events[-1]["reply"] == "answer"
+
+
+async def test_what_was_written_before_an_interruption_is_kept(memory, tmp_path):
+    backend = FakeBackend([LlmChunk(text="I will read "), LlmChunk(text="the file")])
+    agent = make_agent(memory, tmp_path, backend)
+    stream = agent.turn(request(message="go"), "console")
+    async for event in stream:
+        if event["type"] == "token" and event["text"] == "the file":
+            break
+    await stream.aclose()
+    stored = memory.messages_after("console:erwan")
+    assert [m.content for m in stored] == [
+        "go", "I will read the file\n\n[This answer was interrupted: the connection to the client was lost.]"
+    ]
+
+
+async def test_nothing_is_stored_when_nothing_happened(memory, tmp_path):
+    agent = make_agent(memory, tmp_path, FakeBackend(say("never read")))
+    stream = agent.turn(request(message="go"), "console")
+    await anext(stream)  # the `turn` event: the model has not been asked yet
+    await stream.aclose()
+    assert memory.messages_after("console:erwan") == []
+
+
+async def test_old_tool_outputs_are_kept_within_a_share_of_the_window(memory, tmp_path):
+    rounds = []
+    for index in range(3):
+        rounds += [call("read_file", path=str(index)), say(f"answer {index}")]
+    rounds.append(say("last"))
+    backend = FakeBackend(*rounds)
+    agent = make_agent(memory, tmp_path, backend, context_window=10_000)  # 25%: about 2,500 tokens of outputs
+    for index in range(3):
+        await drive(agent, request(message=f"q{index}", tools=(READ_FILE,)), lambda n, a: a["path"] * 6_000)
+    await drive(agent, request(message="again", tools=(READ_FILE,)))
+
+    contents = [m["content"] for m in backend.calls[-1][0] if m["role"] == "tool"]
+    assert contents[:2] == ["[output omitted to save context]"] * 2 and contents[2] == "2" * 6_000
+
+
+async def test_older_outputs_of_a_long_answer_are_left_out_to_fit(memory, tmp_path):
+    backend = FakeBackend(*[call("read_file", path=str(i)) for i in range(3)], say("done"))
+    agent = make_agent(memory, tmp_path, backend, context_window=4_000)
+    events = await drive(agent, request(tools=(READ_FILE,)), lambda n, a: a["path"] * 5_000)  # ~1,400 tokens each
+
+    assert events[-1]["reply"] == "done"
+    assert any(e["type"] == "warning" and "tool outputs of this answer" in e["message"] for e in events)
+    last = [m["content"] for m in backend.calls[-1][0] if m["role"] == "tool"]
+    assert last[0].startswith("[output omitted to fit the context") and last[-1] == "2" * 5_000
+    # the history keeps the full outputs: only the prompt was trimmed
+    assert [m.content for m in memory.messages_after("console:erwan") if m.role == "tool"][0] == "0" * 5_000
+
+
+async def test_thinking_is_streamed_but_never_stored(memory, tmp_path):
+    backend = FakeBackend([LlmChunk(thinking="Let me see..."), LlmChunk(text="Yes."), LlmChunk(prompt_tokens=5, completion_tokens=2)])
+    agent = make_agent(memory, tmp_path, backend)
+    events = await drive(agent, request())
+    assert {"type": "thinking", "text": "Let me see..."} in events
+    assert [m.content for m in memory.messages_after("console:erwan")] == ["hi", "Yes."]
+
+
+async def test_a_server_tool_event_carries_its_arguments_and_result(memory, tmp_path):
+    agent = make_agent(memory, tmp_path, FakeBackend(call("remember", fact="Likes tea"), say("ok")))
+    events = await drive(agent, request())
+    [tool] = [e for e in events if e["type"] == "tool"]
+    assert tool["name"] == "remember" and tool["arguments"] == {"fact": "Likes tea"}
+    assert tool["result"].startswith("Remembered")

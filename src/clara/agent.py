@@ -48,8 +48,12 @@ log = logging.getLogger(__name__)
 MAX_TOOL_ROUNDS = 40
 MAX_FACTS_IN_PROMPT = 100
 DEFAULT_FACTS_TOKEN_BUDGET = 2_000
-RECENT_TOOL_RESULTS_KEPT = 8  # older tool outputs are replaced by a note, to save context
+RECENT_TOOL_RESULTS_KEPT = 8  # at most this many tool outputs of past turns are replayed...
+TOOL_HISTORY_SHARE = 0.25  # ...and only while they fit in this share of the window; older ones become a note
 OMITTED = "[output omitted to save context]"
+OMITTED_IN_TURN = "[output omitted to fit the context: run the tool again if you still need it]"
+NOT_RUN = "[not run: the answer was interrupted]"
+TOOL_EVENT_RESULT = 500  # characters of a server tool's result shown to the client
 DEFAULT_CONTEXT_WINDOW = 32_768
 PROMPT_LIMIT = 0.95  # share of the window a prompt may fill; beyond, the model would truncate it silently
 ROUND_SEPARATOR = "\n\n"  # between the texts of two model rounds
@@ -80,6 +84,10 @@ def clean_title(text: str) -> str:
     if len(line) > TITLE_LENGTH:
         line = line[:TITLE_LENGTH].rsplit(" ", 1)[0].rstrip(" ,;:-") + "…"
     return line
+
+
+def _shorten(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def passed(reply: str) -> bool:
@@ -306,11 +314,24 @@ class Agent:
         content = f"{prefix}\n\n{text}" if prefix else text
         return f"{author}: {content}" if author else content
 
+    def _recent_tool_rows(self, stored: list[StoredMessage]) -> set[int]:
+        """The tool outputs replayed in full: the newest, at most RECENT_TOOL_RESULTS_KEPT of them and while
+        they fit in TOOL_HISTORY_SHARE of the window (the newest is always kept)."""
+        budget = TOOL_HISTORY_SHARE * self.window
+        kept: set[int] = set()
+        used = 0
+        for index in reversed([i for i, message in enumerate(stored) if message.role == "tool"]):
+            cost = estimate_tokens(stored[index].content)
+            if len(kept) >= RECENT_TOOL_RESULTS_KEPT or (kept and used + cost > budget):
+                break
+            kept.add(index)
+            used += cost
+        return kept
+
     def _replay(self, stored: list[StoredMessage], person: Person, group: bool = False) -> list[dict]:
         """Past messages as the model wants them. Old tool outputs are cut to save context. Messages of other
         people carry their name; in a group, everybody's do."""
-        tool_rows = [i for i, message in enumerate(stored) if message.role == "tool"]
-        stale = set(tool_rows[: max(0, len(tool_rows) - RECENT_TOOL_RESULTS_KEPT)])
+        recent = self._recent_tool_rows(stored)
         messages: list[dict] = []
         for index, message in enumerate(stored):
             if message.role == "user":
@@ -323,7 +344,7 @@ class Agent:
                     entry["tool_calls"] = message.tool_calls
                 messages.append(entry)
             else:
-                content = OMITTED if index in stale else message.content
+                content = message.content if index in recent else OMITTED
                 messages.append({"role": "tool", "tool_name": message.tool_name, "content": content})
         return messages
 
@@ -483,81 +504,104 @@ class Agent:
             reply_parts: list[str] = []
             tools_used: list[str] = []
             prompt_tokens = completion_tokens = context_tokens = 0
+            text_parts: list[str] = []  # what the model wrote in the round in progress
+            round_open = False  # that text is not in `rows` yet
+            finished = False
+            reason = "the connection to the client was lost"
+            try:
+                for round_number in range(self.max_tool_rounds + 1):
+                    offer_tools = round_number < self.max_tool_rounds  # the last round must answer
+                    async for event in self._fit(
+                        request, person, messages, schemas if offer_tools else None, compact=round_number == 0
+                    ):
+                        yield event
+                    text_parts = []
+                    round_open = True
+                    calls = []
+                    round_prompt = round_completion = 0
+                    # a round that follows one that said something starts a new paragraph
+                    separate = bool("".join(reply_parts).strip())
+                    # aclosing: if the client goes away at a yield, the model task stops now
+                    async with contextlib.aclosing(self._model(messages, schemas if offer_tools else None)) as model:
+                        async for chunk in model:
+                            round_prompt += chunk.prompt_tokens
+                            round_completion += chunk.completion_tokens
+                            calls.extend(chunk.tool_calls)
+                            if chunk.thinking:  # shown to the client, never stored nor sent back to the model
+                                yield {"type": "thinking", "text": chunk.thinking}
+                            if chunk.text:
+                                if separate and chunk.text.strip():
+                                    separate = False
+                                    reply_parts.append(ROUND_SEPARATOR)
+                                    yield {"type": "token", "text": ROUND_SEPARATOR}
+                                text_parts.append(chunk.text)
+                                yield {"type": "token", "text": chunk.text}
+                    prompt_tokens += round_prompt
+                    completion_tokens += round_completion
+                    text = "".join(text_parts)
+                    reported = round_prompt + round_completion
+                    estimated = estimate_prompt_tokens(messages, schemas if offer_tools else None) + estimate_tokens(text)
+                    log.debug("context of %s: model reported %d tokens, estimated %d", conversation, reported, estimated)
+                    # With a prompt cache the model may report only what it evaluated this time
+                    context_tokens = max(reported, estimated)
+                    yield {"type": "usage", "prompt_tokens": round_prompt, "completion_tokens": round_completion}
+                    reply_parts.append(text)
 
-            for round_number in range(self.max_tool_rounds + 1):
-                offer_tools = round_number < self.max_tool_rounds  # the last round must answer
-                async for event in self._fit(
-                    request, person, messages, schemas if offer_tools else None, compact=round_number == 0
-                ):
-                    yield event
-                text_parts: list[str] = []
-                calls = []
-                round_prompt = round_completion = 0
-                # a round that follows one that said something starts a new paragraph
-                separate = bool("".join(reply_parts).strip())
-                # aclosing: if the client goes away at a yield, the model task stops now
-                async with contextlib.aclosing(self._model(messages, schemas if offer_tools else None)) as model:
-                    async for chunk in model:
-                        round_prompt += chunk.prompt_tokens
-                        round_completion += chunk.completion_tokens
-                        calls.extend(chunk.tool_calls)
-                        if chunk.text:
-                            if separate and chunk.text.strip():
-                                separate = False
-                                reply_parts.append(ROUND_SEPARATOR)
-                                yield {"type": "token", "text": ROUND_SEPARATOR}
-                            text_parts.append(chunk.text)
-                            yield {"type": "token", "text": chunk.text}
-                prompt_tokens += round_prompt
-                completion_tokens += round_completion
-                text = "".join(text_parts)
-                reported = round_prompt + round_completion
-                estimated = estimate_prompt_tokens(messages, schemas if offer_tools else None) + estimate_tokens(text)
-                log.debug("context of %s: model reported %d tokens, estimated %d", conversation, reported, estimated)
-                # With a prompt cache the model may report only what it evaluated this time
-                context_tokens = max(reported, estimated)
-                yield {"type": "usage", "prompt_tokens": round_prompt, "completion_tokens": round_completion}
-                reply_parts.append(text)
+                    if not (offer_tools and calls):
+                        if text.strip():
+                            rows.append(TurnRow("assistant", text))
+                        round_open = False
+                        break
 
-                if not (offer_tools and calls):
-                    if text.strip():
-                        rows.append(TurnRow("assistant", text))
-                    break
+                    ids = [f"call_{round_number}_{index}" for index in range(len(calls))]
+                    call_dicts = [{"function": {"name": c.name, "arguments": c.arguments}} for c in calls]
+                    messages.append({"role": "assistant", "content": text, "tool_calls": call_dicts})
+                    rows.append(TurnRow("assistant", text, call_dicts))
+                    round_open = False
 
-                ids = [f"call_{round_number}_{index}" for index in range(len(calls))]
-                call_dicts = [{"function": {"name": c.name, "arguments": c.arguments}} for c in calls]
-                messages.append({"role": "assistant", "content": text, "tool_calls": call_dicts})
-                rows.append(TurnRow("assistant", text, call_dicts))
-
-                results: dict[str, str] = {}
-                remote = []
-                for call_id, call in zip(ids, calls):
-                    tools_used.append(call.name)
-                    if call.name in client_tools:
-                        remote.append((call_id, call))
-                    else:
-                        yield {"type": "tool", "name": call.name}
-                        results[call_id] = self.toolbox.run(call.name, context, call.arguments)
-                if remote:
-                    self._pending[turn_id] = _Pending(
-                        owner, frozenset(call_id for call_id, _ in remote),
-                        asyncio.get_running_loop().create_future(),
-                    )
-                    try:
-                        yield {
-                            "type": "tool_requests",
-                            "turn": turn_id,
-                            "calls": [
-                                {"id": call_id, "name": call.name, "arguments": call.arguments}
-                                for call_id, call in remote
-                            ],
-                        }
-                        results.update(await self._wait_for_client(turn_id))
-                    finally:
-                        self._pending.pop(turn_id, None)
-                for call_id, call in zip(ids, calls):
-                    messages.append({"role": "tool", "tool_name": call.name, "content": results[call_id]})
-                    rows.append(TurnRow("tool", results[call_id], tool_name=call.name))
+                    results: dict[str, str] = {}
+                    remote = []
+                    for call_id, call in zip(ids, calls):
+                        tools_used.append(call.name)
+                        if call.name in client_tools:
+                            remote.append((call_id, call))
+                        else:
+                            results[call_id] = await self.toolbox.arun(call.name, context, call.arguments)
+                            yield {
+                                "type": "tool",
+                                "name": call.name,
+                                "arguments": call.arguments,
+                                "result": _shorten(results[call_id], TOOL_EVENT_RESULT),
+                            }
+                    if remote:
+                        self._pending[turn_id] = _Pending(
+                            owner, frozenset(call_id for call_id, _ in remote),
+                            asyncio.get_running_loop().create_future(),
+                        )
+                        try:
+                            yield {
+                                "type": "tool_requests",
+                                "turn": turn_id,
+                                "calls": [
+                                    {"id": call_id, "name": call.name, "arguments": call.arguments}
+                                    for call_id, call in remote
+                                ],
+                            }
+                            results.update(await self._wait_for_client(turn_id))
+                        finally:
+                            self._pending.pop(turn_id, None)
+                    for call_id, call in zip(ids, calls):
+                        messages.append({"role": "tool", "tool_name": call.name, "content": results[call_id]})
+                        rows.append(TurnRow("tool", results[call_id], tool_name=call.name))
+                finished = True
+            except BaseException as error:
+                if not isinstance(error, (GeneratorExit, asyncio.CancelledError)):
+                    reason = str(error) or type(error).__name__
+                raise
+            finally:
+                if not finished and not ephemeral and request.mode == "answer":
+                    # What was done stays known: the files a client tool changed are changed for good
+                    self._keep_interrupted(request, person, rows, "".join(text_parts) if round_open else "", reason)
 
             reply = "".join(reply_parts).strip()
             declined = request.mode == "maybe" and passed(reply)
@@ -588,6 +632,27 @@ class Agent:
             "provider": getattr(self.backend, "active", ""),
             "passed": declined,  # a "maybe" message Clara chose not to answer (reply is "")
         }
+
+    def _keep_interrupted(
+        self, request: ChatRequest, person: Person, rows: list[TurnRow], partial: str, reason: str
+    ) -> None:
+        """Store a turn that did not finish (the client went away, the model failed...): the question, what
+        was done (tool calls left without a result get a note) and what was written, then why it stopped.
+        Nothing is stored when nothing happened."""
+        if not rows and not partial.strip():
+            return
+        rows = list(rows)
+        last = next((i for i in range(len(rows) - 1, -1, -1) if rows[i].role == "assistant"), None)
+        if last is not None and rows[last].tool_calls:
+            answered = sum(1 for row in rows[last + 1 :] if row.role == "tool")
+            for call in rows[last].tool_calls[answered:]:
+                rows.append(TurnRow("tool", NOT_RUN, tool_name=call["function"]["name"]))
+        note = f"[This answer was interrupted: {reason}.]"
+        rows.append(TurnRow("assistant", f"{partial.strip()}\n\n{note}" if partial.strip() else note))
+        try:
+            self.memory.add_turn(request.conversation_id, person.id, request.message, rows, request.prefix)
+        except Exception:
+            log.exception("could not store the interrupted turn of %s", request.conversation_id)
 
     async def _observe(self, request: ChatRequest, person: Person) -> AsyncIterator[dict]:
         """A message that was not for Clara: stored in the conversation, so that she knows what was said."""
@@ -670,6 +735,12 @@ class Agent:
             size = estimate_prompt_tokens(messages, schemas)
         if dropped:
             yield {"type": "warning", "message": "Older messages were left out of the prompt to fit the context."}
+        omitted = False
+        while size > limit and self._omit_oldest_output(messages):
+            omitted = True
+            size = estimate_prompt_tokens(messages, schemas)
+        if omitted:
+            yield {"type": "warning", "message": "Older tool outputs of this answer were left out to fit the context."}
         if size > limit:
             raise PromptTooLarge(
                 f"The prompt needs about {size:,} tokens but the model's context window is {self.window:,}: "
@@ -686,6 +757,19 @@ class Agent:
         end = next((i for i in range(first + 1, newest) if messages[i]["role"] == "user"), newest)
         del messages[first:end]
         return True
+
+    @staticmethod
+    def _omit_oldest_output(messages: list[dict]) -> bool:
+        """Replace the oldest tool output of the turn in progress by a note; the outputs of its last round
+        (what the model asked for just now) stay. False when there is none left to omit."""
+        newest_user = max((i for i, m in enumerate(messages) if m["role"] == "user"), default=-1)
+        last_call = max((i for i, m in enumerate(messages) if m["role"] == "assistant"), default=-1)
+        for index in range(newest_user + 1, last_call):
+            message = messages[index]
+            if message["role"] == "tool" and message["content"] != OMITTED_IN_TURN:
+                messages[index] = {**message, "content": OMITTED_IN_TURN}
+                return True
+        return False
 
     def _history_overflows(self, conversation: str, state: ConversationState) -> bool:
         """Are there more turns waiting than the prompt takes back (`history_turns`)?"""

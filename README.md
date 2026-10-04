@@ -109,6 +109,9 @@ account to attach asks its own client for a code (`POST /v1/accounts/link-code`,
 if at most one of the two already has memories: merging two filled accounts cannot be undone, so
 an operator does it from the server console (`/link`).
 
+With an Ollama API key (`OLLAMA_API_KEY`), the model can also search the web and read pages: `web_search` and
+`web_fetch` use ollama.com's web API (results cut to a few thousand tokens). `CLARA_WEB_TOOLS=false` turns them off.
+
 The model saves and removes facts itself through three tools, `remember`, `forget` and
 `recall_facts`, which can only touch the person who is talking. The prompt shows the newest facts that fit
 `CLARA_FACTS_TOKEN_BUDGET` tokens (2000) and says how many older ones are left out; `recall_facts` searches
@@ -122,7 +125,7 @@ All routes except `/health` need `Authorization: Bearer <token>`.
 | Route | |
 | --- | --- |
 | `POST /v1/chat` | `{surface, user_id, user_name?, message, conversation?, quiet?, space?, roster?, focus?, mode?}` → `{reply, conversation, person, tools, usage, passed}`; 413 if it cannot fit the model's window, 504 if the model hangs, 503 if the server is stopping. `quiet`: never notify the person about this turn; the group fields are described in *Discord* |
-| `POST /v1/chat/stream` | same body; Server-Sent Events `turn` / `token` / `tool` / `tool_requests` / `usage` / `compacted` / `warning` / `done` / `error` |
+| `POST /v1/chat/stream` | same body; Server-Sent Events `turn` / `thinking` / `token` / `tool` / `tool_requests` / `usage` / `compacted` / `warning` / `done` / `error` |
 | `POST /v1/turns/{id}/tool-results` | `{results: [{id, content}]}`: a client's answer to a `tool_requests` event (see below) |
 | `GET /v1/conversations?surface=&user_id=&q=&limit=` | `{conversations: [{id, title, titled_by, pinned, created_at, updated_at, preview}]}`: the conversations the account's person started on that surface, pinned first, then the last written in; `q` keeps those whose title, messages or summary contain it (see *Conversation history*) |
 | `GET /v1/conversations/{id}/messages?surface=&user_id=&limit=` | the same fields, and `{messages: [{id, role, content, created_at}], summary, earlier}`: its last questions and answers (200), to show it again |
@@ -186,7 +189,7 @@ machine. The request of `/v1/chat/stream` takes more fields:
 
 | Field | |
 | --- | --- |
-| `tools` | tools the client runs itself, as function schemas (`{"type": "function", "function": {"name", "description", "parameters"}}`). Names must not collide with the server's (`remember`, `forget`) |
+| `tools` | tools the client runs itself, as function schemas (`{"type": "function", "function": {"name", "description", "parameters"}}`). Names must not collide with the server's (`remember`, `forget`, `web_search`...) |
 | `instructions` | text added to the system prompt (what this client is for, how to use its tools) |
 | `prefix` | text shown to the model before the message, kept in the history but left out of summaries (e.g. the date) |
 | `ephemeral` | a one-shot job: no Clara persona, no memory, no stored history, no server tools; the system prompt is just `instructions`. Used for sub-agents |
@@ -206,8 +209,19 @@ the turn can answer it. Closing the stream gives the turn up; a client silent fo
 ends it with an `error` event. A model slot is held only while the model works, never while a client does.
 `/v1/chat` (no stream) cannot carry client tools.
 
-The tool calls and their results are stored with the conversation, so the model remembers what it did; the outputs
-of all but the 8 most recent tool calls are replaced by a short note when the history is replayed.
+The tool calls and their results are stored with the conversation, so the model remembers what it did. When the
+history is replayed, only the newest outputs are given in full: at most 8, and only while they fit in a quarter of
+the window (the newest one always); the older ones are replaced by a short note.
+
+A turn that does not finish (the client closes the stream, its tools time out, the model fails) is stored all the
+same as far as it went: the question, the tool calls made (a call left without its result gets
+`[not run: the answer was interrupted]`), what the model had written, then `[This answer was interrupted: <why>.]`.
+A client tool may have changed files before the turn stopped: the model must know it did. Nothing is stored when
+the model had not started.
+
+Other events of the stream: `tool` says a server tool ran (`{name, arguments, result}`, the result cut to 500
+characters), and `thinking` carries the reasoning of the models that show it apart (it is never stored nor sent
+back to the model).
 
 The system prompt only holds the date, and the time of day is added to the newest user message (not
 stored), so the prompt and the replayed history stay identical from one turn to the next and Ollama can
@@ -236,7 +250,8 @@ already short.
 
 A prompt is never left to be truncated silently. Before each model round the server estimates its size
 (messages, tool calls and schemas, whatever the model reports): above 95% of the window it summarises the
-older turns, then leaves the oldest replayed turns out (with a `warning` event), and if it still does not fit
+older turns, then leaves the oldest replayed turns out, then the oldest tool outputs of the answer in progress
+(those of its last round stay; each with a `warning` event), and if it still does not fit
 the turn ends with an error: HTTP 413 on `/v1/chat`, an `error` event on the stream. A single message
 taking more than half of the window is refused at once. The context size reported to clients is the larger of
 the model's figure and the estimate, since a prompt cache can make Ollama report only what it evaluated.

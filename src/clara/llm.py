@@ -22,9 +22,11 @@ class ToolCall:
 
 @dataclass
 class LlmChunk:
-    """One piece of a streamed answer: some text, tool calls, or the final token counts."""
+    """One piece of a streamed answer: some text, the model's reasoning (`thinking`, for the models that
+    show it apart), tool calls, or the final token counts."""
 
     text: str = ""
+    thinking: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -76,6 +78,7 @@ class OllamaBackend:
             message = part.message
             yield LlmChunk(
                 text=message.content or "",
+                thinking=getattr(message, "thinking", None) or "",
                 tool_calls=[
                     ToolCall(call.function.name, dict(call.function.arguments or {}))
                     for call in message.tool_calls or []

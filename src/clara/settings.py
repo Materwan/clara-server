@@ -160,6 +160,7 @@ class Settings:
     cloud_model: str
     cloud_context_window: int
     ollama_api_key: str | None = field(repr=False)
+    web_tools: bool = True  # web_search and web_fetch (they need ollama_api_key)
     notify_long_turn: int = 120  # a turn this long (seconds) notifies its person when done (0: never)
     # The traffic log (traffic.py): every request in and out, in data/logs
     traffic_log: bool = True
@@ -286,6 +287,7 @@ class Settings:
             cloud_model=text("CLARA_CLOUD_MODEL", "gpt-oss:120b"),
             cloud_context_window=_positive_int(env, "CLARA_CLOUD_CONTEXT_WINDOW", 131_072),
             ollama_api_key=api_key,
+            web_tools=_flag(env, "CLARA_WEB_TOOLS", default=True),
             notify_long_turn=_non_negative_int(env, "CLARA_NOTIFY_LONG_TURN", 120),
             traffic_log=_flag(env, "CLARA_TRAFFIC_LOG", default=True),
             traffic_log_days=_positive_int(env, "CLARA_TRAFFIC_LOG_DAYS", 30),
