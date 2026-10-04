@@ -879,9 +879,10 @@ class ClaraServer(uvicorn.Server):
 
 def uvicorn_config(app: FastAPI, settings: Settings, **options: Any) -> uvicorn.Config:
     # tailscaled proxies from this machine: trust its X-Forwarded-For, so logs and the limit of wrong tokens
-    # see the real client (nothing else is trusted: anyone else could write whatever address they like)
+    # see the real client (nothing else is trusted: anyone else could write whatever address they like).
+    # No colours: under the console's patch_stdout the escape codes are shown as "?[32m", and the log file has none
     options = {"host": settings.host, "port": settings.port, "proxy_headers": True,
-               "forwarded_allow_ips": "127.0.0.1,::1", **options}
+               "forwarded_allow_ips": "127.0.0.1,::1", "use_colors": False, **options}
     return uvicorn.Config(app, **options)
 
 
