@@ -5,16 +5,17 @@ One AI, one memory, many clients. Clara runs as a small HTTP server and is the
 are thin clients: they send a message, they show the answer.
 
 ```
- terminal (clara-chat) ─┐
- Discord adapter ───────┼─►  Clara server  ─►  Ollama
- your other app ────────┘     │
+ terminal (clara-chat) ─┐                     ┌─ Ollama (local or ollama.com)
+ Discord adapter ───────┼─►  Clara server  ─►─┤
+ your other app ────────┘     │               └─ Gemini, DeepSeek, Mistral
                           SQLite memory
 ```
 
 Runs the same on Linux and Windows (pure Python, SQLite, no native extension).
 
 It also serves a **web site** (open the server's address in a browser): sign in with a user name and a password,
-chat, see what Clara remembers, and, for administrators, manage users and the server. See *Users* and *The web site*.
+chat, keep **projects** (files, folders and GitHub repositories Clara uses in their conversations), see what Clara
+remembers, and, for administrators, manage users and the server. See *Users*, *Projects* and *The web site*.
 
 ## Quick start
 
@@ -59,7 +60,7 @@ Both consoles run the same commands (the `/` is optional):
 
 | Command | |
 | --- | --- |
-| `/provider [local\|cloud]` | show the providers, or switch where the model runs |
+| `/provider [local\|cloud\|gemini\|deepseek\|mistral]` | show the providers, or switch where the model runs |
 | `/model [name]` | list the active provider's models, or change its model |
 | `/status` | provider, model, uptime, running turns, tokens, memory size |
 | `/people` | everybody Clara knows, with accounts and fact counts |
@@ -79,15 +80,27 @@ Both consoles run the same commands (the `/` is optional):
 | --- | --- | --- |
 | `local` | Local host | Ollama on this machine, or any host in `OLLAMA_HOST`. Model: `CLARA_LOCAL_MODEL` |
 | `cloud` | Ollama API key | `ollama.com` with `OLLAMA_API_KEY`. Model: `CLARA_CLOUD_MODEL` |
+| `gemini` (or `google`) | Google Gemini | `GEMINI_API_KEY` (aistudio.google.com). Model: `CLARA_GEMINI_MODEL`, default `gemini-flash-latest`, 1M tokens |
+| `deepseek` | DeepSeek | `DEEPSEEK_API_KEY` (platform.deepseek.com). Model: `CLARA_DEEPSEEK_MODEL`, default `deepseek-flash`, 1M tokens |
+| `mistral` | Mistral | `MISTRAL_API_KEY` (console.mistral.ai). Model: `CLARA_MISTRAL_MODEL`, default `mistral-large-latest`, 128k tokens |
+
+Gemini, DeepSeek and Mistral are reached through their OpenAI-compatible chat API (streaming and tool calls), with
+no extra package. A provider whose key is not set is listed but cannot be chosen. Each one's address, model and
+context window can be changed (`CLARA_<ID>_HOST`, `CLARA_<ID>_MODEL`, `CLARA_<ID>_CONTEXT_WINDOW`); `/model` lists
+what the key gives access to. Two things they need back with a tool call are kept with it in the history: the
+model's reasoning (DeepSeek refuses a tool call sent back without it) and Gemini's *thought signature*; a call made
+by another provider is sent to Gemini with the stand-in value Google documents. DeepSeek thinks before it answers
+(shown like the thinking of Ollama models); `CLARA_DEEPSEEK_THINKING=false` turns it off. The web tools
+(`web_search`, `web_fetch`) still need `OLLAMA_API_KEY`, whatever the provider.
 
 Models whose name ends in `-cloud` are not local: a local Ollama forwards them to ollama.com (they need
 `ollama signin`), and the window Clara requests from a local server (`num_ctx`) cannot be relied on for them,
 so set `CLARA_LOCAL_CONTEXT_WINDOW` to the window such a model really has.
 
 `/provider cloud` switches every client at once, without a restart, then checks
-that the provider answers (and, for `cloud`, that the key is accepted).
+that the provider answers (and, for those with a key, that the key is accepted).
 The choice and the models picked with `/model` are saved in `data/runtime.json`
-and survive restarts. The API key only ever lives in the environment: it is not
+and survive restarts. The API keys only ever live in the environment: they are not
 saved, printed, or reachable through the API.
 
 Remote admin tokens are separate from chat tokens: a Discord adapter cannot
@@ -140,6 +153,8 @@ All routes except `/health` need `Authorization: Bearer <token>`.
 | `GET /v1/reminders?surface=&user_id=` | the person's reminders that have not fired yet |
 | `DELETE /v1/reminders/{id}?surface=&user_id=` | cancel one of the person's own reminders |
 | `POST /v1/notifications` | `{surface, user_id, user_name?, text, title?, targets?, conversation?}` → `{id, sent_at, targets}`: notify that person now (see *Notifications*); 429 when too many |
+| `GET /v1/settings?surface=&user_id=` | the person's settings: `{notify_after, notify_after_default, notify_after_effective}`, the seconds a task takes before it notifies them when done (see *Notifications*); `notify_after` is `null` while they have not set one |
+| `PATCH /v1/settings` | `{surface, user_id, user_name?, notify_after}`: `notify_after` is 0 (never) to 604800 seconds, or `null` for the server's default; 422 out of range |
 | `GET /v1/notifications/stream?surface=&user_id=` | Server-Sent Events of that account: its person's `reminder` and `notification` events for that surface, and `server` (running, stopping, stopped). Also served as `/v1/reminders/stream`. With `?surface=discord&all=true` (a client of the whole surface): the events of every account of that surface, each with `accounts` |
 | `POST /v1/accounts/register`, `POST /v1/accounts/login` | `{surface, user_id, user_name?, username, password}`: a client signs one of its accounts in (see *Discord*); 401 wrong password, 409 name taken or already signed in, 422 rules, 429 too many |
 | `POST /v1/accounts/logout`, `GET /v1/accounts/me?surface=&user_id=`, `GET /v1/accounts/signed-in?surface=` | sign it out; who it is signed in as, with its facts and relationship; every signed-in account of a surface |
@@ -401,8 +416,12 @@ or the ones in `targets`). Three kinds of senders:
 
 The server notifies when:
 
-- **a turn took long**: one that lasted `CLARA_NOTIFY_LONG_TURN` seconds or more (120; `0`: never) tells its
-  person it is done, with the start of the answer (not for sub-agents, nor for reminder announcements);
+- **a turn took long**: one that lasted as many seconds as its person's delay tells them it is done, with the
+  start of the answer (not for sub-agents, nor for reminder announcements). A turn of the console
+  counts the time its tools ran on its side. The delay is `CLARA_NOTIFY_LONG_TURN` (120; `0`: never) until the
+  person sets their own (`0`: never): with `/notify-after` in `clara-chat` and in the console, in the Account
+  page of the web site, in the Settings of the desktop app, or `PATCH /v1/settings`. It is kept with the person,
+  so it is the same on every client;
 - **a conversation was summarised** (automatically or on demand): its person is told how full the context
   was and is now, on the conversation's surface. A conversation with several people (a Discord channel) tells
   nobody;
@@ -480,6 +499,46 @@ Wrong passwords are limited per address (see *Security*).
 **The first administrator.** The server's own console can do it. Under systemd there is none, so use
 `CLARA_ADMIN_TOKENS` once: `clara-admin --token <admin token> "/user add erwan admin"`.
 
+## Projects
+
+A project is what other chat services call a project: files given once, with instructions of its own, that every
+conversation of the project can use. It belongs to a person and is the same on every surface (the web site and the
+desktop app both manage them).
+
+- **What goes in**: text and code files, PDF (text extracted with `pypdf`), Word `.docx` (read without any extra
+  package), `.zip` archives (unpacked into a folder named after them), whole folders (the clients send their text
+  files), and **GitHub repositories**: the server downloads a snapshot of a branch, tag or commit (the archive
+  GitHub makes, no git needed) into a folder named after the repository; *Sync* downloads it again. Public
+  repositories need nothing; private ones need `GITHUB_TOKEN` (a fine-grained token with read access to their
+  contents) in the server's `.env`, and it never leaves the server.
+- **What is left out**: anything that is not text (images, programs, fonts, archives inside archives), dependencies
+  and build output (`node_modules`, `.venv`, `.git`, `dist`, `build`, `target`…), lock files and minified files, and
+  any file of more than 1 million characters of text. Each one left out is listed with the reason.
+- **Limits**: `CLARA_PROJECT_MAX_MB` (default 20) million characters of text and `CLARA_PROJECT_MAX_FILES`
+  (default 5 000) files per project; what would go beyond is left out.
+- **How Clara sees them**: the project's name, description and instructions are in the system prompt of its
+  conversations. When all its files fit in `CLARA_PROJECT_INLINE_PERCENT` (default 40) percent of the context window
+  of the provider in use, they are put there whole, in the same order every time (so a model's cache is reused);
+  otherwise the prompt lists them and Clara gets three tools: `list_project_files`, `read_project_file` (with line
+  numbers, 400 lines at a time) and `search_project` (text or a regular expression, case ignored). The same project
+  can be read whole with Gemini's window and searched with a local model's.
+- **Conversations**: a conversation is put in a project by its first message (`project` in `POST /v1/chat`), and
+  can be moved to another one or out of it (`PATCH /v1/conversations/{id}` with `project`, null for none); from its
+  next message on, it uses the files of its new project. `GET /v1/conversations?project=<id>` lists those of a
+  project, `?project=none` those in none. Deleting a project deletes its files; its conversations stay, in no
+  project. Erasing a person (`/forget-person`) erases their projects.
+
+| Route | |
+| --- | --- |
+| `GET /v1/projects?surface=&user_id=` | the person's projects (files, size, conversations, how they reach the model now) |
+| `POST /v1/projects` | `{surface, user_id, name, description?, instructions?}` |
+| `GET`, `PATCH`, `DELETE /v1/projects/{id}` | one project, with its repositories and the list of its files |
+| `POST /v1/projects/{id}/files` | `{files: [{path, data}]}`, `data` in base64: text, code, PDF, `.docx`, `.zip` (80 MB per request) |
+| `GET /v1/projects/{id}/file?path=` | a file's text |
+| `DELETE /v1/projects/{id}/files?path=&folder=` | a file, or every file of a folder |
+| `POST /v1/projects/{id}/github` | `{repo, ref?}`: `owner/name`, `owner/name@branch` or a github.com address |
+| `POST /v1/projects/{id}/sources/{sid}/sync`, `DELETE /v1/projects/{id}/sources/{sid}` | download it again, remove it and its files |
+
 ## The web site
 
 `http://127.0.0.1:8765/` (or the Tailscale address) opens Clara in a browser, with the surface `web`:
@@ -487,6 +546,12 @@ Wrong passwords are limited per address (see *Security*).
 - **Chat**: answers stream in as Markdown; your conversations at the side (search, pin, rename, delete, titles
   written by Clara); a bar showing how full the context is and *Summarise* to compact it; documents with 📎, by
   drag and drop or by pasting: PDFs are read by the server (`pypdf`), text and code in the browser, as in the desktop app.
+  The conversations of projects are not in the list at the side (they are on their project's page), unless a search
+  finds them; a chip next to the title names the project of the conversation shown, and its menu moves it.
+- **Projects**: your projects as cards; one project shows its conversations (*New chat* starts one in it), its
+  instructions, and its files: add files, a folder, or a GitHub repository (or drop files and folders on the page),
+  read a file, remove it, sync or remove a repository. It says whether Clara reads all the files with every message
+  or searches them, for the model in use.
 - **Memory**: what Clara remembers about you, to add to or remove from.
 - **Account**: change your password, see and sign out your devices, link an account that has no password (Discord)
   with a link code.
@@ -516,7 +581,7 @@ one JSON object per line). Entries of one exchange share an `id`:
 | `in` | `request` | a client's HTTP request: `peer` (`client:<name>`, `admin:<name>`, `anonymous`, `unknown-token`), method, path, query, address, body |
 | `out` | `response` | its answer: status, body, duration, bytes, `outcome` (`complete`, or why it was cut) |
 | `out` | `sse` | each event sent on a stream (a turn, the event stream). The pieces of an answer (`token`) are only counted in the `response`: the `done` event holds the whole answer |
-| `out` | `llm_request` / `llm_response` | each call to the model: provider (`peer` = `ollama:local` or `ollama:cloud`), host, model, the messages and tools sent; then the text, tool calls, token counts, duration and error |
+| `out` | `llm_request` / `llm_response` | each call to the model: provider (`peer` = `ollama:local`, `ollama:cloud`, `gemini`, `deepseek` or `mistral`), host, model, the messages and tools sent; then the text, tool calls, token counts, duration and error |
 | `out` | `llm_call` | the other calls to the provider: listing its models, checking the API key |
 
 Never written: the bearer tokens (only the client's name), the API key, and the values of fields called
@@ -647,8 +712,12 @@ src/clara/
   settings.py   environment configuration
   memory.py     SQLite: people, accounts, facts, history, the list of conversations
   linking.py    single-use codes that prove control of an account before it is linked
-  llm.py        LlmBackend interface + Ollama implementation
-  providers.py  local / cloud providers, switchable live, saved in runtime.json
+  llm.py        LlmBackend interface; Ollama, and the OpenAI-compatible API (Gemini, DeepSeek, Mistral)
+  providers.py  local / cloud / gemini / deepseek / mistral, switchable live, saved in runtime.json
+  projects.py   projects: their files (the tables are in memory.py), what the prompt says of them, their tools
+  ingest.py     the text of uploaded files: text, code, PDF, .docx, .zip; what is left out
+  github.py     downloads a snapshot of a GitHub repository
+  projectapi.py the routes of projects
   tools.py      tools the model can call
   reminders.py  reminders: parsing, repeats, the scheduler
   users.py      users, password hashes, login tokens (the tables are in memory.py)
@@ -681,6 +750,5 @@ config/system_prompt.md   Clara's personality, re-read when edited
 ## Next steps
 
 - Semantic recall of facts (embeddings).
-- A backend that is not Ollama: implement `LlmBackend.stream()` (the two providers, local and cloud, are
-  both Ollama).
+- Semantic search in projects (embeddings), for the projects too big to be read whole.
 - Scheduled / proactive tasks.

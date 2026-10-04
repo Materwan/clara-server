@@ -23,7 +23,6 @@ administration of users and people, reading a PDF, and the web site itself (`web
 from __future__ import annotations
 
 import asyncio
-import io
 import logging
 import time
 from pathlib import Path
@@ -34,7 +33,9 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from . import ingest
 from .auth import COOKIE, WEB_HEADER, Admin, Client, LoggedIn
+from .ingest import IngestError
 from .memory import MergeRefused
 from .users import User, UserError, generate_password
 
@@ -206,22 +207,9 @@ async def sign_out_device(session_id: int, caller: LoggedIn, request: Request) -
 # ----------------------------------------------------------------------
 def pdf_text(data: bytes) -> tuple[str, int]:
     try:
-        from pypdf import PdfReader
-        from pypdf.errors import PdfReadError
-    except ImportError:
-        raise HTTPException(501, "Reading PDF files needs pypdf on the server: pip install pypdf") from None
-    try:
-        reader = PdfReader(io.BytesIO(data))
-        if reader.is_encrypted and not reader.decrypt(""):
-            raise HTTPException(422, "This PDF is protected by a password.")
-        pages = [(page.extract_text() or "").strip() for page in reader.pages]
-    except HTTPException:
-        raise
-    except (PdfReadError, ValueError, KeyError, TypeError, OSError) as error:
-        raise HTTPException(422, f"This file could not be read as a PDF ({error}).") from None
-    if not any(pages):
-        raise HTTPException(422, "This PDF has no text to read (a scanned PDF?).")
-    return "\n\n".join(f"[page {n}]\n{page}" for n, page in enumerate(pages, 1) if page), len(pages)
+        return ingest.pdf_text(data)
+    except IngestError as error:
+        raise HTTPException(501 if "pypdf" in str(error) else 422, str(error)) from None
 
 
 @router.post("/v1/documents/extract")

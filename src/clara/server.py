@@ -6,6 +6,8 @@
     GET    /v1/memory/facts             facts of an account's person
     POST   /v1/memory/facts
     DELETE /v1/memory/facts/{id}
+    GET    /v1/settings                 the settings of an account's person (notify_after: seconds a task takes
+    PATCH  /v1/settings                 before it notifies them when done; 0: never; null: the server's default)
     POST   /v1/accounts/link-code       a code proving control of an account
     POST   /v1/accounts/link            "this account is the same person as that one" (needs the code)
     POST   /v1/turns/{id}/tool-results  a client's answer to a `tool_requests` event
@@ -16,8 +18,10 @@
     GET    /v1/notifications/stream     Server-Sent Events of an account: `reminder`, `notification`, `server`
                                         (also served as /v1/reminders/stream)
     GET    /v1/conversations            the conversations an account's person started on its surface
+                                        (?project=<id>: those of a project; ?project=none: those in none)
     GET    /v1/conversations/{id}/messages  its questions and answers, to show it again
-    PATCH  /v1/conversations/{id}       rename, pin
+    PATCH  /v1/conversations/{id}       rename, pin, move to a project
+    GET|POST|PATCH|DELETE /v1/projects...  a person's projects: their files and repositories (projectapi.py)
     POST   /v1/conversations/{id}/title Clara writes its title (if nobody has)
     GET    /v1/conversations/{id}       size of the context, summary
     POST   /v1/conversations/{id}/compact   summarise the older messages
@@ -37,6 +41,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import dataclasses
 import json
 import logging
 import sys
@@ -65,10 +70,13 @@ from .clientapi import install as install_clients
 from .commands import CommandContext, CommandResult, registry
 from .discord_bot.local import LocalBackend
 from .discord_bot.service import DiscordService
+from .github import GitHub
 from .lifecycle import Lifecycle
 from .linking import LinkCodes
-from .memory import MAX_TITLE_LENGTH, ConversationInfo, Memory, MergeRefused, Person
+from .memory import ANY_PROJECT, MAX_NOTIFY_AFTER, MAX_TITLE_LENGTH, ConversationInfo, Memory, MergeRefused, Person
 from .notifications import MAX_TARGETS, MAX_TEXT, MAX_TITLE, SURFACE_RE, NotificationError, Notifier
+from .projectapi import install as install_projects
+from .projects import Projects
 from .prompt import SystemPrompt
 from .providers import ProviderManager
 from .ratelimit import FailureLimiter
@@ -121,6 +129,8 @@ class ChatBody(_Body):
     roster: list[RosterEntry] = Field(default_factory=list, max_length=MAX_ROSTER)
     focus: list[ExternalId] = Field(default_factory=list, max_length=20)
     mode: Literal["answer", "observe", "maybe"] = "answer"
+    # The project a new conversation is part of (one that exists stays in its own, see PATCH /v1/conversations)
+    project: int | None = Field(default=None, ge=1)
 
     def to_request(self, roster: tuple[Person, ...] = (), focus: tuple[Person, ...] = (), mode: str = "") -> ChatRequest:
         return ChatRequest(
@@ -186,6 +196,14 @@ class NotificationBody(_Body):
     conversation: str | None = Field(default=None, min_length=1, max_length=200)  # what it is about, if any
 
 
+class SettingsBody(_Body):
+    surface: Surface
+    user_id: ExternalId
+    user_name: str | None = Field(default=None, max_length=80)
+    # seconds a task takes before it notifies its person when done; 0: never; null: the server's default
+    notify_after: int | None = Field(ge=0, le=MAX_NOTIFY_AFTER)
+
+
 class AccountBody(_Body):
     surface: Surface
     user_id: ExternalId
@@ -194,6 +212,7 @@ class AccountBody(_Body):
 class ConversationBody(AccountBody):
     title: str | None = Field(default=None, max_length=MAX_TITLE_LENGTH)  # "": no title
     pinned: bool | None = None
+    project: int | None = Field(default=None, ge=1)  # given as null: out of its project
 
 
 def describe_conversation(info: ConversationInfo) -> dict:
@@ -205,6 +224,7 @@ def describe_conversation(info: ConversationInfo) -> dict:
         "created_at": info.created_at,
         "updated_at": info.updated_at,
         "preview": info.preview,
+        "project": info.project_id,
     }
 
 
@@ -263,6 +283,9 @@ def create_app(
     notifier = Notifier(memory)
     reminders = ReminderService(memory, notifier=notifier)
     web = WebClient(settings.ollama_api_key) if settings.web_tools and settings.ollama_api_key else None
+    projects = Projects(
+        memory, settings.project_max_bytes, settings.project_max_files, settings.project_inline_percent
+    )
     agent = Agent(
         memory,
         providers,
@@ -282,6 +305,7 @@ def create_app(
         reminders=reminders,
         notifier=notifier,
         long_turn_seconds=settings.notify_long_turn,
+        projects=projects,
     )
 
     if settings.reminder_ai_timeout:
@@ -349,6 +373,8 @@ def create_app(
     app.state.lifecycle = lifecycle
     app.state.providers = providers
     app.state.discord = discord_bot
+    app.state.projects = projects
+    app.state.github = GitHub(settings.github_token)
     app.state.commands = CommandContext(
         settings, memory, agent, providers, time.monotonic(), f"{settings.host}:{settings.port}", lifecycle,
         notifier, tailscale, users, discord_bot,
@@ -381,6 +407,22 @@ def create_app(
                 found[person.id] = Person(person.id, " ".join(name.split()) or person.name)
         return tuple(found.values())
 
+    def own_project_id(surface: str, user_id: str, project_id: int) -> int:
+        person = memory.find_person(surface, user_id)
+        project = projects.get(project_id)
+        if person is None or project is None or project.person_id != person.id:
+            raise HTTPException(404, "No such project of yours")
+        return project.id
+
+    def conversation_project(body: ChatBody) -> int | None:
+        """The project of the conversation: the one it is in, or (a new one) the one the message names."""
+        info = memory.conversation_info(body.conversation or f"{body.surface}:{body.user_id}")
+        if info is not None:
+            # only for its owner: a conversation shared with others never brings someone's files to another
+            person = memory.find_person(body.surface, body.user_id)
+            return info.project_id if person is not None and info.person_id == person.id else None
+        return own_project_id(body.surface, body.user_id, body.project) if body.project is not None else None
+
     def checked(http: Request, client: str, body: ChatBody) -> ChatRequest:
         refuse_when_stopping()
         require_account(http, client, body.surface, body.user_id)
@@ -399,6 +441,9 @@ def create_app(
         if mode == "maybe" and not memory.chime_allowed(body.space):
             mode = "observe"  # an administrator did not let Clara answer what is not for her there
         request = body.to_request(roster, focus, mode)
+        project = None if body.ephemeral else conversation_project(body)
+        if project is not None:
+            request = dataclasses.replace(request, project=project)
         try:
             agent.validate(request)
         except ValueError as error:
@@ -590,6 +635,27 @@ def create_app(
             raise HTTPException(404, "No such fact for this person")
         return {"deleted": fact_id}
 
+    def describe_settings(person: Person | None) -> dict:
+        own = memory.notify_after(person.id) if person else None
+        return {
+            "notify_after": own,  # null: not set, the server's default applies
+            "notify_after_default": settings.notify_long_turn,
+            "notify_after_effective": settings.notify_long_turn if own is None else own,
+        }
+
+    @app.get("/v1/settings")
+    async def get_settings(client: Client, http: Request, surface: Surface, user_id: ExternalId) -> dict:
+        """The settings of an account's person (the defaults for someone the server does not know yet)."""
+        require_account(http, client, surface, user_id)
+        return describe_settings(memory.find_person(surface, user_id))
+
+    @app.patch("/v1/settings")
+    async def update_settings(body: SettingsBody, client: Client, http: Request) -> dict:
+        require_account(http, client, body.surface, body.user_id)
+        person = memory.resolve(body.surface, body.user_id, body.user_name)
+        memory.set_notify_after(person.id, body.notify_after)
+        return describe_settings(person)
+
     @app.post("/v1/accounts/link-code")
     async def issue_link_code(body: LinkCodeBody, client: Client, http: Request) -> dict:
         """Step 1, from the client of the account to attach: a code valid for ten minutes."""
@@ -644,12 +710,15 @@ def create_app(
         user_id: ExternalId,
         q: Annotated[str, Query(max_length=200)] = "",
         limit: Annotated[int, Query(ge=1, le=500)] = 200,
+        project: Annotated[str | None, Query(pattern=r"^(none|[0-9]{1,18})$")] = None,
     ) -> dict:
         """The conversations the account's person started on this surface, pinned first, then the last
-        written in; `q` keeps those whose title, messages or summary contain it."""
+        written in; `q` keeps those whose title, messages or summary contain it, `project` those of a project
+        ("none": those in no project)."""
         require_account(http, client, surface, user_id)
         person = memory.find_person(surface, user_id)
-        found = memory.conversations_of(person.id, surface, q, limit) if person else []
+        which: int | str | None = ANY_PROJECT if project is None else None if project == "none" else int(project)
+        found = memory.conversations_of(person.id, surface, q, limit, which) if person else []
         return {"conversations": [describe_conversation(info) for info in found]}
 
     # Before GET /v1/conversations/{conversation:path}, which would take ".../messages" for an id
@@ -681,6 +750,9 @@ def create_app(
         conversation: str, body: ConversationBody, client: Client, http: Request
     ) -> dict:
         own_conversation(client, http, body.surface, body.user_id, conversation)
+        if "project" in body.model_fields_set:  # null: out of its project
+            project = None if body.project is None else own_project_id(body.surface, body.user_id, body.project)
+            memory.set_conversation_project(conversation, project)
         memory.update_conversation(conversation, body.title, body.pinned)
         return describe_conversation(memory.conversation_info(conversation))
 
@@ -762,6 +834,7 @@ def create_app(
 
     install(app)
     install_clients(app)
+    install_projects(app)
     install_web(app)
     return app
 

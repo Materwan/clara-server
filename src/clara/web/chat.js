@@ -1,9 +1,11 @@
-// The chat page: conversations in the navigation rail, the conversation, documents, the context meter.
+// The chat page: conversations in the navigation rail, the conversation, documents, the context meter. The
+// conversations of projects are not in the rail (they are on their project's page) unless a search finds them.
 
 import { ApiError, api, conversationPath, streamChat } from "./api.js";
 import { DocumentError, MAX_TOTAL_CHARS, compose, readDocument, splitMessage, totalChars } from "./documents.js";
 import { icon, mark, ring } from "./icons.js";
 import { renderMarkdown } from "./markdown.js";
+import { chooseProject, listProjects } from "./projects.js";
 import { clear, confirmDialog, h, pageHead, parseDate, popupMenu, promptDialog, randomId, toast, toggleRail } from "./ui.js";
 
 const SURFACE = "web";
@@ -17,13 +19,14 @@ function greeting() {
   return hour < 5 ? "Hello" : hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
 }
 
-export function mountChat(container, user, { slot, fresh = false } = {}) {
+export function mountChat(container, user, { slot, fresh = false, project = null, open: openId = null } = {}) {
   const who = { surface: SURFACE, user_id: user.name };
   const lastKey = `clara.last.${user.name}`;
   const displayName = user.person?.name || user.name;
   const state = {
     list: [], query: "", current: null, messages: [], summary: "", earlier: false,
     busy: false, abort: null, docs: [], context: null, live: null, stick: true,
+    project: null, projects: new Map(), // the project of the conversation shown; every project's name, by id
   };
 
   // ---- the conversations, in the rail ----------------------------------------------------------------
@@ -34,6 +37,7 @@ export function mountChat(container, user, { slot, fresh = false } = {}) {
 
   // ---- the page ---------------------------------------------------------------------------------------
   const title = h("h1", { class: "title grow" }, "New chat");
+  const projectChip = h("a", { class: "project-chip", hidden: true, title: "Open the project" }, icon("folder", { size: 15 }), h("span", {}));
   const meter = ring(18);
   const percentText = h("span", {}, "0%");
   const context = h("div", { class: "context", role: "img", "aria-label": "Context used", hidden: true },
@@ -56,7 +60,7 @@ export function mountChat(container, user, { slot, fresh = false } = {}) {
     h("div", { class: "composer-inner" }, chips, input, h("div", { class: "composer-bar" }, attach, picker, docInfo, sendButton)),
     h("p", { class: "composer-hint" }, "Enter to send, Shift + Enter for a new line. Drop files here to attach them."));
   const root = h("section", { class: "page chat" },
-    pageHead(title, context, compactButton, moreButton, newButton), messagesBox, composer);
+    pageHead(h("div", { class: "grow chat-title" }, title, projectChip), context, compactButton, moreButton, newButton), messagesBox, composer);
   container.append(root);
 
   // ---- the list of conversations ----------------------------------------------------------------------
@@ -77,6 +81,12 @@ export function mountChat(container, user, { slot, fresh = false } = {}) {
     renderHead();
   }
 
+  async function loadProjects() {
+    try {
+      state.projects = new Map((await listProjects(user)).map((item) => [item.id, item.name]));
+    } catch { /* the chips just show no name */ }
+  }
+
   function groupOf(info) {
     if (info.pinned) return "Pinned";
     const date = parseDate(info.updated_at);
@@ -91,13 +101,15 @@ export function mountChat(container, user, { slot, fresh = false } = {}) {
 
   function renderList() {
     clear(listBox);
-    if (!state.list.length) {
+    // the conversations of projects are listed on their project's page; a search finds them here too
+    const shown = state.query ? state.list : state.list.filter((info) => !info.project);
+    if (!shown.length) {
       listBox.append(h("p", { class: "empty-note" }, state.query ? "No conversation matches." : "Your conversations will appear here."));
       return;
     }
     const order = ["Pinned", "Today", "Yesterday", "Previous 7 days", "Older"];
     const groups = new Map(order.map((name) => [name, []]));
-    for (const info of state.list) groups.get(groupOf(info)).push(info);
+    for (const info of shown) groups.get(groupOf(info)).push(info);
     for (const [name, items] of groups) {
       if (!items.length) continue;
       listBox.append(h("div", { class: "group-title" }, name));
@@ -109,6 +121,7 @@ export function mountChat(container, user, { slot, fresh = false } = {}) {
     return [
       { label: "Rename", icon: "edit", run: () => rename(info) },
       { label: info.pinned ? "Unpin" : "Pin to the top", icon: "pin", run: () => pin(info) },
+      { label: info.project ? "Move to another project" : "Move to a project", icon: "folder", run: () => move(info) },
       "-",
       { label: "Delete", icon: "trash", danger: true, run: () => remove(info) },
     ];
@@ -123,7 +136,9 @@ export function mountChat(container, user, { slot, fresh = false } = {}) {
       class: "convo" + (active ? " active" : ""), role: "listitem", tabindex: 0, "aria-current": active ? "true" : null,
       onclick: () => { open(info.id); toggleRail(false); },
       onkeydown: (event) => { if (event.key === "Enter" && event.target === event.currentTarget) { open(info.id); toggleRail(false); } },
-    }, info.pinned && h("span", { class: "pin", title: "Pinned" }, icon("pin", { size: 15 })), h("span", { class: "title", title: label }, label), more);
+    }, info.pinned && h("span", { class: "pin", title: "Pinned" }, icon("pin", { size: 15 })), h("span", { class: "title", title: label }, label),
+    info.project && h("span", { class: "convo-project", title: `In the project ${state.projects.get(info.project) || ""}` }, icon("folder", { size: 14 })),
+    more);
   }
 
   function conversationMenu(anchor) {
@@ -141,6 +156,18 @@ export function mountChat(container, user, { slot, fresh = false } = {}) {
       await api.patch(conversationPath(info.id), { ...who, title: value.trim() });
       if (!value.trim()) await api.post(conversationPath(info.id) + "/title", who).catch(() => {});
       await loadList();
+    });
+  }
+
+  async function move(info) {
+    const target = await chooseProject(user, info.project);
+    if (target === null || target === (info.project || 0)) return;
+    await safely(async () => {
+      await api.patch(conversationPath(info.id), { ...who, project: target || null });
+      await loadProjects();
+      if (info.id === state.current) state.project = target || null;
+      await loadList();
+      toast(target ? `Moved to ${state.projects.get(target) || "the project"}.` : "Moved out of its project.");
     });
   }
 
@@ -171,10 +198,17 @@ export function mountChat(container, user, { slot, fresh = false } = {}) {
     const info = state.list.find((item) => item.id === state.current);
     title.textContent = info ? labelOf(info) : "New chat";
     moreButton.hidden = !info;
+    if (info) state.project = info.project || null;
+    projectChip.hidden = !state.project;
+    if (state.project) {
+      projectChip.href = `#/projects/${state.project}`;
+      projectChip.lastChild.textContent = state.projects.get(state.project) || "Project";
+    }
   }
 
-  function newChat() {
+  function newChat(inProject = null) {
     if (state.busy) return toast("Wait for Clara to finish, or stop the answer first.");
+    state.project = inProject;
     state.current = `${SURFACE}:${user.name}:${randomId()}`;
     state.messages = [];
     state.summary = "";
@@ -200,9 +234,10 @@ export function mountChat(container, user, { slot, fresh = false } = {}) {
       state.messages = body.messages.map((m) => ({ role: m.role, content: m.content }));
       state.summary = body.summary || "";
       state.earlier = Boolean(body.earlier);
+      state.project = body.project || null;
     } catch (error) {
       if (error.status === 404 || error.status === 403) {
-        state.messages = []; state.summary = ""; state.earlier = false;
+        state.messages = []; state.summary = ""; state.earlier = false; state.project = null;
       } else {
         return toast(error.detail || String(error), true);
       }
@@ -262,10 +297,11 @@ export function mountChat(container, user, { slot, fresh = false } = {}) {
     if (state.summary) messagesInner.append(h("div", { class: "summary" }, h("strong", {}, "Earlier in this conversation: "), state.summary));
     else if (state.earlier) messagesInner.append(h("div", { class: "summary" }, "Older messages are not shown."));
     if (!state.messages.length && !state.live) {
+      const projectName = state.project && (state.projects.get(state.project) || "this project");
       messagesInner.append(h("div", { class: "welcome" },
         h("div", { class: "halo" }, mark(52)),
         h("h1", {}, `${greeting()}, ${displayName.charAt(0).toUpperCase()}${displayName.slice(1)}`),
-        h("p", {}, "What would you like to talk about?")));
+        h("p", {}, projectName ? `A new chat in ${projectName}: Clara can use its files and instructions.` : "What would you like to talk about?")));
     }
     for (const message of state.messages) messagesInner.append(messageNode(message));
     scrollDown(true);
@@ -336,6 +372,7 @@ export function mountChat(container, user, { slot, fresh = false } = {}) {
       const request = {
         ...who, user_name: displayName, message, conversation, instructions: INSTRUCTIONS,
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        project: state.project || undefined, // a new conversation goes in it; one that exists stays where it is
       };
       for await (const event of streamChat(request, state.abort.signal)) {
         if (event.type === "token") {
@@ -440,8 +477,9 @@ export function mountChat(container, user, { slot, fresh = false } = {}) {
 
   // ---- start -------------------------------------------------------------------------------------------
   (async () => {
-    await loadList();
-    if (fresh) return newChat();
+    await Promise.all([loadList(), loadProjects()]);
+    if (fresh) return newChat(project);
+    if (openId) return open(openId);
     let last = null;
     try { last = localStorage.getItem(lastKey); } catch { /* private mode */ }
     const start = state.list.find((info) => info.id === last) || state.list[0];
@@ -450,7 +488,7 @@ export function mountChat(container, user, { slot, fresh = false } = {}) {
   })();
 
   return {
-    newChat,
+    newChat: () => newChat(),
     destroy() { state.abort?.abort(); clearTimeout(searchTimer); root.remove(); for (const node of railPart) node.remove(); },
   };
 }

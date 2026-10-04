@@ -103,7 +103,24 @@ def _positive_int(env: Mapping[str, str], key: str, default: int) -> int:
 
 DEFAULT_LOCAL_HOST = "http://localhost:11434"
 DEFAULT_CLOUD_HOST = "https://ollama.com"
-PROVIDER_IDS = ("local", "cloud")
+PROVIDER_IDS = ("local", "cloud", "gemini", "deepseek", "mistral")
+# The services reached through their OpenAI-compatible API: id -> (key variable, host, model, context window)
+API_PROVIDERS = {
+    "gemini": ("GEMINI_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-flash-latest", 1_048_576),
+    "deepseek": ("DEEPSEEK_API_KEY", "https://api.deepseek.com", "deepseek-flash", 1_000_000),
+    "mistral": ("MISTRAL_API_KEY", "https://api.mistral.ai/v1", "mistral-large-latest", 131_072),
+}
+
+
+@dataclass(frozen=True)
+class ApiProvider:
+    """One of API_PROVIDERS as configured: CLARA_<ID>_HOST, CLARA_<ID>_MODEL, CLARA_<ID>_CONTEXT_WINDOW."""
+
+    key_name: str
+    host: str
+    model: str
+    context_window: int
+    api_key: str | None = field(default=None, repr=False)
 
 
 def _flag(env: Mapping[str, str], key: str, default: bool = False) -> bool:
@@ -185,6 +202,15 @@ class Settings:
     discord_token: str | None = field(default=None, repr=False)
     discord_auto_start: bool = False
     discord_invite_url: str = ""
+    # Gemini, DeepSeek and Mistral (providers.py), by id; and whether DeepSeek thinks before answering
+    api_providers: dict[str, ApiProvider] = field(default_factory=dict)
+    deepseek_thinking: bool = True
+    # Projects (projects.py): what one may hold, the share of the context window under which its files are all
+    # put in the prompt (beyond, Clara reads them with tools), and the token that reaches private GitHub repos
+    project_max_bytes: int = 20_000_000
+    project_max_files: int = 5_000
+    project_inline_percent: int = 40
+    github_token: str | None = field(default=None, repr=False)
 
     @property
     def logs_dir(self) -> Path:
@@ -259,6 +285,23 @@ class Settings:
             raise SettingsError(f"CLARA_PROVIDER must be one of {', '.join(PROVIDER_IDS)}")
         if default_provider == "cloud" and not api_key:
             raise SettingsError("CLARA_PROVIDER=cloud needs OLLAMA_API_KEY.")
+        api_providers = {
+            name: ApiProvider(
+                key_name,
+                text(f"CLARA_{name.upper()}_HOST", host).rstrip("/"),
+                text(f"CLARA_{name.upper()}_MODEL", model),
+                _positive_int(env, f"CLARA_{name.upper()}_CONTEXT_WINDOW", window),
+                text(key_name) or None,
+            )
+            for name, (key_name, host, model, window) in API_PROVIDERS.items()
+        }
+        if default_provider in api_providers and not api_providers[default_provider].api_key:
+            raise SettingsError(
+                f"CLARA_PROVIDER={default_provider} needs {api_providers[default_provider].key_name}."
+            )
+        inline_percent = _non_negative_int(env, "CLARA_PROJECT_INLINE_PERCENT", 40)
+        if inline_percent > 90:
+            raise SettingsError("CLARA_PROJECT_INLINE_PERCENT is a share of the context window: at most 90")
 
         return cls(
             host=text("CLARA_HOST", "127.0.0.1"),
@@ -303,4 +346,10 @@ class Settings:
             discord_token=text("DISCORD_BOT_TOKEN") or None,
             discord_auto_start=_flag(env, "AUTO_START_DISCORD_BOT"),
             discord_invite_url=text("DISCORD_BOT_INVIT_URL"),
+            api_providers=api_providers,
+            deepseek_thinking=_flag(env, "CLARA_DEEPSEEK_THINKING", default=True),
+            project_max_bytes=_positive_int(env, "CLARA_PROJECT_MAX_MB", 20) * 1_000_000,
+            project_max_files=_positive_int(env, "CLARA_PROJECT_MAX_FILES", 5_000),
+            project_inline_percent=inline_percent,
+            github_token=text("GITHUB_TOKEN") or None,
         )

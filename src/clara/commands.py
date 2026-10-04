@@ -218,7 +218,7 @@ async def status_command(ctx: CommandContext, args: str) -> str:
 
 @registry.command(
     "provider",
-    "[local|cloud]",
+    "[local|cloud|gemini|deepseek|mistral]",
     "Show the providers, or switch where the model runs (saved across restarts)",
     lambda ctx: list(ctx.providers.configs),
 )
@@ -237,7 +237,7 @@ async def provider_command(ctx: CommandContext, args: str) -> str:
 
     rows = []
     for config in providers.configs.values():
-        note = "" if config.usable else "(no OLLAMA_API_KEY)"
+        note = "" if config.usable else f"(no {config.key_name})"
         if config.needs_key and config.usable:
             note = "(key set)"
         rows.append(

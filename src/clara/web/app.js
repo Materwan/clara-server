@@ -1,5 +1,5 @@
-// Clara's web site: sign in, then a chat, what Clara remembers, your account, and (for administrators) the
-// administration. Everything talks to the same HTTP API as the other clients, as the surface "web".
+// Clara's web site: sign in, then a chat, projects, what Clara remembers, your account, and (for administrators)
+// the administration. Everything talks to the same HTTP API as the other clients, as the surface "web".
 
 import { mountAccount, mountMemory } from "./account.js";
 import { mountAdmin } from "./admin.js";
@@ -7,6 +7,7 @@ import { ApiError, api, events } from "./api.js";
 import { mountChat } from "./chat.js";
 import { mountDiscord } from "./discord.js";
 import { icon, mark } from "./icons.js";
+import { mountProjects } from "./projects.js";
 import { avatar, clear, h, toast, toggleRail } from "./ui.js";
 
 const app = document.getElementById("app");
@@ -84,7 +85,7 @@ events.addEventListener("signed-out", () => { if (user) showLogin("Your session 
 
 // ---- the shell and the pages -----------------------------------------------------------------------------
 
-const PAGES = { chat: ["Chat", "chat"], memory: ["Memory", "memory"], account: ["Account", "user"], discord: ["Discord", "bot"], admin: ["Admin", "admin"] };
+const PAGES = { chat: ["Chat", "chat"], projects: ["Projects", "folder"], memory: ["Memory", "memory"], account: ["Account", "user"], discord: ["Discord", "bot"], admin: ["Admin", "admin"] };
 const ADMIN_PAGES = new Set(["discord", "admin"]);
 
 function shell() {
@@ -149,7 +150,7 @@ function stop() {
 
 function route() {
   if (!user) return;
-  const [, id = "chat", sub] = location.hash.split("/");
+  const [, id = "chat", sub, arg] = location.hash.split("/");
   const name = Object.hasOwn(PAGES, id) && (!ADMIN_PAGES.has(id) || user.is_admin) ? id : "chat";
   for (const link of document.querySelectorAll(".pages a")) {
     const active = link.dataset.page === name;
@@ -166,9 +167,14 @@ function route() {
   clear(slot);
   pageName = name;
   document.title = name === "chat" ? "Clara" : `${PAGES[name][0]} – Clara`;
-  const fresh = wantNewChat;
+  const fresh = wantNewChat || (name === "chat" && sub === "new");
   wantNewChat = false;
-  page = name === "chat" ? mountChat(body, user, { slot, fresh })
+  // #/chat/new/<project>: a new chat in a project; #/chat/open/<conversation>: that conversation
+  const project = name === "chat" && sub === "new" && Number(arg) > 0 ? Number(arg) : null;
+  const openId = name === "chat" && sub === "open" && arg ? decodeURIComponent(arg) : null;
+  if (name === "chat" && sub) history.replaceState(null, "", "#/chat"); // no hashchange: nothing is drawn twice
+  page = name === "chat" ? mountChat(body, user, { slot, fresh, project, open: openId })
+    : name === "projects" ? mountProjects(body, user, sub)
     : name === "memory" ? mountMemory(body, user)
     : name === "account" ? mountAccount(body, user, signOut)
     : name === "discord" ? mountDiscord(body)

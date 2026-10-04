@@ -10,10 +10,12 @@ import pytest
 from clara.client import (
     ClaraApi,
     Notices,
+    command,
     describe_reminder,
     format_event,
     format_reminder,
     listen,
+    parse_notify_after,
     parse_remind,
     take_targets,
 )
@@ -151,6 +153,35 @@ def test_the_client_receives_a_reminder_from_a_real_server(live):
     assert first["text"] == "Announced"
     assert (second["type"], second["text"], second["source"]) == ("notification", "Build finished", "terminal")
     assert third == {"type": "server", "state": "running", "message": "Clara is running"}
+
+
+def test_the_client_sets_and_reads_the_notification_delay_on_a_real_server(live, capsys):
+    app, url = live
+    api = ClaraApi(url, "secret-cli", "erwan", "Erwan", "cli:erwan")
+
+    assert command(api, "/notify-after") is True
+    assert "the server's default" in capsys.readouterr().out
+    command(api, "/notify-after 90")
+    assert "after 90 s of work" in capsys.readouterr().out
+    assert app.state.memory.notify_after(app.state.memory.find_person("cli", "erwan").id) == 90
+    command(api, "/notify-after off")
+    assert "never" in capsys.readouterr().out
+    command(api, "/notify-after soon")  # not understood: nothing is sent
+    assert "Usage: /notify-after" in capsys.readouterr().out
+    assert api.settings()["notify_after"] == 0
+    command(api, "/notify-after default")
+    assert api.settings()["notify_after"] is None
+
+
+@pytest.mark.parametrize(("text", "seconds"), [("90", 90), (" OFF ", 0), ("never", 0), ("default", None), ("0", 0)])
+def test_the_notification_delay_is_read_from_the_command(text, seconds):
+    assert parse_notify_after(text) == seconds
+
+
+@pytest.mark.parametrize("text", ["soon", "-5", "1.5", "2m"])
+def test_a_notification_delay_that_is_not_seconds_is_refused(text):
+    with pytest.raises(ValueError, match="Usage"):
+        parse_notify_after(text)
 
 
 def test_the_message_clara_wrote_is_shown_instead_of_the_reminder_name():

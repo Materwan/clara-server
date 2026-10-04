@@ -39,6 +39,7 @@ from .compaction import (
 from .llm import LlmBackend, LlmChunk
 from .memory import ConversationState, Fact, Memory, Person, StoredMessage, TurnRow
 from .notifications import SERVER, SURFACE_RE, NotificationError, Notifier
+from .projects import PROJECT_TOOLS, Projects
 from .prompt import SystemPrompt
 from .reminders import ReminderService
 from .tools import ABOUT_PERSON, Toolbox, ToolContext
@@ -174,6 +175,7 @@ class ChatRequest:
     # "answer" (the message is for Clara), "observe" (it was not: only stored, as context) or "maybe" (it was
     # not, and Clara answers only if she has something worth adding; else it is only stored)
     mode: str = "answer"
+    project: int | None = None  # the project the conversation is in (its files are in the prompt, or read by tools)
 
     @property
     def conversation_id(self) -> str:
@@ -215,8 +217,10 @@ class Agent:
         reminders: ReminderService | None = None,
         notifier: Notifier | None = None,
         long_turn_seconds: float = 0.0,
+        projects: Projects | None = None,
     ):
         self.memory = memory
+        self.projects = projects  # the files of the conversations that are part of a project
         self.reminders = reminders  # lets the model's tools set reminders
         self.notifier = notifier  # lets the model notify, and the agent say when long work is done
         self.long_turn_seconds = long_turn_seconds  # a turn this long notifies its person when done (0: never)
@@ -342,6 +346,8 @@ class Agent:
                 entry: dict = {"role": "assistant", "content": message.content}
                 if message.tool_calls:
                     entry["tool_calls"] = message.tool_calls
+                    if message.thinking:
+                        entry["thinking"] = message.thinking
                 messages.append(entry)
             else:
                 content = message.content if index in recent else OMITTED
@@ -374,9 +380,11 @@ class Agent:
                 for other in request.focus[:MAX_FOCUS]
                 if other.id != person.id
             )
+            project = self._project(request)
             system = self.prompt.render(
                 person, request.surface, facts, now, request.instructions, state.summary, omitted,
                 self.memory.relation(person.id), request.roster, others,
+                project=project.text if project else "",
             )
             messages.append({"role": "system", "content": system})
             stored = self.memory.history(request.conversation_id, self.history_turns, state.upto_id)
@@ -388,6 +396,17 @@ class Agent:
             content = f"[time: {now.strftime('%H:%M')}]\n{note}\n{content}"
         messages.append({"role": "user", "content": content})
         return messages
+
+    def _project(self, request: ChatRequest):
+        if request.project is None or request.ephemeral or self.projects is None:
+            return None
+        return self.projects.context(request.project, self.window)
+
+    def _project_tools_needed(self, request: ChatRequest) -> bool:
+        """Are the files of the request's project too big for the prompt, so that Clara reads them with tools?"""
+        if request.project is None or request.ephemeral or self.projects is None:
+            return False
+        return not self.projects.inline(request.project, self.window)
 
     # ------------------------------------------------------------------
     # A turn
@@ -428,9 +447,18 @@ class Agent:
         except NotificationError as error:
             log.warning("could not notify person %s: %s", person_id, error)
 
+    def notify_threshold(self, person_id: int) -> float:
+        """Seconds a task of this person takes before it notifies them when done (0: never): what they set,
+        else the server's default."""
+        own = self.memory.notify_after(person_id)
+        return self.long_turn_seconds if own is None else own
+
     def _long_turn_done(self, request: ChatRequest, done: dict, seconds: float) -> None:
         """A turn that took long is finished: its person may have gone to do something else, tell them."""
-        if not self.long_turn_seconds or seconds < self.long_turn_seconds or request.ephemeral or request.quiet:
+        if request.ephemeral or request.quiet:
+            return
+        threshold = self.notify_threshold(done["person"]["id"])
+        if not threshold or seconds < threshold:
             return
         reply = " ".join(done["reply"].split())
         if len(reply) > NOTIFIED_REPLY:
@@ -476,9 +504,12 @@ class Agent:
         context = ToolContext(
             person, self.memory, self.reminders, request.timezone, request.surface, request.user_id, conversation,
             self.notifier, roster=tuple(p for p in request.roster if p.id != person.id),
+            projects=self.projects, project_id=request.project,
         )
         client_tools = {schema["function"]["name"] for schema in request.tools}
         hidden = set() if context.roster else {ABOUT_PERSON}
+        if not self._project_tools_needed(request):
+            hidden |= PROJECT_TOOLS
         server_tools = [] if ephemeral or request.no_tools else self.toolbox.schemas_without(hidden)
         schemas = server_tools + list(request.tools)
         turn_id = uuid.uuid4().hex
@@ -516,6 +547,7 @@ class Agent:
                     ):
                         yield event
                     text_parts = []
+                    thinking_parts: list[str] = []
                     round_open = True
                     calls = []
                     round_prompt = round_completion = 0
@@ -527,7 +559,8 @@ class Agent:
                             round_prompt += chunk.prompt_tokens
                             round_completion += chunk.completion_tokens
                             calls.extend(chunk.tool_calls)
-                            if chunk.thinking:  # shown to the client, never stored nor sent back to the model
+                            if chunk.thinking:  # shown to the client; kept only with tool calls (see below)
+                                thinking_parts.append(chunk.thinking)
                                 yield {"type": "thinking", "text": chunk.thinking}
                             if chunk.text:
                                 if separate and chunk.text.strip():
@@ -554,9 +587,18 @@ class Agent:
                         break
 
                     ids = [f"call_{round_number}_{index}" for index in range(len(calls))]
-                    call_dicts = [{"function": {"name": c.name, "arguments": c.arguments}} for c in calls]
-                    messages.append({"role": "assistant", "content": text, "tool_calls": call_dicts})
-                    rows.append(TurnRow("assistant", text, call_dicts))
+                    call_dicts = [
+                        {"function": {"name": c.name, "arguments": c.arguments}}
+                        | ({"extra_content": c.extra} if c.extra else {})
+                        for c in calls
+                    ]
+                    # The reasoning that led to the calls goes back with them (DeepSeek refuses them without it)
+                    thinking = "".join(thinking_parts)
+                    assistant = {"role": "assistant", "content": text, "tool_calls": call_dicts}
+                    if thinking:
+                        assistant["thinking"] = thinking
+                    messages.append(assistant)
+                    rows.append(TurnRow("assistant", text, call_dicts, thinking=thinking))
                     round_open = False
 
                     results: dict[str, str] = {}
@@ -607,9 +649,9 @@ class Agent:
             declined = request.mode == "maybe" and passed(reply)
             if declined:  # nothing to add: the message is kept as context, without the model's work
                 reply, rows = "", []
-                self.memory.add_turn(conversation, person.id, request.message, [], request.prefix)
+                self.memory.add_turn(conversation, person.id, request.message, [], request.prefix, request.project)
             elif not ephemeral and (reply or rows):  # an empty answer would only pollute the history
-                self.memory.add_turn(conversation, person.id, request.message, rows, request.prefix)
+                self.memory.add_turn(conversation, person.id, request.message, rows, request.prefix, request.project)
                 self.memory.set_context_tokens(conversation, context_tokens)
                 if self.compact_percent and 100 * context_tokens / self.window >= self.compact_percent:
                     try:
@@ -650,7 +692,9 @@ class Agent:
         note = f"[This answer was interrupted: {reason}.]"
         rows.append(TurnRow("assistant", f"{partial.strip()}\n\n{note}" if partial.strip() else note))
         try:
-            self.memory.add_turn(request.conversation_id, person.id, request.message, rows, request.prefix)
+            self.memory.add_turn(
+                request.conversation_id, person.id, request.message, rows, request.prefix, request.project
+            )
         except Exception:
             log.exception("could not store the interrupted turn of %s", request.conversation_id)
 

@@ -41,6 +41,9 @@ HELP = """\
 /unremind <id>    cancel one of them
 /notify [@surfaces] <text>
                   send yourself a notification now (e.g. to try your other clients)
+/notify-after [<seconds> | off | default]
+                  how long a task takes before you are notified when it is done
+                  (no argument: show it; off: never; default: the server's)
 /new              start a fresh conversation thread (facts are kept)
 /quit             leave"""
 
@@ -138,6 +141,19 @@ class ClaraApi:
         response.raise_for_status()
         return response.json()
 
+    def settings(self) -> dict:
+        response = self.http.get("/v1/settings", params=self.identity())
+        response.raise_for_status()
+        return response.json()
+
+    def set_notify_after(self, seconds: int | None) -> dict:
+        """Seconds a task takes before it notifies this user when done (0: never; None: the server's default)."""
+        response = self.http.patch(
+            "/v1/settings", json={**self.identity(), "user_name": self.name, "notify_after": seconds}
+        )
+        response.raise_for_status()
+        return response.json()
+
     def reminders(self) -> list[dict]:
         response = self.http.get("/v1/reminders", params=self.identity())
         response.raise_for_status()
@@ -219,6 +235,28 @@ def parse_remind(argument: str, now: datetime) -> tuple[datetime, str, str]:
 
 def local(moment: str) -> str:
     return datetime.fromisoformat(moment).astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def parse_notify_after(argument: str) -> int | None:
+    """Seconds from the argument of /notify-after: a number, `off` (0: never) or `default` (None)."""
+    word = argument.strip().lower()
+    if word == "default":
+        return None
+    if word in ("off", "never"):
+        return 0
+    if not word.isdigit():
+        raise ValueError("Usage: /notify-after <seconds> | off | default")
+    return int(word)
+
+
+def describe_notify_after(settings: dict) -> str:
+    def words(seconds: int) -> str:
+        return "never" if seconds == 0 else f"after {seconds} s of work"
+
+    own, default = settings["notify_after"], settings["notify_after_default"]
+    if own is None:
+        return f"You are notified {words(default)} when a task is done (the server's default)."
+    return f"You are notified {words(own)} when a task is done (the server's default: {words(default)})."
 
 
 def describe_reminder(reminder: dict) -> str:
@@ -354,6 +392,14 @@ def command(api: ClaraApi, line: str) -> bool:
         targets, text = take_targets(argument)
         sent = api.notify(text, targets=targets)
         print(f"Sent, shown on {', '.join(sent['targets']) or 'all your clients'}.")
+    elif name == "/notify-after":
+        if argument:
+            try:
+                api.set_notify_after(parse_notify_after(argument))
+            except ValueError as error:
+                print(error)
+                return True
+        print(describe_notify_after(api.settings()))
     elif name == "/reminders":
         print("\n".join(describe_reminder(r) for r in api.reminders()) or "(none)")
     elif name == "/unremind" and argument.isdigit():

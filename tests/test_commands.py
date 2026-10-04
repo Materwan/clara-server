@@ -162,5 +162,5 @@ async def test_a_crashing_command_does_not_kill_the_console(ctx, monkeypatch):
 
 async def test_describe_gives_completion_choices(ctx):
     by_name = {entry["name"]: entry for entry in registry.describe(ctx)}
-    assert by_name["provider"]["choices"] == ["local", "cloud"]
+    assert by_name["provider"]["choices"] == ["local", "cloud", "gemini", "deepseek", "mistral"]
     assert "status" in by_name["help"]["choices"]

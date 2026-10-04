@@ -170,6 +170,63 @@ async def test_a_quick_turn_or_a_quiet_one_notifies_nobody(memory, tmp_path, not
     assert notifications(memory) == []
 
 
+async def slow_turn(agent: Agent, seconds: float) -> None:
+    """Make every turn of the agent take `seconds` more."""
+    agent_turn = agent._turn
+
+    async def slow(request, owner):
+        await asyncio.sleep(seconds)
+        async for event in agent_turn(request, owner):
+            yield event
+
+    agent._turn = slow
+
+
+async def test_a_person_s_own_delay_replaces_the_servers(memory, tmp_path, notifier, erwan):
+    agent = make_agent(memory, tmp_path, FakeBackend(say("Hi"), say("Hi")), notifier, long_turn_seconds=3600)
+    await slow_turn(agent, 1.05)
+    await talk(agent, "hello")  # the server would wait an hour
+    assert notifications(memory) == []
+    memory.set_notify_after(erwan.id, 1)
+    await talk(agent, "hello")
+    assert [event.title for event in notifications(memory)] == ["Answer ready"]
+
+
+async def test_a_person_can_turn_the_notification_off(memory, tmp_path, notifier, erwan):
+    agent = make_agent(memory, tmp_path, FakeBackend(say("Hi")), notifier, long_turn_seconds=1)
+    await slow_turn(agent, 1.05)
+    memory.set_notify_after(erwan.id, 0)  # never, whatever the server says
+    await talk(agent, "hello")
+    assert notifications(memory) == []
+
+
+# --- the delay a person sets ----------------------------------------------------------------------
+
+
+def test_the_delay_is_the_servers_until_a_person_sets_one(memory, erwan):
+    assert memory.notify_after(erwan.id) is None
+    assert memory.set_notify_after(erwan.id, 90) == 90
+    assert memory.notify_after(erwan.id) == 90
+    assert memory.set_notify_after(erwan.id, 0) == 0  # never is not "not set"
+    assert memory.notify_after(erwan.id) == 0
+    memory.set_notify_after(erwan.id, None)
+    assert memory.notify_after(erwan.id) is None
+
+
+@pytest.mark.parametrize("seconds", [-1, 7 * 86400 + 1])
+def test_a_delay_out_of_range_is_refused(memory, erwan, seconds):
+    with pytest.raises(ValueError):
+        memory.set_notify_after(erwan.id, seconds)
+
+
+def test_merging_two_people_keeps_the_delay_that_was_set(memory):
+    kept = memory.resolve("cli", "erwan", "Erwan")
+    other = memory.resolve("discord", "1", "Erwan")
+    memory.set_notify_after(other.id, 30)
+    memory.link_account("discord", "1", kept)
+    assert memory.notify_after(kept.id) == 30
+
+
 async def test_a_summarised_conversation_notifies_its_person(memory, tmp_path, notifier):
     backend = FakeBackend(say("one"), say("two"), say("A summary."))
     agent = make_agent(memory, tmp_path, backend, notifier, compact_percent=0, keep_recent_turns=1)
@@ -230,6 +287,35 @@ def test_http_refuses_bad_notifications(client):
     for _ in range(RATE_LIMIT):
         client.post("/v1/notifications", json={**me, "text": "x"}, headers=AUTH)
     assert client.post("/v1/notifications", json={**me, "text": "x"}, headers=AUTH).status_code == 429
+
+
+def test_a_person_reads_and_sets_their_delay_over_http(client):
+    me = {"surface": "cli", "user_id": "erwan"}
+    default = client.app.state.settings.notify_long_turn
+    assert client.get("/v1/settings", params=me).status_code == 401
+    first = client.get("/v1/settings", params=me, headers=AUTH).json()  # nobody known yet: the defaults
+    assert first == {"notify_after": None, "notify_after_default": default, "notify_after_effective": default}
+    saved = client.patch("/v1/settings", json={**me, "notify_after": 45}, headers=AUTH).json()
+    assert (saved["notify_after"], saved["notify_after_effective"]) == (45, 45)
+    assert client.get("/v1/settings", params=me, headers=AUTH).json()["notify_after"] == 45
+    assert client.patch("/v1/settings", json={**me, "notify_after": 0}, headers=AUTH).json()["notify_after_effective"] == 0
+    back = client.patch("/v1/settings", json={**me, "notify_after": None}, headers=AUTH).json()
+    assert (back["notify_after"], back["notify_after_effective"]) == (None, default)
+
+
+@pytest.mark.parametrize("value", [-1, 7 * 86400 + 1, "soon"])
+def test_http_refuses_a_bad_delay(client, value):
+    body = {"surface": "cli", "user_id": "erwan", "notify_after": value}
+    assert client.patch("/v1/settings", json=body, headers=AUTH).status_code == 422
+    assert client.patch("/v1/settings", json={"surface": "cli", "user_id": "erwan"}, headers=AUTH).status_code == 422
+
+
+def test_http_settings_respect_the_surface_limits(settings):
+    limited = replace(settings, client_surfaces={"terminal": frozenset({"cli"})})
+    with TestClient(create_app(limited, fake_providers(limited, FakeBackend()))) as http:
+        body = {"surface": "discord", "user_id": "1", "notify_after": 5}
+        assert http.patch("/v1/settings", json=body, headers=AUTH).status_code == 403
+        assert http.get("/v1/settings", params={"surface": "discord", "user_id": "1"}, headers=AUTH).status_code == 403
 
 
 def test_http_notifications_respect_the_surface_limits(settings):

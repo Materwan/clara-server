@@ -1,7 +1,9 @@
 """The one memory, in one SQLite file. Only the server process opens it.
 
-    people(id, name, relation)              one row per real person; relation: Clara's relationship with them
-                                            (0-100, NULL: none yet)
+    people(id, name, relation, notify_after)
+                                            one row per real person; relation: Clara's relationship with them
+                                            (0-100, NULL: none yet); notify_after: seconds a task takes before
+                                            the person is notified when it is done (0: never, NULL: the server's)
     accounts(surface, external_id, person)  "discord:1234" and "cli:erwan" can be the same person
     facts(id, person, text, text_key)       what Clara knows about a person (shared by every surface);
                                             text_key is the text folded for comparison (no duplicates)
@@ -46,9 +48,11 @@ from pathlib import Path
 MAX_FACT_LENGTH = 300
 MAX_NAME_LENGTH = 80
 MAX_TITLE_LENGTH = 100
+MAX_NOTIFY_AFTER = 7 * 86400  # seconds: the longest threshold a person can set
 RELATION_START = 50  # where a relationship starts when it first moves
 CHIME_OPTION = "chime_default"
 PREVIEW_LENGTH = 300  # characters of a conversation's first message given with a list of them
+ANY_PROJECT = "any"  # conversations_of: in a project or not
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS people (
@@ -163,17 +167,57 @@ CREATE TABLE IF NOT EXISTS options (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS projects (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id    INTEGER NOT NULL REFERENCES people (id),
+    name         TEXT NOT NULL,
+    description  TEXT NOT NULL DEFAULT '',
+    instructions TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_projects_person ON projects (person_id);
+CREATE TABLE IF NOT EXISTS project_sources (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
+    kind       TEXT NOT NULL,
+    repo       TEXT NOT NULL,
+    ref        TEXT NOT NULL DEFAULT '',
+    folder     TEXT NOT NULL,
+    commit_sha TEXT NOT NULL DEFAULT '',
+    synced_at  TEXT,
+    skipped    INTEGER NOT NULL DEFAULT 0,
+    problem    TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_project_sources_project ON project_sources (project_id);
+CREATE TABLE IF NOT EXISTS project_files (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
+    source_id  INTEGER REFERENCES project_sources (id) ON DELETE CASCADE,
+    path       TEXT NOT NULL,
+    kind       TEXT NOT NULL DEFAULT '',
+    content    TEXT NOT NULL,
+    size       INTEGER NOT NULL,
+    added_at   TEXT NOT NULL,
+    UNIQUE (project_id, path)
+);
 """
 
 # Columns added after the first release: databases created before have to get them.
 _ADDED_COLUMNS = {
     "people": {
         "relation": "INTEGER",  # Clara's relationship with the person, 0-100 (NULL: none yet)
+        "notify_after": "INTEGER",  # seconds a task takes before it notifies the person (0: never, NULL: default)
+    },
+    "conversations": {
+        "project_id": "INTEGER",  # the project it belongs to (projects.py), NULL: none
     },
     "messages": {
         "prefix": "TEXT NOT NULL DEFAULT ''",
         "tool_calls": "TEXT",
         "tool_name": "TEXT",
+        "thinking": "TEXT",  # the model's reasoning before tool calls: some providers want it back (DeepSeek)
     },
     "reminders": {  # where the reminder was set: the answer that announces it is written there
         "surface": "TEXT NOT NULL DEFAULT ''",
@@ -248,6 +292,7 @@ class StoredMessage:
     prefix: str = ""  # context the client put before a user message (kept for the model, not shown)
     tool_calls: list[dict] | None = None  # assistant messages: [{"function": {"name", "arguments"}}]
     tool_name: str | None = None  # tool messages: which tool answered
+    thinking: str = ""  # assistant messages that call tools: the reasoning that led to the calls
 
 
 @dataclass(frozen=True)
@@ -258,6 +303,7 @@ class TurnRow:
     content: str
     tool_calls: list[dict] | None = None
     tool_name: str | None = None
+    thinking: str = ""  # kept with tool calls only: the provider may need it back with them
 
 
 @dataclass(frozen=True)
@@ -307,6 +353,7 @@ class ConversationInfo:
     created_at: str  # ISO, UTC
     updated_at: str  # ISO, UTC: its last turn
     preview: str = ""  # the start of its first message still stored
+    project_id: int | None = None  # the project it belongs to
 
 
 @dataclass(frozen=True)
@@ -550,8 +597,11 @@ class Memory:
                 self._db.execute("DELETE FROM messages WHERE conversation = ?", (conversation,))
                 self._db.execute("DELETE FROM conversation_state WHERE conversation = ?", (conversation,))
                 self._db.execute("DELETE FROM conversations WHERE conversation = ?", (conversation,))
-            # the shared conversations they started stay, with nobody as their owner
-            self._db.execute("UPDATE conversations SET person_id = NULL WHERE person_id = ?", (person_id,))
+            # the shared conversations they started stay, with nobody as their owner (and out of their projects)
+            self._db.execute(
+                "UPDATE conversations SET person_id = NULL, project_id = NULL WHERE person_id = ?", (person_id,)
+            )
+            self._db.execute("DELETE FROM projects WHERE person_id = ?", (person_id,))  # their files go with them
             self._db.execute("DELETE FROM messages WHERE person_id = ?", (person_id,))
             self._db.execute("DELETE FROM reminders WHERE person_id = ?", (person_id,))
             self._db.execute("DELETE FROM reminder_events WHERE person_id = ?", (person_id,))
@@ -579,6 +629,11 @@ class Memory:
             "UPDATE people SET relation = COALESCE(relation, (SELECT relation FROM people WHERE id = ?)) WHERE id = ?",
             (source, target),
         )
+        db.execute(
+            "UPDATE people SET notify_after = COALESCE(notify_after, (SELECT notify_after FROM people WHERE id = ?))"
+            " WHERE id = ?",
+            (source, target),
+        )
         db.execute("UPDATE OR IGNORE facts SET person_id = ? WHERE person_id = ?", (target, source))
         db.execute("DELETE FROM facts WHERE person_id = ?", (source,))  # duplicates left behind
         db.execute("UPDATE accounts SET person_id = ? WHERE person_id = ?", (target, source))
@@ -586,6 +641,7 @@ class Memory:
         db.execute("UPDATE reminders SET person_id = ? WHERE person_id = ?", (target, source))
         db.execute("UPDATE reminder_events SET person_id = ? WHERE person_id = ?", (target, source))
         db.execute("UPDATE conversations SET person_id = ? WHERE person_id = ?", (target, source))
+        db.execute("UPDATE projects SET person_id = ? WHERE person_id = ?", (target, source))
         db.execute("UPDATE users SET person_id = ? WHERE person_id = ?", (target, source))
         db.execute("DELETE FROM people WHERE id = ?", (source,))
 
@@ -630,6 +686,26 @@ class Memory:
             value = max(0, min(100, (RELATION_START if current is None else current) + int(change)))
             self._db.execute("UPDATE people SET relation = ? WHERE id = ?", (value, person_id))
         return value
+
+    # ------------------------------------------------------------------
+    # Notification threshold
+    # ------------------------------------------------------------------
+    def notify_after(self, person_id: int) -> int | None:
+        """Seconds a task of this person takes before it notifies them when done (0: never); None: the
+        server's default (CLARA_NOTIFY_LONG_TURN)."""
+        with self._lock:
+            row = self._db.execute("SELECT notify_after FROM people WHERE id = ?", (person_id,)).fetchone()
+        return row["notify_after"] if row else None
+
+    def set_notify_after(self, person_id: int, seconds: int | None) -> int | None:
+        """Set it (0: never; at most MAX_NOTIFY_AFTER), or go back to the server's default (None)."""
+        if seconds is not None:
+            seconds = int(seconds)
+            if not 0 <= seconds <= MAX_NOTIFY_AFTER:
+                raise ValueError(f"A delay is 0 (never) to {MAX_NOTIFY_AFTER} seconds.")
+        with self._lock, self._db:
+            self._db.execute("UPDATE people SET notify_after = ? WHERE id = ?", (seconds, person_id))
+        return seconds
 
     # ------------------------------------------------------------------
     # Spaces (the group places of a client) and run-time options
@@ -983,7 +1059,7 @@ class Memory:
     # Conversation history
     # ------------------------------------------------------------------
     _MESSAGE_COLUMNS = (
-        "SELECT m.id, m.role, m.content, m.person_id, p.name, m.prefix, m.tool_calls, m.tool_name"
+        "SELECT m.id, m.role, m.content, m.person_id, p.name, m.prefix, m.tool_calls, m.tool_name, m.thinking"
         " FROM messages m LEFT JOIN people p ON p.id = m.person_id"
     )
 
@@ -998,6 +1074,7 @@ class Memory:
             row["prefix"],
             json.loads(row["tool_calls"]) if row["tool_calls"] else None,
             row["tool_name"],
+            row["thinking"] or "",
         )
 
     def history(self, conversation: str, turns: int, after_id: int = 0) -> list[StoredMessage]:
@@ -1046,14 +1123,16 @@ class Memory:
         question: str,
         rows: list[TurnRow],
         prefix: str = "",
+        project_id: int | None = None,
     ) -> None:
-        """Store a question and everything that followed it (calls, results, answer), or nothing."""
+        """Store a question and everything that followed it (calls, results, answer), or nothing. A new
+        conversation is put in `project_id`; one that exists stays where it is."""
         now = _now()
         with self._lock, self._db:
             self._db.execute(
-                "INSERT INTO conversations (conversation, person_id, surface, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?) ON CONFLICT (conversation) DO UPDATE SET updated_at = excluded.updated_at",
-                (conversation, person_id, conversation.partition(":")[0], now, now),
+                "INSERT INTO conversations (conversation, person_id, surface, created_at, updated_at, project_id)"
+                " VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (conversation) DO UPDATE SET updated_at = excluded.updated_at",
+                (conversation, person_id, conversation.partition(":")[0], now, now, project_id),
             )
             self._db.execute(
                 "INSERT INTO messages (conversation, person_id, role, content, created_at, prefix)"
@@ -1062,7 +1141,7 @@ class Memory:
             )
             self._db.executemany(
                 "INSERT INTO messages (conversation, person_id, role, content, created_at,"
-                " tool_calls, tool_name) VALUES (?, NULL, ?, ?, ?, ?, ?)",
+                " tool_calls, tool_name, thinking) VALUES (?, NULL, ?, ?, ?, ?, ?, ?)",
                 [
                     (
                         conversation,
@@ -1071,6 +1150,7 @@ class Memory:
                         now,
                         json.dumps(row.tool_calls, ensure_ascii=False) if row.tool_calls else None,
                         row.tool_name,
+                        row.thinking or None,
                     )
                     for row in rows
                 ],
@@ -1093,7 +1173,7 @@ class Memory:
     # ------------------------------------------------------------------
     _CONVERSATION_COLUMNS = (
         "SELECT c.conversation, c.person_id, c.surface, c.title, c.titled_by, c.pinned, c.created_at,"
-        " c.updated_at, (SELECT substr(m.content, 1, ?) FROM messages m WHERE m.conversation = c.conversation"
+        " c.updated_at, c.project_id, (SELECT substr(m.content, 1, ?) FROM messages m WHERE m.conversation = c.conversation"
         " AND m.role = 'user' ORDER BY m.id LIMIT 1) AS preview FROM conversations c"
     )
 
@@ -1101,7 +1181,7 @@ class Memory:
     def _conversation(row: sqlite3.Row) -> ConversationInfo:
         return ConversationInfo(
             row["conversation"], row["person_id"], row["surface"], row["title"], row["titled_by"],
-            bool(row["pinned"]), row["created_at"], row["updated_at"], row["preview"] or "",
+            bool(row["pinned"]), row["created_at"], row["updated_at"], row["preview"] or "", row["project_id"],
         )
 
     def conversation_info(self, conversation: str) -> ConversationInfo | None:
@@ -1112,12 +1192,18 @@ class Memory:
         return self._conversation(row) if row else None
 
     def conversations_of(
-        self, person_id: int, surface: str, query: str = "", limit: int = 200
+        self, person_id: int, surface: str, query: str = "", limit: int = 200, project: int | str | None = ANY_PROJECT
     ) -> list[ConversationInfo]:
         """The conversations a person started on a surface: pinned ones first, then the last written in.
-        `query` keeps those whose title, messages or summary contain it (case is ignored for ASCII letters)."""
+        `query` keeps those whose title, messages or summary contain it (case is ignored for ASCII letters);
+        `project` those of a project (None: those in no project; ANY_PROJECT: all of them)."""
         sql = self._CONVERSATION_COLUMNS + " WHERE c.person_id = ? AND c.surface = ?"
         params: list = [PREVIEW_LENGTH, person_id, surface]
+        if project is None:
+            sql += " AND c.project_id IS NULL"
+        elif project != ANY_PROJECT:
+            sql += " AND c.project_id = ?"
+            params.append(project)
         if query.strip():
             pattern = _like(query.strip())
             sql += (
@@ -1152,6 +1238,13 @@ class Memory:
                     "UPDATE conversations SET pinned = ? WHERE conversation = ?", (int(pinned), conversation)
                 )
             return True
+
+    def set_conversation_project(self, conversation: str, project_id: int | None) -> bool:
+        """Put a listed conversation in a project (None: in none). False if it is not listed."""
+        with self._lock, self._db:
+            return self._db.execute(
+                "UPDATE conversations SET project_id = ? WHERE conversation = ?", (project_id, conversation)
+            ).rowcount > 0
 
     def title_if_untitled(self, conversation: str, title: str) -> str:
         """Give Clara's title to a conversation nobody has titled yet (the person may have, meanwhile).

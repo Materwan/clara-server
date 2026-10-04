@@ -102,15 +102,17 @@ export function mountAccount(container, user, onSignOut) {
   container.append(pageHead("Account"), h("div", { class: "scroll" }, page));
 
   async function draw() {
-    let me, devices;
+    let me, devices, prefs;
     try {
-      [me, devices] = await Promise.all([api.get("/v1/auth/me"), api.get("/v1/auth/sessions")]);
+      me = await api.get("/v1/auth/me");
+      [devices, prefs] = await Promise.all([api.get("/v1/auth/sessions"), api.get("/v1/settings", who(me))]);
     } catch (error) {
       return void toast(error.detail, true);
     }
     clear(page);
     page.append(
       profileCard(me),
+      notifyCard(me, prefs),
       passwordCard(),
       devicesCard(devices.sessions),
       linkCard(me),
@@ -124,6 +126,36 @@ export function mountAccount(container, user, onSignOut) {
       h("p", { class: "muted small" }, `Signed in as ${me.name}. Clara knows you on these accounts:`),
       h("div", { class: "accounts" }, me.accounts.length ? me.accounts.map((a) => h("span", { class: "badge" }, a)) : h("span", { class: "muted small" }, "none yet"))),
     h("button", { onclick: onSignOut }, icon("logout", { size: 18 }), "Sign out"));
+
+  /** How long a task takes before you are notified when it is done: the server's delay, never, or your own. */
+  function notifyCard(me, prefs) {
+    const own = prefs.notify_after;
+    const fallback = prefs.notify_after_default;
+    const mode = h("select", { "aria-label": "Notify when a task is done" },
+      h("option", { value: "default" }, `Like the server (${fallback ? `after ${fallback} s` : "never"})`),
+      h("option", { value: "never" }, "Never"),
+      h("option", { value: "after" }, "After a delay of my own"));
+    const seconds = h("input", { type: "number", min: 1, max: 604800, step: 1, required: true, "aria-label": "Seconds", value: own || 120 });
+    const row = h("label", { class: "field" }, "Seconds of work before I am notified", seconds);
+    mode.value = own === null ? "default" : own === 0 ? "never" : "after";
+    const sync = () => { row.hidden = mode.value !== "after"; };
+    mode.addEventListener("change", sync);
+    sync();
+    return h("section", { class: "panel" },
+      h("div", { class: "panel-head" }, h("div", {}, h("h3", {}, "Notifications"),
+        h("p", { class: "muted small" }, "A task that takes at least this long (an answer, a long job in the console or the app) notifies you on your devices when it is done."))),
+      h("form", { class: "panel-body stack", onsubmit: async (event) => {
+        event.preventDefault();
+        const value = mode.value === "default" ? null : mode.value === "never" ? 0 : Number(seconds.value);
+        try {
+          await api.patch("/v1/settings", { ...who(me), notify_after: value });
+          toast("Saved.");
+          draw();
+        } catch (error) { toast(error.detail, true); }
+      } },
+      h("div", { class: "form-grid" }, h("label", { class: "field" }, "Notify me when a task is done", mode), row),
+      h("div", {}, h("button", { class: "primary", type: "submit" }, "Save"))));
+  }
 
   function passwordCard() {
     const current = h("input", { type: "password", autocomplete: "current-password", required: true });

@@ -69,7 +69,7 @@ def test_admin_commands_list_for_completion(client):
     response = client.get("/v1/admin/commands", headers=ADMIN)
     assert response.status_code == 200
     by_name = {entry["name"]: entry for entry in response.json()}
-    assert by_name["provider"]["choices"] == ["local", "cloud"]
+    assert by_name["provider"]["choices"] == ["local", "cloud", "gemini", "deepseek", "mistral"]
 
 
 def test_admin_runs_a_command_and_switches_provider_for_everyone(client):

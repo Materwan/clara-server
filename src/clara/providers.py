@@ -1,13 +1,16 @@
 """Where the model runs, switchable while the server is running.
 
-    local  "Local host"     Ollama on this machine (or any host in OLLAMA_HOST)
-    cloud  "Ollama API key" ollama.com, authenticated with OLLAMA_API_KEY
+    local     "Local host"     Ollama on this machine (or any host in OLLAMA_HOST)
+    cloud     "Ollama API key" ollama.com, authenticated with OLLAMA_API_KEY
+    gemini    "Google Gemini"  GEMINI_API_KEY      } through their OpenAI-compatible API
+    deepseek  "DeepSeek"       DEEPSEEK_API_KEY    } (llm.OpenAIBackend)
+    mistral   "Mistral"        MISTRAL_API_KEY     }
 
 `ProviderManager` is itself an `LlmBackend`: the agent talks to it, and each
 model round goes to whichever provider is active at that moment. The choice
 (and the model picked for each provider) is saved in `runtime.json` so it
-survives a restart. The API key is never saved or shown; it only ever comes
-from the environment.
+survives a restart. The API keys are never saved or shown; they only ever come
+from the environment. A provider without its key is listed, but cannot be chosen.
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncIterator, Awaitable, Callable, TypeVar
 
-from .llm import LlmBackend, LlmChunk, OllamaBackend
+from .llm import LlmBackend, LlmChunk, OllamaBackend, OpenAIBackend, OpenAIFlavor
 from .settings import Settings
 from .traffic import TrafficLog
 
@@ -45,6 +48,8 @@ class ProviderConfig:
     needs_key: bool
     context_window: int = 32_768  # tokens: what the percentages of the context are relative to
     request_context: bool = False  # ask the server for exactly that window (local Ollama only)
+    key_name: str = "OLLAMA_API_KEY"  # where the key comes from, to say what is missing
+    flavor: OpenAIFlavor | None = None  # None: Ollama; else an OpenAI-compatible service
 
     @property
     def usable(self) -> bool:
@@ -61,10 +66,30 @@ _ALIASES = {
     "apikey": "cloud",
     "api-key": "cloud",
     "ollama-api-key": "cloud",
+    "gemini": "gemini",
+    "google": "gemini",
+    "deepseek": "deepseek",
+    "mistral": "mistral",
 }
+
+LABELS = {"gemini": "Google Gemini", "deepseek": "DeepSeek", "mistral": "Mistral"}
+
+
+def flavor_of(provider: str, settings: Settings) -> OpenAIFlavor:
+    """How each OpenAI-compatible service differs from the others."""
+    if provider == "gemini":
+        return OpenAIFlavor(signatures=True)
+    if provider == "deepseek":
+        extra = () if settings.deepseek_thinking else (("thinking", {"type": "disabled"}),)
+        return OpenAIFlavor(reasoning_back=True, extra_body=extra)
+    if provider == "mistral":
+        return OpenAIFlavor(stream_usage=False, tool_names=True)  # Mistral gives the counts at the end anyway
+    return OpenAIFlavor()
 
 
 def default_factory(config: ProviderConfig, model: str) -> LlmBackend:
+    if config.flavor is not None:
+        return OpenAIBackend(model, config.host, config.api_key, config.flavor, config.label)
     return OllamaBackend(
         model,
         host=config.host,
@@ -94,6 +119,20 @@ def configs_from_settings(settings: Settings) -> dict[str, ProviderConfig]:
             True,
             settings.cloud_context_window,
         ),
+        **{
+            name: ProviderConfig(
+                name,
+                LABELS[name],
+                api.host,
+                api.model,
+                api.api_key,
+                True,
+                api.context_window,
+                key_name=api.key_name,
+                flavor=flavor_of(name, settings),
+            )
+            for name, api in settings.api_providers.items()
+        },
     }
 
 
@@ -182,7 +221,7 @@ class ProviderManager:
         provider = self.resolve(reference)
         config = self.configs[provider]
         if not config.usable:
-            raise ProviderError(f"{config.label} needs OLLAMA_API_KEY in the server environment.")
+            raise ProviderError(f"{config.label} needs {config.key_name} in the server environment.")
         self.active = provider
         self._rebuild()
         return config
@@ -204,7 +243,7 @@ class ProviderManager:
     @property
     def peer(self) -> str:
         """The provider, as named in the traffic log."""
-        return f"ollama:{self.active}"
+        return f"ollama:{self.active}" if self.config.flavor is None else self.active
 
     def stream(self, messages: list[dict], tools: list[dict] | None) -> AsyncIterator[LlmChunk]:
         stream = self._backend.stream(messages, tools)
