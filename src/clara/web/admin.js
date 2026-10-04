@@ -6,7 +6,7 @@ import {
   ago, avatar, clear, confirmDialog, dateTime, duration, h, icon, openDialog, pageHead, popupMenu, promptDialog, secretDialog, toast,
 } from "./ui.js";
 
-const TABS = [["users", "Users"], ["server", "Server"], ["people", "People & memory"], ["spaces", "Spaces"], ["console", "Console"]];
+const TABS = [["users", "Users"], ["server", "Server"], ["people", "People & memory"], ["console", "Console"]];
 
 export function mountAdmin(container, me, tab = "users") {
   const body = h("div", {});
@@ -22,7 +22,7 @@ export function mountAdmin(container, me, tab = "users") {
     clear(tabs).append(...TABS.map(([id, label]) =>
       h("button", { role: "tab", "aria-selected": String(id === current), onclick: () => show(id) }, label)));
     clear(body);
-    ({ users, server, people, spaces, console: consoleTab })[current](body, me, (interval) => { timer = interval; });
+    ({ users, server, people, console: consoleTab })[current](body, me, (interval) => { timer = interval; });
   };
 
   container.append(pageHead("Administration"), h("div", { class: "scroll" }, h("div", { class: "container wide" }, tabs, body)));
@@ -306,47 +306,6 @@ function people(box) {
       placeholder();
       load();
     } catch (error) { fail(error); }
-  }
-
-  load();
-}
-
-// ---- spaces ------------------------------------------------------------------------------------------------
-
-function spaces(box) {
-  const defaults = h("section", { class: "panel" });
-  const list = h("section", { class: "panel" });
-  box.append(
-    h("p", { class: "intro" }, "The Discord servers the bot is in. In each, Clara always answers when she is mentioned or replied to, and reads what the members with an account write. With chime in, she may also answer a message that was not for her when she has something to add (it costs a model call for every message)."),
-    defaults, list);
-
-  const choice = (value) => value === null ? "default" : value ? "on" : "off";
-
-  async function load() {
-    let found;
-    try { found = await api.get("/v1/admin/spaces"); } catch (error) { return fail(error); }
-    const toggle = h("input", { type: "checkbox", checked: found.default_chime, onchange: async () => {
-      try { await api.patch("/v1/admin/spaces", { default_chime: toggle.checked }); toast("Saved."); load(); } catch (error) { fail(error); }
-    } });
-    clear(defaults).append(h("div", { class: "panel-body" }, h("label", { class: "check" }, toggle, "Chime in by default (where no choice was made)")));
-    if (!found.spaces.length) {
-      clear(list).append(h("div", { class: "empty-state" }, mark(36), h("strong", {}, "No space yet"), "The Discord bot lists its servers here when it starts."));
-      return;
-    }
-    clear(list).append(h("table", { class: "grid cards" },
-      h("thead", {}, h("tr", {}, ["Space", "Id", "Chime in", ""].map((t) => h("th", {}, t)))),
-      h("tbody", {}, found.spaces.map((space) => {
-        const select = h("select", { "aria-label": `Chime in for ${space.name || space.id}`, onchange: async () => {
-          const chime = { default: null, on: true, off: false }[select.value];
-          try { await api.patch(`/v1/admin/spaces/${encodeURIComponent(space.id)}`, { chime }); toast("Saved."); load(); } catch (error) { fail(error); }
-        } }, [["default", `Default (${found.default_chime ? "on" : "off"})`], ["on", "On"], ["off", "Off"]].map(([value, label]) =>
-          h("option", { value, selected: choice(space.chime) === value }, label)));
-        return h("tr", {},
-          h("td", {}, h("strong", {}, space.name || space.id)),
-          h("td", { "data-label": "Id", class: "muted small" }, space.id),
-          h("td", { "data-label": "Chime in" }, select),
-          h("td", { class: "end" }, space.present ? h("span", { class: "badge ok" }, "Bot present") : h("span", { class: "badge off" }, "Bot gone")));
-      }))));
   }
 
   load();

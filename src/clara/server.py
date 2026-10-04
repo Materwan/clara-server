@@ -63,6 +63,8 @@ from .announce import compose
 from .auth import Admin, Client, peer_of, require_account, require_conversation, require_space
 from .clientapi import install as install_clients
 from .commands import CommandContext, CommandResult, registry
+from .discord_bot.local import LocalBackend
+from .discord_bot.service import DiscordService
 from .lifecycle import Lifecycle
 from .linking import LinkCodes
 from .memory import MAX_TITLE_LENGTH, ConversationInfo, Memory, MergeRefused, Person
@@ -295,15 +297,29 @@ def create_app(
             )
         if tailscale.public and settings.admin_tokens:
             log.warning("CLARA_TAILSCALE=funnel: the remote admin console (CLARA_ADMIN_TOKENS) is public too")
+    discord_bot = DiscordService(
+        settings.discord_token, lambda: LocalBackend(app), settings.discord_invite_url, settings.discord_auto_start
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         lifecycle.loop = asyncio.get_running_loop()
         scheduler = asyncio.create_task(reminders.run())
         publishing = asyncio.create_task(tailscale.start())  # slow if tailscale hangs: not before the server is up
+        bot_start = None
+        if settings.discord_auto_start:
+            if discord_bot.state in ("unavailable", "no-token"):
+                log.warning("AUTO_START_DISCORD_BOT is on, but: %s", discord_bot.describe())
+            else:
+                bot_start = asyncio.create_task(discord_bot.start())  # connecting takes seconds: in the background
         try:
             yield
         finally:
+            if bot_start is not None and not bot_start.done():
+                bot_start.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await bot_start
+            await discord_bot.stop()
             publishing.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await publishing
@@ -330,9 +346,10 @@ def create_app(
     app.state.traffic = traffic
     app.state.lifecycle = lifecycle
     app.state.providers = providers
+    app.state.discord = discord_bot
     app.state.commands = CommandContext(
         settings, memory, agent, providers, time.monotonic(), f"{settings.host}:{settings.port}", lifecycle,
-        notifier, tailscale, users,
+        notifier, tailscale, users, discord_bot,
     )
 
     def known_person(surface: Surface, user_id: ExternalId) -> Person:
@@ -736,6 +753,10 @@ def create_app(
         if result.sensitive:
             http.scope["clara_sensitive"] = True  # it holds a password: the traffic log does not keep it
         return {"output": result.output, "quit": result.quit}
+
+    # what the built-in Discord bot calls directly (discord_bot/local.py)
+    app.state.check_chat = checked
+    app.state.surface_recipients = recipients
 
     install(app)
     install_clients(app)

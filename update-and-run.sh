@@ -24,7 +24,7 @@ main() {
             || { echo "Could not create .venv; on Ubuntu: sudo apt install python3-venv" >&2; exit 1; }
     fi
     .venv/bin/python -m pip install --quiet --upgrade pip
-    .venv/bin/python -m pip install --quiet --upgrade -e .
+    .venv/bin/python -m pip install --quiet --upgrade -e ".[discord]"  # with the Discord bot
 
     echo "==> Updating .env"
     update_env

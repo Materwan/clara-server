@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable
 
 from .agent import Agent
+from .discord_bot.service import DiscordService
 from .lifecycle import Lifecycle
 from .memory import Memory, Person
 from .notifications import Notifier
@@ -51,6 +52,7 @@ class CommandContext:
     notifier: Notifier | None = None  # tells everybody when the provider or the model changes
     tailscale: Tailscale | None = None  # how the server is published, if it is
     users: Users | None = None  # people who log in with a password
+    discord: DiscordService | None = None  # the Discord bot built into the server
 
     def tell_everybody(self, text: str) -> None:
         if self.notifier is not None:
@@ -540,3 +542,29 @@ async def chime_command(ctx: CommandContext, args: str) -> str:
     memory.set_space_chime(matches[0].id, value)
     shown = {None: "the default", True: "on", False: "off"}[value]
     return f"{matches[0].name or matches[0].id}: chime in is now {shown}."
+
+
+@registry.command(
+    "discord",
+    "[status | start | stop | restart]",
+    "The Discord bot built into the server: its state, or start / stop it (until the server restarts)",
+    lambda ctx: ["status", "start", "stop", "restart"],
+)
+async def discord_command(ctx: CommandContext, args: str) -> str:
+    bot = ctx.discord
+    if bot is None:
+        raise CommandError("This server has no Discord bot.")
+    action = args.strip().lower() or "status"
+    if action == "status":
+        found = bot.status()
+        lines = [bot.describe(), f"Starts with the server: {'yes' if found['auto_start'] else 'no'} (AUTO_START_DISCORD_BOT)"]
+        if found["invite_url"]:
+            lines.append(f"Invite: {found['invite_url']}")
+        return "\n".join(lines)
+    if action == "start":
+        return await bot.start()
+    if action == "stop":
+        return await bot.stop()
+    if action == "restart":
+        return await bot.restart()
+    raise CommandError("Usage: /discord [status | start | stop | restart]")

@@ -5,6 +5,7 @@ import { mountAccount, mountMemory } from "./account.js";
 import { mountAdmin } from "./admin.js";
 import { ApiError, api, events } from "./api.js";
 import { mountChat } from "./chat.js";
+import { mountDiscord } from "./discord.js";
 import { icon, mark } from "./icons.js";
 import { avatar, clear, h, toast, toggleRail } from "./ui.js";
 
@@ -83,12 +84,13 @@ events.addEventListener("signed-out", () => { if (user) showLogin("Your session 
 
 // ---- the shell and the pages -----------------------------------------------------------------------------
 
-const PAGES = { chat: ["Chat", "chat"], memory: ["Memory", "memory"], account: ["Account", "user"], admin: ["Admin", "admin"] };
+const PAGES = { chat: ["Chat", "chat"], memory: ["Memory", "memory"], account: ["Account", "user"], discord: ["Discord", "bot"], admin: ["Admin", "admin"] };
+const ADMIN_PAGES = new Set(["discord", "admin"]);
 
 function shell() {
   const status = h("div", { class: "status", title: "Server status" }, h("span", { class: "dot" }), h("span", { class: "text" }, "Checking…"));
   const pages = h("nav", { class: "pages", "aria-label": "Pages" },
-    Object.entries(PAGES).filter(([id]) => id !== "admin" || user.is_admin).map(([id, [label, glyph]]) =>
+    Object.entries(PAGES).filter(([id]) => !ADMIN_PAGES.has(id) || user.is_admin).map(([id, [label, glyph]]) =>
       h("a", { href: `#/${id}`, "data-page": id }, icon(glyph, { size: 19 }), label)));
   const displayName = user.person?.name || user.name;
   const rail = h("aside", { class: "rail", id: "rail", "aria-label": "Navigation" },
@@ -148,7 +150,7 @@ function stop() {
 function route() {
   if (!user) return;
   const [, id = "chat", sub] = location.hash.split("/");
-  const name = Object.hasOwn(PAGES, id) && (id !== "admin" || user.is_admin) ? id : "chat";
+  const name = Object.hasOwn(PAGES, id) && (!ADMIN_PAGES.has(id) || user.is_admin) ? id : "chat";
   for (const link of document.querySelectorAll(".pages a")) {
     const active = link.dataset.page === name;
     link.classList.toggle("active", active);
@@ -169,6 +171,7 @@ function route() {
   page = name === "chat" ? mountChat(body, user, { slot, fresh })
     : name === "memory" ? mountMemory(body, user)
     : name === "account" ? mountAccount(body, user, signOut)
+    : name === "discord" ? mountDiscord(body)
     : mountAdmin(body, user, sub);
 }
 

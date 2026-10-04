@@ -20,7 +20,7 @@ chat, see what Clara remembers, and, for administrators, manage users and the se
 
 ```bash
 python -m venv .venv
-.venv/bin/pip install -e ".[dev]"      # Windows: .venv\Scripts\pip
+.venv/bin/pip install -e ".[dev,discord]"   # Windows: .venv\Scripts\pip; "discord": the Discord bot (optional)
 cp .env.example .env                    # then put real tokens in CLARA_TOKENS (the server
                                         # refuses the "change-me" placeholders)
 .venv/bin/clara-server                  # listens on 127.0.0.1:8765
@@ -69,6 +69,7 @@ Both consoles run the same commands (the `/` is optional):
 | `/remember <person> <text>`, `/forget <person> <fact id>` | the same as `/facts <person> add` / `del` |
 | `/relation [<person> [<0-100>\|+n\|-n\|reset]]` | Clara's relationship with each person (see *Relationship*) |
 | `/chime [default on\|off \| <space> on\|off\|default]` | where Clara may answer Discord messages that are not for her (see *Discord*) |
+| `/discord [status\|start\|stop\|restart]` | the Discord bot built into the server (see *Discord*) |
 | `/stop [now]` | stop the server: tell every client, refuse new questions, wait for running replies and agents, exit (`now`: do not wait); works from `clara-admin` too |
 | `/help [command]`, `/quit` | `/quit` stops the server like `/stop` from the embedded console, and only closes a remote one |
 
@@ -256,8 +257,41 @@ with httpx.stream("POST", "http://127.0.0.1:8765/v1/chat/stream",
 
 ## Discord
 
-The Discord bot (`bot-discord`, a separate project) is a client with one token (`CLARA_TOKENS=discord:<token>`,
-`CLARA_CLIENT_SURFACES=discord=discord`). What follows is generic, but Discord is what uses it.
+### The bot
+
+The Discord bot is part of the server (`src/clara/discord_bot/`) and needs the optional `discord` extra:
+`pip install -e ".[discord]"`. Set in `.env`:
+
+| Setting | |
+| --- | --- |
+| `DISCORD_BOT_TOKEN` | the bot's token (Discord developer portal > your application > *Bot*). Like the API key it never leaves `.env`: it is not shown, saved elsewhere, or reachable through the API |
+| `AUTO_START_DISCORD_BOT` | `true`: the bot starts with the server (in the background: the server does not wait for Discord). Default `false` |
+| `DISCORD_BOT_INVIT_URL` | the invite link shown on the web site; empty: one is built from the bot's id (scopes `bot` and `applications.commands`, the permissions to read and send messages) |
+
+On the *Bot* page of the developer portal, turn on the **Message Content** and **Server Members** intents (without
+them Discord refuses the connection, and the web page says so).
+
+An administrator starts and stops it at any time with `/discord start|stop|restart` (`/discord` shows its state), or
+on the web site's **Discord** page. That lasts until the server restarts: `AUTO_START_DISCORD_BOT` decides then. When
+the server stops, the bot stops with it. The built-in bot reaches Clara by calling the server's own code (no token,
+no HTTP), under the client name `discord-bot`, through the same checks as the HTTP routes below.
+
+**On another machine.** The same bot runs on its own with `clara-discord` (or the `bot-discord` project, which starts
+it), and reaches the server over HTTP with a client token (`CLARA_TOKENS=discord:<token>`,
+`CLARA_CLIENT_SURFACES=discord=discord`; on its side `DISCORD_BOT_TOKEN`, `CLARA_URL`, `CLARA_TOKEN`, optionally
+`CLARA_TIMEZONE`). Do not run both with the same Discord token: both would answer.
+
+### What it does
+
+On Discord, people make an account with `/register` (or `/login` to an existing one) before Clara answers them. She
+answers private messages, and on a server the messages that mention her or reply to her; she reads the other messages
+of signed-in members as context, and may answer them where chime in is allowed. Their slash commands are `/register`,
+`/login`, `/logout`, `/me`, `/remember`, `/forget`, `/reset` and `/help`. **Reminders and notifications** reach them
+as **private messages** only, never in a server's channels.
+
+### What the server provides
+
+What follows is generic, but Discord is what uses it.
 
 **Signing in.** On the surfaces of `CLARA_LOGIN_SURFACES` (`discord` by default; `none` turns it off) an account
 must be signed in as a user before it can talk to Clara or touch its memory: the server answers 403 (`... is not
@@ -285,7 +319,7 @@ may carry:
 
 In a group, every message reaches the model prefixed with its author's name. The server turns `maybe` into
 `observe` unless **chime in** is allowed in that space: an administrator switches it per space (`/chime`, or the
-web site's *Admin > Spaces*), with a default for the spaces nobody set (off). The client tells the server which
+web site's *Discord* page), with a default for the spaces nobody set (off). The client tells the server which
 spaces it is in (`PUT /v1/spaces`, when it starts, and when it joins or leaves one). Mind that with chime in, every
 message of a signed-in member costs a model call.
 
@@ -441,10 +475,12 @@ Wrong passwords are limited per address (see *Security*).
 - **Memory**: what Clara remembers about you, to add to or remove from.
 - **Account**: change your password, see and sign out your devices, link an account that has no password (Discord)
   with a link code.
+- **Discord** (administrators): the bot built into the server (its state, Discord account, servers, latency, last
+  error; *Start*, *Stop*, *Restart*; the invite link), the Discord servers it is in with where Clara may chime in, and
+  the Discord accounts signed in, each with *Sign out*.
 - **Admin** (administrators): *Users* (add, reset a password, make administrator, disable, sign out, remove),
   *Server* (status, switch provider and model, stop), *People & memory* (everybody Clara knows, their facts,
-  the relationship, linking, erasing a person), *Spaces* (the Discord servers, and where Clara may chime in) and a
-  *Console* box with every server command.
+  the relationship, linking, erasing a person) and a *Console* box with every server command.
 
 There are no reminders or notifications on the web site, and it runs no tools on your computer.
 
@@ -603,8 +639,10 @@ src/clara/
   users.py      users, password hashes, login tokens (the tables are in memory.py)
   auth.py       who is calling (client token, user token or web cookie) and what they may touch
   webapi.py     login, account, administration and PDF routes, and the web site's files
-  clientapi.py  what a client of many people (the Discord bot) uses: signing accounts in, spaces; chime in and
-                the relationship for administrators
+  clientapi.py  what a client of many people (the Discord bot) uses: signing accounts in, spaces; chime in, the
+                relationship and the Discord page for administrators
+  discord_bot/  the Discord bot: service.py runs it in the server (local.py: direct calls), standalone.py on its
+                own (remote.py: HTTP); see its __init__.py
   web/          the web site: index.html, style.css and ES modules (chat, memory, account, admin, markdown...)
   session.py    for clara-chat / clara-admin: sign in once, keep the token
   tailscale.py  publishes the server with `tailscale serve|funnel`, removes it on exit

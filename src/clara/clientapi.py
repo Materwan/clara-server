@@ -18,6 +18,9 @@ the web site, the desktop app or the terminal.
     PATCH  /v1/admin/spaces             {default_chime}
     PATCH  /v1/admin/spaces/{id}        {chime: true | false | null}
     PATCH  /v1/admin/people/{id}        {relation: 0-100 | null}
+    GET    /v1/admin/discord            the built-in Discord bot, its servers, the Discord accounts signed in
+    POST   /v1/admin/discord/{action}   start | stop | restart
+    DELETE /v1/admin/discord/accounts/{id}  sign a Discord account out
 """
 
 from __future__ import annotations
@@ -280,6 +283,55 @@ async def admin_space(space_id: str, body: SpacePatch, admin: Admin, request: Re
         raise HTTPException(404, "No such space")
     log.info("admin %s: chime in %s: %s", admin, space_id, body.chime)
     return describe_space(memory.space(space_id), memory.chime_default())
+
+
+# ----------------------------------------------------------------------
+# The Discord bot built into the server (the web site's Discord page)
+# ----------------------------------------------------------------------
+DISCORD = "discord"
+
+
+@router.get("/v1/admin/discord")
+async def admin_discord(admin: Admin, request: Request) -> dict:
+    """The bot's state, the Discord servers it is in (with chime in), and the Discord accounts signed in."""
+    state = request.app.state
+    bot = state.discord
+    memory = state.memory
+    default = memory.chime_default()
+    accounts = []
+    for external_id, user in sorted(state.users.signed_in_accounts(DISCORD).items(), key=lambda item: item[1].name):
+        person = memory.find_person(DISCORD, external_id)
+        accounts.append({
+            "user_id": external_id, "user": user.name, "person": person.name if person else None,
+            "discord_name": bot.discord_name(external_id),
+        })
+    return {
+        "bot": bot.status(),
+        "default_chime": default,
+        "spaces": [describe_space(space, default) for space in memory.spaces(DISCORD)],
+        "accounts": accounts,
+    }
+
+
+@router.post("/v1/admin/discord/{action}")
+async def admin_discord_action(action: str, admin: Admin, request: Request) -> dict:
+    """start, stop or restart the bot (until the server restarts: AUTO_START_DISCORD_BOT decides then)."""
+    bot = request.app.state.discord
+    if action not in ("start", "stop", "restart"):
+        raise HTTPException(404, "start, stop or restart")
+    log.info("admin %s: Discord bot %s", admin, action)
+    output = await getattr(bot, action)()
+    return {"output": output, "bot": bot.status()}
+
+
+@router.delete("/v1/admin/discord/accounts/{user_id}")
+async def admin_discord_sign_out(user_id: str, admin: Admin, request: Request) -> dict:
+    state = request.app.state
+    if not state.users.sign_out_account(DISCORD, user_id):
+        raise HTTPException(404, "This Discord account is not signed in")
+    state.discord.signed_out(user_id)
+    log.info("admin %s signed discord:%s out", admin, user_id)
+    return {"signed_out": True}
 
 
 # ----------------------------------------------------------------------

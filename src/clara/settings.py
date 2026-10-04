@@ -179,6 +179,11 @@ class Settings:
     # Surfaces where a client signs its people in (POST /v1/accounts/login or register): there, an account that
     # is not signed in as a user cannot talk to Clara
     login_surfaces: frozenset[str] = frozenset({"discord"})
+    # The Discord bot built into the server (discord_bot/service.py): its token, whether it starts with the server,
+    # and the invite link shown on the web site (empty: built from the token)
+    discord_token: str | None = field(default=None, repr=False)
+    discord_auto_start: bool = False
+    discord_invite_url: str = ""
 
     @property
     def logs_dir(self) -> Path:
@@ -293,4 +298,7 @@ class Settings:
             session_days=_non_negative_int(env, "CLARA_SESSION_DAYS", 90),
             user_surfaces=parse_user_surfaces(text("CLARA_USER_SURFACES", "web,app,cli,console")),
             login_surfaces=parse_login_surfaces(text("CLARA_LOGIN_SURFACES", "discord")),
+            discord_token=text("DISCORD_BOT_TOKEN") or None,
+            discord_auto_start=_flag(env, "AUTO_START_DISCORD_BOT"),
+            discord_invite_url=text("DISCORD_BOT_INVIT_URL"),
         )
