@@ -66,6 +66,9 @@ Both consoles run the same commands (the `/` is optional):
 | `/facts <person> [add <text>\|del <id>]` | read or edit what Clara knows (person = id, `surface:user` or name) |
 | `/forget-person <person> [confirm]` | erase a person: accounts, facts and what they said (without `confirm`, only shows what would go) |
 | `/link <surface:user> <person>` | make an account belong to a person (merges them) |
+| `/remember <person> <text>`, `/forget <person> <fact id>` | the same as `/facts <person> add` / `del` |
+| `/relation [<person> [<0-100>\|+n\|-n\|reset]]` | Clara's relationship with each person (see *Relationship*) |
+| `/chime [default on\|off \| <space> on\|off\|default]` | where Clara may answer Discord messages that are not for her (see *Discord*) |
 | `/stop [now]` | stop the server: tell every client, refuse new questions, wait for running replies and agents, exit (`now`: do not wait); works from `clara-admin` too |
 | `/help [command]`, `/quit` | `/quit` stops the server like `/stop` from the embedded console, and only closes a remote one |
 
@@ -117,7 +120,7 @@ All routes except `/health` need `Authorization: Bearer <token>`.
 
 | Route | |
 | --- | --- |
-| `POST /v1/chat` | `{surface, user_id, user_name?, message, conversation?}` → `{reply, conversation, person, tools, usage}`; 413 if it cannot fit the model's window, 504 if the model hangs, 503 if the server is stopping |
+| `POST /v1/chat` | `{surface, user_id, user_name?, message, conversation?, quiet?, space?, roster?, focus?, mode?}` → `{reply, conversation, person, tools, usage, passed}`; 413 if it cannot fit the model's window, 504 if the model hangs, 503 if the server is stopping. `quiet`: never notify the person about this turn; the group fields are described in *Discord* |
 | `POST /v1/chat/stream` | same body; Server-Sent Events `turn` / `token` / `tool` / `tool_requests` / `usage` / `compacted` / `warning` / `done` / `error` |
 | `POST /v1/turns/{id}/tool-results` | `{results: [{id, content}]}`: a client's answer to a `tool_requests` event (see below) |
 | `GET /v1/conversations?surface=&user_id=&q=&limit=` | `{conversations: [{id, title, titled_by, pinned, created_at, updated_at, preview}]}`: the conversations the account's person started on that surface, pinned first, then the last written in; `q` keeps those whose title, messages or summary contain it (see *Conversation history*) |
@@ -133,7 +136,11 @@ All routes except `/health` need `Authorization: Bearer <token>`.
 | `GET /v1/reminders?surface=&user_id=` | the person's reminders that have not fired yet |
 | `DELETE /v1/reminders/{id}?surface=&user_id=` | cancel one of the person's own reminders |
 | `POST /v1/notifications` | `{surface, user_id, user_name?, text, title?, targets?, conversation?}` → `{id, sent_at, targets}`: notify that person now (see *Notifications*); 429 when too many |
-| `GET /v1/notifications/stream?surface=&user_id=` | Server-Sent Events of that account: its person's `reminder` and `notification` events for that surface, and `server` (running, stopping, stopped). Also served as `/v1/reminders/stream` |
+| `GET /v1/notifications/stream?surface=&user_id=` | Server-Sent Events of that account: its person's `reminder` and `notification` events for that surface, and `server` (running, stopping, stopped). Also served as `/v1/reminders/stream`. With `?surface=discord&all=true` (a client of the whole surface): the events of every account of that surface, each with `accounts` |
+| `POST /v1/accounts/register`, `POST /v1/accounts/login` | `{surface, user_id, user_name?, username, password}`: a client signs one of its accounts in (see *Discord*); 401 wrong password, 409 name taken or already signed in, 422 rules, 429 too many |
+| `POST /v1/accounts/logout`, `GET /v1/accounts/me?surface=&user_id=`, `GET /v1/accounts/signed-in?surface=` | sign it out; who it is signed in as, with its facts and relationship; every signed-in account of a surface |
+| `PUT /v1/spaces` | `{surface, spaces: [{id, name}]}`: the group spaces (Discord servers) the client is in now |
+| `GET /v1/admin/spaces`, `PATCH /v1/admin/spaces` `{default_chime}`, `PATCH /v1/admin/spaces/{id}` `{chime}`, `PATCH /v1/admin/people/{id}` `{relation}` | chime in, and the relationship (administrators) |
 | `POST /v1/accounts/link-code` | `{surface, user_id}` → `{code, expires_in}`: proof of control of that account |
 | `POST /v1/accounts/link` | `{surface, user_id, code, to_surface, to_user_id}`; 403 bad code, 409 both accounts have memories |
 | `DELETE /v1/conversations/{id}?surface=&user_id=` | forget a thread, keep the facts; with an account, only one its person started (404 otherwise) |
@@ -247,6 +254,58 @@ with httpx.stream("POST", "http://127.0.0.1:8765/v1/chat/stream",
 
 `src/clara/client.py` is a complete example.
 
+## Discord
+
+The Discord bot (`bot-discord`, a separate project) is a client with one token (`CLARA_TOKENS=discord:<token>`,
+`CLARA_CLIENT_SURFACES=discord=discord`). What follows is generic, but Discord is what uses it.
+
+**Signing in.** On the surfaces of `CLARA_LOGIN_SURFACES` (`discord` by default; `none` turns it off) an account
+must be signed in as a user before it can talk to Clara or touch its memory: the server answers 403 (`... is not
+signed in ...`) otherwise. The bot has no token per person: in a private Discord form it asks for a user name and a
+password, and sends them once.
+
+- `register` makes a new **user** (the same kind as `/user add`: it signs in on the web site, the app and the
+  terminal too, with the same memories) and signs the account in. The account's earlier memories come along. An
+  account that makes 3 users within a minute may make no other for an hour.
+- `login` signs the account in as an existing user; wrong passwords are limited per account
+  (`CLARA_AUTH_MAX_FAILURES`). The account joins the user's person; an account that was another user's before is
+  only *moved*, nobody is merged.
+- The account stays signed in until `logout`, or until the user is signed out everywhere (`/user logout`, a new
+  password), disabled or removed. `/user list` shows the accounts signed in for each user.
+
+**Group spaces.** A Discord server is a *space* (`discord:guild:<id>`); each of its channels is a conversation
+(`discord:channel:<id>`), and a private conversation is the person's own (`discord:<id>`). With a `space`, a turn
+may carry:
+
+| Field | |
+| --- | --- |
+| `roster` | `[{user_id, name}]`: the members of the space. Those signed in are listed in the system prompt, and Clara can read what she remembers about any of them with her `about_person` tool (read-only; only offered when someone else is listed). Accounts Clara does not know, or not signed in, are left out |
+| `focus` | the ids the message is about (mentioned, replied to): what Clara remembers about them (15 newest facts, 5 people) is in the prompt |
+| `mode` | `answer` (default: the message is for Clara), `observe` (it was not: it is stored as context, no model call, `observed: true`) or `maybe` (it was not; Clara answers only if she has something worth adding, else she replies `<pass>`: the message is stored without her work, `passed: true` and `reply: ""`) |
+
+In a group, every message reaches the model prefixed with its author's name. The server turns `maybe` into
+`observe` unless **chime in** is allowed in that space: an administrator switches it per space (`/chime`, or the
+web site's *Admin > Spaces*), with a default for the spaces nobody set (off). The client tells the server which
+spaces it is in (`PUT /v1/spaces`, when it starts, and when it joins or leaves one). Mind that with chime in, every
+message of a signed-in member costs a model call.
+
+**Privacy.** In a space, Clara can read what she remembers about a member while she talks to the others (that is
+what `about_person` and `focus` are for); the prompt asks her to be discreet. Registering on Discord means accepting
+that. People who are not signed in are not stored at all: the bot does not send their messages.
+
+**Reminders and notifications** reach Discord as private messages: the bot listens to
+`/v1/notifications/stream?surface=discord&all=true`, which gives each event of any person with a signed-in Discord
+account (meant for `discord`, or for every surface) with the `accounts` to send it to. What is for everybody (a
+change of model) is not sent there.
+
+## Relationship
+
+Clara keeps a relationship score with each person, 0 to 100 (none at first). It is in the system prompt on every
+surface and sets her tone: from warm complicity (85 and more) to dry and curt, but still helpful, under 25. She
+moves it herself with her `adjust_relation` tool when someone is clearly friendly or rude (at most once per answer,
+from -25 to +10; the first move starts from 50). Administrators read and set it with `/relation`, or on the web site
+(*People & memory*). Merging two people keeps a relationship; `/forget-person` erases it.
+
 ## Reminders
 
 A reminder is a text and a moment. When the moment comes, the server announces it **to the person who set
@@ -340,6 +399,7 @@ surface, with no link codes.
 | `app` | the desktop app (`clara-app`) |
 | `cli` | `clara-chat` |
 | `console` | `custom-console`, and `clara-admin` |
+| `discord` | not a sign-in surface: the Discord bot signs its accounts in for its people (see *Discord*) |
 
 `CLARA_USER_SURFACES` lists the surfaces a user may sign in on (those four by default).
 
@@ -383,7 +443,8 @@ Wrong passwords are limited per address (see *Security*).
   with a link code.
 - **Admin** (administrators): *Users* (add, reset a password, make administrator, disable, sign out, remove),
   *Server* (status, switch provider and model, stop), *People & memory* (everybody Clara knows, their facts,
-  linking, erasing a person) and a *Console* box with every server command.
+  the relationship, linking, erasing a person), *Spaces* (the Discord servers, and where Clara may chime in) and a
+  *Console* box with every server command.
 
 There are no reminders or notifications on the web site, and it runs no tools on your computer.
 
@@ -542,6 +603,8 @@ src/clara/
   users.py      users, password hashes, login tokens (the tables are in memory.py)
   auth.py       who is calling (client token, user token or web cookie) and what they may touch
   webapi.py     login, account, administration and PDF routes, and the web site's files
+  clientapi.py  what a client of many people (the Discord bot) uses: signing accounts in, spaces; chime in and
+                the relationship for administrators
   web/          the web site: index.html, style.css and ES modules (chat, memory, account, admin, markdown...)
   session.py    for clara-chat / clara-admin: sign in once, keep the token
   tailscale.py  publishes the server with `tailscale serve|funnel`, removes it on exit
@@ -567,5 +630,4 @@ config/system_prompt.md   Clara's personality, re-read when edited
 - Semantic recall of facts (embeddings).
 - A backend that is not Ollama: implement `LlmBackend.stream()` (the two providers, local and cloud, are
   both Ollama).
-- Turn the existing Discord bot into a client of this server.
 - Scheduled / proactive tasks.

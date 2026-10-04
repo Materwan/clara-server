@@ -17,6 +17,7 @@ from .agent import Agent
 from .lifecycle import Lifecycle
 from .memory import Memory, Person
 from .notifications import Notifier
+from .prompt import relation_label
 from .providers import ProviderError, ProviderManager
 from .settings import Settings
 from .tailscale import Tailscale
@@ -285,9 +286,10 @@ async def people_command(ctx: CommandContext, args: str) -> str:
     if not summaries:
         return "Nobody yet."
     return table(
-        ["id", "name", "facts", "accounts"],
+        ["id", "name", "facts", "relation", "accounts"],
         [
-            [str(s.person.id), s.person.name, str(s.facts), ", ".join(s.accounts)]
+            [str(s.person.id), s.person.name, str(s.facts), "-" if s.relation is None else str(s.relation),
+             ", ".join(s.accounts)]
             for s in summaries
         ],
     )
@@ -400,9 +402,10 @@ async def user_command(ctx: CommandContext, args: str) -> CommandResult | str:
                 state = "disabled" if user.disabled else ("admin" if user.is_admin else "user")
                 rows.append(
                     [user.name, state, f"{person.name} (id {person.id})" if person else "?",
-                     str(len(users.sessions_of(user.name))), (user.last_login_at or "never")[:16].replace("T", " ")]
+                     str(len(users.sessions_of(user.name))), ", ".join(users.accounts_signed_in_as(user.name)) or "-",
+                     (user.last_login_at or "never")[:16].replace("T", " ")]
                 )
-            return table(["name", "role", "person", "devices", "last login"], rows)
+            return table(["name", "role", "person", "devices", "signed in", "last login"], rows)
 
         if verb == "add":
             name = named()
@@ -450,3 +453,90 @@ async def user_command(ctx: CommandContext, args: str) -> CommandResult | str:
     except UserError as error:
         raise CommandError(str(error)) from None
     raise CommandError(f"Unknown action {verb!r}. Try /help user.")
+
+
+@registry.command("remember", "<person> <text>", "Store a fact about a person (same as /facts <person> add)")
+async def remember_command(ctx: CommandContext, args: str) -> str:
+    reference, _, text = args.strip().partition(" ")
+    if not reference or not text.strip():
+        raise CommandError("Usage: /remember <person> <text>   e.g. /remember Erwan likes jazz")
+    return await facts_command(ctx, f"{reference} add {text.strip()}")
+
+
+@registry.command("forget", "<person> <fact id>", "Delete a fact of a person (same as /facts <person> del)")
+async def forget_command(ctx: CommandContext, args: str) -> str:
+    reference, _, fact_id = args.strip().rpartition(" ")
+    if not reference or not fact_id.isdigit():
+        raise CommandError("Usage: /forget <person> <fact id>   (the ids are shown by /facts <person>)")
+    return await facts_command(ctx, f"{reference} del {fact_id}")
+
+
+@registry.command(
+    "relation",
+    "[<person> [<0-100> | +n | -n | reset]]",
+    "Clara's relationship with each person (it sets her tone); show it, set it, move it or reset it",
+)
+async def relation_command(ctx: CommandContext, args: str) -> str:
+    if not args.strip():
+        rows = [
+            [str(s.person.id), s.person.name, "-" if s.relation is None else f"{s.relation}/100", relation_label(s.relation)]
+            for s in ctx.memory.summaries()
+        ]
+        return table(["id", "name", "relation", ""], rows) if rows else "Nobody yet."
+    reference, _, value = args.strip().rpartition(" ")
+    if not reference or not re.fullmatch(r"[+-]?\d{1,3}|reset", value.lower()):
+        reference, value = args.strip(), ""  # only a person (whose name may have spaces)
+    person = find_person(ctx.memory, reference)
+    if value.lower() == "reset":
+        ctx.memory.set_relation(person.id, None)
+        return f"{person.name}: no relationship any more (Clara is neutral and polite)."
+    if value[:1] in "+-" and value:
+        score = ctx.memory.adjust_relation(person.id, int(value))
+    elif value:
+        if not 0 <= int(value) <= 100:
+            raise CommandError("A relationship goes from 0 to 100.")
+        score = ctx.memory.set_relation(person.id, int(value))
+    else:
+        score = ctx.memory.relation(person.id)
+    shown = "none yet" if score is None else f"{score}/100 ({relation_label(score)})"
+    return f"{person.name} (id {person.id}): {shown}"
+
+
+CHIME_VALUES = {"on": True, "off": False, "default": None}
+
+
+@registry.command(
+    "chime",
+    "[default on|off | <space> on|off|default]",
+    "Where Clara may answer messages not addressed to her (Discord servers): list, or switch it",
+    lambda ctx: ["default"] + [space.id for space in ctx.memory.spaces()],
+)
+async def chime_command(ctx: CommandContext, args: str) -> str:
+    memory = ctx.memory
+    words = args.split()
+    if not words:
+        default = memory.chime_default()
+        rows = [
+            [space.id, space.name, {None: f"default ({'on' if default else 'off'})", True: "on", False: "off"}[space.chime],
+             "" if space.present else "(bot not there)"]
+            for space in memory.spaces()
+        ]
+        lines = [f"Default: {'on' if default else 'off'}"]
+        lines.append(table(["space", "name", "chime in", ""], rows) if rows else "No space yet (the Discord bot lists its servers when it starts).")
+        return "\n".join(lines)
+    if len(words) < 2 or words[-1].lower() not in CHIME_VALUES:
+        raise CommandError("Usage: /chime default on|off   or   /chime <space id or name> on|off|default")
+    target, value = " ".join(words[:-1]), CHIME_VALUES[words[-1].lower()]
+    if target.lower() == "default":
+        if value is None:
+            raise CommandError("The default is on or off.")
+        memory.set_chime_default(value)
+        return f"By default, Clara {'may' if value else 'may not'} answer messages that are not for her."
+    matches = [s for s in memory.spaces() if s.id == target] or [
+        s for s in memory.spaces() if s.id.endswith(f":{target}") or s.name.lower() == target.lower()
+    ]
+    if len(matches) != 1:
+        raise CommandError(f"{'No' if not matches else 'More than one'} space matches {target!r}. See /chime.")
+    memory.set_space_chime(matches[0].id, value)
+    shown = {None: "the default", True: "on", False: "off"}[value]
+    return f"{matches[0].name or matches[0].id}: chime in is now {shown}."

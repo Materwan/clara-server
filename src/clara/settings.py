@@ -77,6 +77,17 @@ def parse_user_surfaces(raw: str) -> frozenset[str]:
     return surfaces
 
 
+def parse_login_surfaces(raw: str) -> frozenset[str]:
+    """`"discord"` -> the surfaces where an account must be signed in to talk; `none`: nowhere."""
+    if raw.strip().lower() == "none":
+        return frozenset()
+    surfaces = frozenset(part.strip().lower() for part in raw.replace("|", ",").split(",") if part.strip())
+    for surface in surfaces:
+        if not SURFACE_RE.match(surface):
+            raise SettingsError(f"CLARA_LOGIN_SURFACES: bad surface {surface!r} (a-z, 0-9, _ -)")
+    return surfaces
+
+
 def _positive_int(env: Mapping[str, str], key: str, default: int) -> int:
     raw = env.get(key, "").strip()
     if not raw:
@@ -165,6 +176,9 @@ class Settings:
     # the surfaces a login may be made on (a user token is bound to one of them)
     session_days: int = 90
     user_surfaces: frozenset[str] = frozenset({"web", "app", "cli", "console"})
+    # Surfaces where a client signs its people in (POST /v1/accounts/login or register): there, an account that
+    # is not signed in as a user cannot talk to Clara
+    login_surfaces: frozenset[str] = frozenset({"discord"})
 
     @property
     def logs_dir(self) -> Path:
@@ -278,4 +292,5 @@ class Settings:
             auth_block_seconds=_positive_int(env, "CLARA_AUTH_BLOCK_SECONDS", 300),
             session_days=_non_negative_int(env, "CLARA_SESSION_DAYS", 90),
             user_surfaces=parse_user_surfaces(text("CLARA_USER_SURFACES", "web,app,cli,console")),
+            login_surfaces=parse_login_surfaces(text("CLARA_LOGIN_SURFACES", "discord")),
         )

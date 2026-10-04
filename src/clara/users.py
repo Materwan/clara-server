@@ -136,9 +136,9 @@ class Users:
                 "SELECT COUNT(*) FROM users WHERE is_admin = 1 AND disabled = 0"
             ).fetchone()[0]
 
-    def create(self, name: str, password: str, admin: bool = False) -> User:
-        """A new user. They are the person already known by an account with this name (`cli:erwan`,
-        `app:erwan`...), or a new one."""
+    def create(self, name: str, password: str, admin: bool = False, person: Person | None = None) -> User:
+        """A new user. They are `person` if given, else the person already known by an account with this
+        name (`cli:erwan`, `app:erwan`...), or a new one."""
         name = name.strip().lower()
         if not NAME_RE.match(name):
             raise UserError("A user name has 1 to 32 characters: a-z, 0-9, '.', '_' or '-', not starting with a symbol.")
@@ -147,10 +147,13 @@ class Users:
         with self._memory.lock, db:
             if db.execute("SELECT 1 FROM users WHERE name = ?", (name,)).fetchone():
                 raise UserError(f"There already is a user called {name}.")
-            row = db.execute(
-                "SELECT person_id FROM accounts WHERE external_id = ? ORDER BY person_id LIMIT 1", (name,)
-            ).fetchone()
-            person_id = row["person_id"] if row else self._memory.resolve("web", name, name).id
+            if person is not None:
+                person_id = person.id
+            else:
+                row = db.execute(
+                    "SELECT person_id FROM accounts WHERE external_id = ? ORDER BY person_id LIMIT 1", (name,)
+                ).fetchone()
+                person_id = row["person_id"] if row else self._memory.resolve("web", name, name).id
             db.execute(
                 "INSERT INTO users (name, person_id, password_hash, is_admin, created_at) VALUES (?, ?, ?, ?, ?)",
                 (name, person_id, hash_password(password), int(admin), _stamp(self._clock())),
@@ -271,10 +274,61 @@ class Users:
             return db.execute("DELETE FROM sessions WHERE id = ? AND user = ?", (session_id, name)).rowcount > 0
 
     def revoke_all(self, name: str, except_id: int | None = None) -> int:
+        """Sign a user out of every device but `except_id`, and out of the accounts clients signed in for
+        them (Discord). Returns how many."""
+        with self._memory.lock, self._memory.database as db:
+            sessions = db.execute("DELETE FROM sessions WHERE user = ? AND id IS NOT ?", (name, except_id)).rowcount
+            return sessions + db.execute("DELETE FROM account_logins WHERE user = ?", (name,)).rowcount
+
+    # ------------------------------------------------------------------
+    # Accounts a client signed in (CLARA_LOGIN_SURFACES)
+    # ------------------------------------------------------------------
+    # A client that speaks for many people (the Discord bot) has no token per person: it sends their
+    # password once, and from then on the account (`discord:1234`) is *signed in* as that user until it
+    # signs out, the user is signed out everywhere, disabled or removed.
+    def sign_in_account(self, user: User, surface: str, external_id: str, client: str = "") -> None:
+        with self._memory.lock, self._memory.database as db:
+            db.execute(
+                "INSERT INTO account_logins (surface, external_id, user, client, created_at) VALUES (?, ?, ?, ?, ?)"
+                " ON CONFLICT (surface, external_id) DO UPDATE SET user = excluded.user, client = excluded.client,"
+                " created_at = excluded.created_at",
+                (surface, external_id, user.name, client, _stamp(self._clock())),
+            )
+            db.execute("UPDATE users SET last_login_at = ? WHERE name = ?", (_stamp(self._clock()), user.name))
+
+    def sign_out_account(self, surface: str, external_id: str) -> bool:
         with self._memory.lock, self._memory.database as db:
             return db.execute(
-                "DELETE FROM sessions WHERE user = ? AND id IS NOT ?", (name, except_id)
-            ).rowcount
+                "DELETE FROM account_logins WHERE surface = ? AND external_id = ?", (surface, external_id)
+            ).rowcount > 0
+
+    def account_user(self, surface: str, external_id: str) -> User | None:
+        """The user an account is signed in as, or None (not signed in, or the user is disabled)."""
+        with self._memory.lock:
+            row = self._memory.database.execute(
+                "SELECT u.* FROM account_logins l JOIN users u ON u.name = l.user"
+                " WHERE l.surface = ? AND l.external_id = ? AND u.disabled = 0",
+                (surface, external_id),
+            ).fetchone()
+        return self._user(row) if row else None
+
+    def signed_in_accounts(self, surface: str) -> dict[str, User]:
+        """Every account of a surface that is signed in (external id -> user), disabled users left out."""
+        with self._memory.lock:
+            rows = self._memory.database.execute(
+                "SELECT l.external_id, u.* FROM account_logins l JOIN users u ON u.name = l.user"
+                " WHERE l.surface = ? AND u.disabled = 0",
+                (surface,),
+            ).fetchall()
+        return {row["external_id"]: self._user(row) for row in rows}
+
+    def accounts_signed_in_as(self, name: str) -> list[str]:
+        """The accounts signed in as a user ("discord:1234")."""
+        with self._memory.lock:
+            rows = self._memory.database.execute(
+                "SELECT surface, external_id FROM account_logins WHERE user = ? ORDER BY surface, external_id", (name,)
+            ).fetchall()
+        return [f"{row['surface']}:{row['external_id']}" for row in rows]
 
     def prune(self) -> int:
         """Forget the sessions that have expired."""

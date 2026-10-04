@@ -6,7 +6,7 @@ import {
   ago, avatar, clear, confirmDialog, dateTime, duration, h, icon, openDialog, pageHead, popupMenu, promptDialog, secretDialog, toast,
 } from "./ui.js";
 
-const TABS = [["users", "Users"], ["server", "Server"], ["people", "People & memory"], ["console", "Console"]];
+const TABS = [["users", "Users"], ["server", "Server"], ["people", "People & memory"], ["spaces", "Spaces"], ["console", "Console"]];
 
 export function mountAdmin(container, me, tab = "users") {
   const body = h("div", {});
@@ -22,7 +22,7 @@ export function mountAdmin(container, me, tab = "users") {
     clear(tabs).append(...TABS.map(([id, label]) =>
       h("button", { role: "tab", "aria-selected": String(id === current), onclick: () => show(id) }, label)));
     clear(body);
-    ({ users, server, people, console: consoleTab })[current](body, me, (interval) => { timer = interval; });
+    ({ users, server, people, spaces, console: consoleTab })[current](body, me, (interval) => { timer = interval; });
   };
 
   container.append(pageHead("Administration"), h("div", { class: "scroll" }, h("div", { class: "container wide" }, tabs, body)));
@@ -70,7 +70,8 @@ function users(box, me) {
       h("td", {}, h("div", { class: "user-cell" }, avatar(user.name), h("div", {}, h("strong", {}, user.name), user.name === me.name && h("span", { class: "muted" }, " (you)")))),
       h("td", {}, user.disabled ? h("span", { class: "badge off" }, "Disabled") : user.is_admin ? h("span", { class: "badge admin" }, "Administrator") : h("span", { class: "badge" }, "User")),
       h("td", { "data-label": "Person" }, user.person ? `${user.person.name} (#${user.person.id})` : "None"),
-      h("td", { class: "num", "data-label": "Devices", title: user.surfaces.join(", ") }, String(user.sessions)),
+      h("td", { class: "num", "data-label": "Devices", title: [...user.surfaces, ...user.signed_in_accounts].join(", ") },
+        String(user.sessions + user.signed_in_accounts.length)),
       h("td", { "data-label": "Last sign-in", title: dateTime(user.last_login_at) }, ago(user.last_login_at)),
       h("td", { class: "end" }, more));
   }
@@ -229,7 +230,7 @@ function people(box) {
     avatar(p.name),
     h("div", { class: "info" },
       h("div", {}, h("strong", {}, p.name), " ", p.user && h("span", { class: "badge admin" }, "Can sign in")),
-      h("div", { class: "sub" }, `${p.facts} ${p.facts === 1 ? "fact" : "facts"}, ${p.accounts.join(", ") || "no account"}`)))));
+      h("div", { class: "sub" }, `${p.facts} ${p.facts === 1 ? "fact" : "facts"}, ${p.relation === null ? "no relationship" : `relationship ${p.relation}/100`}, ${p.accounts.join(", ") || "no account"}`)))));
     if (!found.length) listBox.append(h("p", { class: "rail-note" }, "Nobody yet."));
     if (selected !== null) {
       const again = found.find((p) => p.id === selected);
@@ -254,10 +255,33 @@ function people(box) {
         if (!text.value.trim()) return;
         try { await api.post(`/v1/admin/people/${person.id}/facts`, { text: text.value }); show(person); load(); } catch (error) { fail(error); }
       } }, text, h("button", { type: "submit" }, icon("plus", { size: 18 }), "Add fact"))),
+    relationPanel(person),
     h("section", { class: "panel" }, h("div", { class: "panel-body row wrap" },
       h("button", { onclick: () => link(person) }, icon("link", { size: 18 }), "Link an account…"),
       h("span", { class: "grow" }),
       h("button", { class: "danger", onclick: () => erase(person) }, icon("trash", { size: 18 }), "Erase this person…"))));
+  }
+
+  function relationPanel(person) {
+    const value = h("input", { type: "number", min: 0, max: 100, step: 1, value: person.relation ?? "", placeholder: "none", "aria-label": "Relationship, 0 to 100", style: "width: 7rem" });
+    const save = async (relation) => {
+      try {
+        const done = await api.patch(`/v1/admin/people/${person.id}`, { relation });
+        person.relation = done.relation;
+        value.value = done.relation ?? "";
+        toast(done.relation === null ? "Relationship reset." : `Relationship: ${done.relation}/100 (${done.relation_label}).`);
+        load();
+      } catch (error) { fail(error); }
+    };
+    return h("section", { class: "panel" },
+      h("div", { class: "panel-head" }, h("div", {}, h("h3", {}, "Relationship"),
+        h("p", { class: "muted small" }, "0 to 100. It sets Clara's tone with them on every surface, and she moves it herself when they are friendly or rude."))),
+      h("form", { class: "panel-body add-form", onsubmit: (event) => {
+        event.preventDefault();
+        const number = Number(value.value);
+        if (value.value === "" || !Number.isInteger(number) || number < 0 || number > 100) return toast("A whole number from 0 to 100.", true);
+        save(number);
+      } }, value, h("button", { type: "submit" }, "Save"), h("button", { type: "button", onclick: () => save(null) }, "Reset")));
   }
 
   async function link(person) {
@@ -282,6 +306,47 @@ function people(box) {
       placeholder();
       load();
     } catch (error) { fail(error); }
+  }
+
+  load();
+}
+
+// ---- spaces ------------------------------------------------------------------------------------------------
+
+function spaces(box) {
+  const defaults = h("section", { class: "panel" });
+  const list = h("section", { class: "panel" });
+  box.append(
+    h("p", { class: "intro" }, "The Discord servers the bot is in. In each, Clara always answers when she is mentioned or replied to, and reads what the members with an account write. With chime in, she may also answer a message that was not for her when she has something to add (it costs a model call for every message)."),
+    defaults, list);
+
+  const choice = (value) => value === null ? "default" : value ? "on" : "off";
+
+  async function load() {
+    let found;
+    try { found = await api.get("/v1/admin/spaces"); } catch (error) { return fail(error); }
+    const toggle = h("input", { type: "checkbox", checked: found.default_chime, onchange: async () => {
+      try { await api.patch("/v1/admin/spaces", { default_chime: toggle.checked }); toast("Saved."); load(); } catch (error) { fail(error); }
+    } });
+    clear(defaults).append(h("div", { class: "panel-body" }, h("label", { class: "check" }, toggle, "Chime in by default (where no choice was made)")));
+    if (!found.spaces.length) {
+      clear(list).append(h("div", { class: "empty-state" }, mark(36), h("strong", {}, "No space yet"), "The Discord bot lists its servers here when it starts."));
+      return;
+    }
+    clear(list).append(h("table", { class: "grid cards" },
+      h("thead", {}, h("tr", {}, ["Space", "Id", "Chime in", ""].map((t) => h("th", {}, t)))),
+      h("tbody", {}, found.spaces.map((space) => {
+        const select = h("select", { "aria-label": `Chime in for ${space.name || space.id}`, onchange: async () => {
+          const chime = { default: null, on: true, off: false }[select.value];
+          try { await api.patch(`/v1/admin/spaces/${encodeURIComponent(space.id)}`, { chime }); toast("Saved."); load(); } catch (error) { fail(error); }
+        } }, [["default", `Default (${found.default_chime ? "on" : "off"})`], ["on", "On"], ["off", "Off"]].map(([value, label]) =>
+          h("option", { value, selected: choice(space.chime) === value }, label)));
+        return h("tr", {},
+          h("td", {}, h("strong", {}, space.name || space.id)),
+          h("td", { "data-label": "Id", class: "muted small" }, space.id),
+          h("td", { "data-label": "Chime in" }, select),
+          h("td", { class: "end" }, space.present ? h("span", { class: "badge ok" }, "Bot present") : h("span", { class: "badge off" }, "Bot gone")));
+      }))));
   }
 
   load();

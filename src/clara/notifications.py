@@ -225,3 +225,41 @@ class Notifier:
                 await wake.wait()
         finally:
             self._listeners.discard(wake)
+
+    async def surface_events(
+        self, client: str, surface: str, recipients: Callable[[int], list[str]]
+    ) -> AsyncIterator[dict[str, Any]]:
+        """For a client that speaks for every account of a surface (the Discord bot): the reminders and
+        notifications of every person meant for that surface, each with `accounts`, the ids on that surface
+        to deliver it to (`recipients(person_id)`; an event nobody there can receive is skipped). What is for
+        everybody (a change of model) is left out: it would be sent to each one. Plus the state of the server."""
+        wake = asyncio.Event()
+        self._listeners.add(wake)
+        told = ""
+        name = f"{client}/{surface}:*"
+        try:
+            cursor = self.memory.reminder_cursor(name)
+            if cursor is None:  # first time: no backlog
+                cursor = self.memory.last_reminder_event()
+                self.memory.set_reminder_cursor(name, cursor)
+            while True:
+                wake.clear()
+                batch = self.memory.reminder_events_after(cursor, BATCH)
+                for event in batch:
+                    if event.person_id is not None and for_surface(event, surface):
+                        accounts = recipients(event.person_id)
+                        if accounts:
+                            yield {**event_payload(event), "accounts": accounts}
+                    cursor = event.id
+                    self.memory.set_reminder_cursor(name, cursor)
+                if len(batch) == BATCH:
+                    continue
+                state = self.server_state
+                if state != told:
+                    told = state
+                    yield {"type": "server", "state": state, "message": SERVER_MESSAGES[state]}
+                if state == "stopped":
+                    return
+                await wake.wait()
+        finally:
+            self._listeners.discard(wake)

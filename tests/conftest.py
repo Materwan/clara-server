@@ -69,6 +69,8 @@ def settings(tmp_path: Path) -> Settings:
             "CLARA_CLOUD_MODEL": "fake-big",
             "CLARA_DATA_DIR": str(tmp_path / "data"),
             "CLARA_SYSTEM_PROMPT_FILE": str(tmp_path / "missing.md"),
+            # discord accounts talk without signing in here; test_discord.py turns signing in on
+            "CLARA_LOGIN_SURFACES": "none",
         }
     )
 
