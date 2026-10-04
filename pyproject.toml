@@ -20,17 +20,19 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.5"]
+discord = ["discord.py>=2.4"]  # the Discord bot (built in, or on its own: clara-discord)
 
 [project.scripts]
 clara-server = "clara.server:main"
 clara-chat = "clara.client:main"
 clara-admin = "clara.admin:main"
+clara-discord = "clara.discord_bot.standalone:run"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-clara = ["web/*"]  # the web site
+clara = ["web/*", "web/fonts/*"]  # the web site and its fonts
 
 [tool.ruff]
 line-length = 120

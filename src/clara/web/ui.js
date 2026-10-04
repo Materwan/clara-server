@@ -1,6 +1,10 @@
 // Small helpers to build the page: elements, dialogs, menus, toasts, dates. No inline styles or HTML strings:
 // everything is made with the DOM, so text from the server can never become markup.
 
+import { icon } from "./icons.js";
+
+export { icon };
+
 export function h(tag, props, ...children) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(props || {})) {
@@ -59,7 +63,7 @@ export function confirmDialog(title, text, okLabel = "OK", danger = false) {
     h("div", {}, h("h3", {}, title), h("p", {}, text),
       h("div", { class: "actions" },
         h("button", { onclick: () => close(false) }, "Cancel"),
-        h("button", { class: "primary" + (danger ? " danger solid" : ""), onclick: () => close(true) }, okLabel))),
+        h("button", { class: danger ? "danger solid" : "primary", onclick: () => close(true) }, okLabel))),
   ).then((value) => value === true);
 }
 
@@ -68,8 +72,7 @@ export function promptDialog(title, label, value = "", okLabel = "Save", { type 
     const input = h("input", { type, value, autocomplete: type === "password" ? "new-password" : "off", autofocus: true });
     const form = h("form", { onsubmit: (event) => { event.preventDefault(); close(input.value); } },
       h("h3", {}, title),
-      h("label", { class: "field" }, label, input),
-      hint && h("p", { class: "muted small" }, hint),
+      h("div", { class: "stack" }, h("label", { class: "field" }, label, input), hint && h("p", { class: "muted small" }, hint)),
       h("div", { class: "actions" },
         h("button", { type: "button", onclick: () => close(null) }, "Cancel"),
         h("button", { class: "primary", type: "submit" }, okLabel)));
@@ -83,7 +86,7 @@ export function secretDialog(title, intro, secret) {
     h("div", {}, h("h3", {}, title), h("p", {}, intro), h("div", { class: "secret-box" }, secret),
       h("p", { class: "muted small" }, "It is shown only now: copy it before closing."),
       h("div", { class: "actions" },
-        h("button", { onclick: () => copy(secret) }, "Copy"),
+        h("button", { onclick: () => copy(secret) }, icon("copy", { size: 18 }), "Copy"),
         h("button", { class: "primary", onclick: () => close(true) }, "Done"))));
 }
 
@@ -98,25 +101,55 @@ export async function copy(text) {
 
 let openPopup = null;
 
-/** A small menu next to `anchor`; `items` are `{label, run, danger}` (or null for nothing). */
+/** A small menu next to `anchor`; `items` are `{label, icon, run, danger}`, "-" for a separator, or null for nothing. */
 export function popupMenu(anchor, items) {
   closePopup();
   const rect = anchor.getBoundingClientRect();
   const menu = h("div", { class: "popup", role: "menu" },
-    items.filter(Boolean).map((item) =>
-      h("button", { role: "menuitem", class: item.danger ? "danger" : "", onclick: () => { closePopup(); item.run(); } }, item.label)));
+    items.filter(Boolean).map((item) => item === "-" ? h("hr", {}) :
+      h("button", { role: "menuitem", class: item.danger ? "danger" : "", onclick: () => { closePopup(); item.run(); } },
+        item.icon && icon(item.icon, { size: 18 }), item.label)));
   document.body.append(menu);
   const width = menu.offsetWidth;
-  menu.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)) + "px";
+  const left = rect.right - width > 8 ? rect.right - width : rect.left; // aligned on the button's right edge when it fits
+  menu.style.left = Math.max(8, Math.min(left, window.innerWidth - width - 8)) + "px";
   const below = rect.bottom + 4;
   menu.style.top = (below + menu.offsetHeight > window.innerHeight ? Math.max(8, rect.top - menu.offsetHeight - 4) : below) + "px";
   openPopup = menu;
+  menu.querySelector("button")?.focus({ preventScroll: true });
+  menu.addEventListener("keydown", (event) => {
+    const buttons = [...menu.querySelectorAll("button")];
+    const at = buttons.indexOf(document.activeElement);
+    if (event.key === "Escape") { closePopup(); anchor.focus(); }
+    else if (event.key === "ArrowDown") { event.preventDefault(); buttons[(at + 1) % buttons.length].focus(); }
+    else if (event.key === "ArrowUp") { event.preventDefault(); buttons[(at - 1 + buttons.length) % buttons.length].focus(); }
+  });
   setTimeout(() => document.addEventListener("click", closePopup, { once: true }), 0);
 }
 
 export function closePopup() {
   if (openPopup) openPopup.remove();
   openPopup = null;
+}
+
+// ---- the page frame ----------------------------------------------------------------------------------------
+
+/** Open or close the navigation rail (it slides in over the page on small screens). */
+export function toggleRail(open) {
+  document.body.classList.toggle("rail-open", open);
+}
+
+/** A page's header: on a phone it starts with the button that opens the navigation. */
+export function pageHead(title, ...actions) {
+  return h("header", { class: "page-head" },
+    h("button", { class: "ghost icon-btn open-rail", "aria-label": "Open navigation", onclick: () => toggleRail(true) }, icon("menu")),
+    typeof title === "string" ? h("h1", { class: "title grow" }, title) : title,
+    ...actions);
+}
+
+/** The round badge with someone's first letter. */
+export function avatar(name, extra = "") {
+  return h("span", { class: ("avatar " + extra).trim(), "aria-hidden": "true" }, (name || "?").trim().charAt(0) || "?");
 }
 
 // ---- dates -----------------------------------------------------------------------------------------------

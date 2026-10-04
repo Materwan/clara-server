@@ -90,6 +90,7 @@ def describe_user(app: FastAPI, user: User) -> dict:
         "person": {"id": person.id, "name": person.name} if person else None,
         "sessions": len(sessions),
         "surfaces": sorted({s.surface for s in sessions}),
+        "signed_in_accounts": users.accounts_signed_in_as(user.name),  # signed in by a client (Discord)
     }
 
 
@@ -338,7 +339,7 @@ async def admin_people(admin: Admin, request: Request) -> dict:
     return {
         "people": [
             {"id": s.person.id, "name": s.person.name, "facts": s.facts, "accounts": s.accounts,
-             "user": by_person.get(s.person.id)}
+             "user": by_person.get(s.person.id), "relation": s.relation}
             for s in state.memory.summaries()
         ]
     }

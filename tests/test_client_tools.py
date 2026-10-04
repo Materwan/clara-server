@@ -226,8 +226,8 @@ async def test_instructions_and_prefix(memory, tmp_path):
 
 async def test_manual_compaction_replaces_older_messages_by_a_summary(memory, tmp_path):
     backend = FakeBackend(say("a1", prompt_tokens=700), say("a2", prompt_tokens=1500), say("The user asked q1 and q2."), say("a3"))
-    agent = make_agent(memory, tmp_path, backend, context_window=4000, compact_percent=0)
-    long = "x" * 3500  # about 1000 tokens
+    agent = make_agent(memory, tmp_path, backend, context_window=8000, compact_percent=0)
+    long = "x" * 7000  # about 2000 tokens
     await drive(agent, request(message="q1 " + long))
     await drive(agent, request(message="q2 " + long))
     full = agent.context("console:erwan")["percent"]

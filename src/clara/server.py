@@ -42,7 +42,7 @@ import logging
 import sys
 import time
 from contextlib import asynccontextmanager
-from typing import Annotated, Any, AsyncIterator
+from typing import Annotated, Any, AsyncIterator, Callable, Literal
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -60,8 +60,11 @@ from .agent import (
     ServerStopping,
 )
 from .announce import compose
-from .auth import Admin, Client, peer_of, require_account, require_conversation
+from .auth import Admin, Client, peer_of, require_account, require_conversation, require_space
+from .clientapi import install as install_clients
 from .commands import CommandContext, CommandResult, registry
+from .discord_bot.local import LocalBackend
+from .discord_bot.service import DiscordService
 from .lifecycle import Lifecycle
 from .linking import LinkCodes
 from .memory import MAX_TITLE_LENGTH, ConversationInfo, Memory, MergeRefused, Person
@@ -91,6 +94,14 @@ class _Body(BaseModel):
         return str(value) if isinstance(value, int) and not isinstance(value, bool) else value
 
 
+MAX_ROSTER = 500
+
+
+class RosterEntry(_Body):
+    user_id: ExternalId
+    name: str = Field(default="", max_length=80)
+
+
 class ChatBody(_Body):
     surface: Surface
     user_id: ExternalId
@@ -103,11 +114,19 @@ class ChatBody(_Body):
     prefix: str = Field(default="", max_length=50_000)  # put before the message, never summarised
     ephemeral: bool = False  # one-shot job: no persona, no memory, nothing stored
     timezone: str | None = Field(default=None, max_length=64)  # IANA name, e.g. "Europe/Paris"
+    quiet: bool = False  # never notify the person about this turn (the client shows the answer anyway)
+    # A group space (a Discord server, see README "Discord"): its id, its members, who the message is about
+    space: str | None = Field(default=None, min_length=1, max_length=200)
+    roster: list[RosterEntry] = Field(default_factory=list, max_length=MAX_ROSTER)
+    focus: list[ExternalId] = Field(default_factory=list, max_length=20)
+    mode: Literal["answer", "observe", "maybe"] = "answer"
 
-    def to_request(self) -> ChatRequest:
+    def to_request(self, roster: tuple[Person, ...] = (), focus: tuple[Person, ...] = (), mode: str = "") -> ChatRequest:
         return ChatRequest(
             self.surface, self.user_id, self.user_name, self.message, self.conversation,
             tuple(self.tools), self.instructions, self.prefix, self.ephemeral, self.timezone,
+            quiet=self.quiet or self.mode != "answer", space=self.space, roster=roster, focus=focus,
+            mode=mode or self.mode,
         )
 
 
@@ -278,15 +297,29 @@ def create_app(
             )
         if tailscale.public and settings.admin_tokens:
             log.warning("CLARA_TAILSCALE=funnel: the remote admin console (CLARA_ADMIN_TOKENS) is public too")
+    discord_bot = DiscordService(
+        settings.discord_token, lambda: LocalBackend(app), settings.discord_invite_url, settings.discord_auto_start
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         lifecycle.loop = asyncio.get_running_loop()
         scheduler = asyncio.create_task(reminders.run())
         publishing = asyncio.create_task(tailscale.start())  # slow if tailscale hangs: not before the server is up
+        bot_start = None
+        if settings.discord_auto_start:
+            if discord_bot.state in ("unavailable", "no-token"):
+                log.warning("AUTO_START_DISCORD_BOT is on, but: %s", discord_bot.describe())
+            else:
+                bot_start = asyncio.create_task(discord_bot.start())  # connecting takes seconds: in the background
         try:
             yield
         finally:
+            if bot_start is not None and not bot_start.done():
+                bot_start.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await bot_start
+            await discord_bot.stop()
             publishing.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await publishing
@@ -313,9 +346,10 @@ def create_app(
     app.state.traffic = traffic
     app.state.lifecycle = lifecycle
     app.state.providers = providers
+    app.state.discord = discord_bot
     app.state.commands = CommandContext(
         settings, memory, agent, providers, time.monotonic(), f"{settings.host}:{settings.port}", lifecycle,
-        notifier, tailscale, users,
+        notifier, tailscale, users, discord_bot,
     )
 
     def known_person(surface: Surface, user_id: ExternalId) -> Person:
@@ -332,12 +366,37 @@ def create_app(
         if lifecycle.stopping:
             raise HTTPException(503, "Clara is stopping and takes no new question.")
 
+    def members(surface: str, ids: list[tuple[str, str]]) -> tuple[Person, ...]:
+        """The people behind the accounts `ids` of a surface (id, name shown), once each, leaving out the
+        accounts Clara does not know (and, on a login surface, those not signed in): nothing is created."""
+        signed_in = users.signed_in_accounts(surface) if surface in settings.login_surfaces else None
+        found: dict[int, Person] = {}
+        for user_id, name in ids:
+            if signed_in is not None and user_id not in signed_in:
+                continue
+            person = memory.find_person(surface, user_id)
+            if person is not None and person.id not in found:
+                found[person.id] = Person(person.id, " ".join(name.split()) or person.name)
+        return tuple(found.values())
+
     def checked(http: Request, client: str, body: ChatBody) -> ChatRequest:
         refuse_when_stopping()
         require_account(http, client, body.surface, body.user_id)
         if body.conversation:
             require_conversation(http, client, body.conversation)
-        request = body.to_request()
+        roster: tuple[Person, ...] = ()
+        focus: tuple[Person, ...] = ()
+        mode = body.mode
+        if body.space is not None:
+            require_space(http, client, body.space, body.surface)
+            roster = members(body.surface, [(entry.user_id, entry.name) for entry in body.roster])
+            named = {entry.user_id: entry.name for entry in body.roster}
+            focus = members(body.surface, [(user_id, named.get(user_id, "")) for user_id in body.focus])
+        elif body.roster or body.focus:
+            raise HTTPException(422, "roster and focus need a space")
+        if mode == "maybe" and not memory.chime_allowed(body.space):
+            mode = "observe"  # an administrator did not let Clara answer what is not for her there
+        request = body.to_request(roster, focus, mode)
         try:
             agent.validate(request)
         except ValueError as error:
@@ -417,20 +476,44 @@ def create_app(
             raise HTTPException(status, str(error)) from None
         return {"id": event.id, "sent_at": event.fired_at, "targets": list(event.targets)}
 
-    async def event_stream(client: Client, http: Request, surface: str | None, user_id: str | None):
+    def recipients(surface: str) -> Callable[[int], list[str]]:
+        """The accounts of a person on a surface that can be sent something (signed in, on a login surface)."""
+
+        def accounts(person_id: int) -> list[str]:
+            mine = [external for s, external in memory.accounts_of(person_id) if s == surface]
+            if surface in settings.login_surfaces:
+                mine = [external for external in mine if users.account_user(surface, external) is not None]
+            return mine
+
+        return accounts
+
+    async def event_stream(
+        client: Client, http: Request, surface: str | None, user_id: str | None, every_account: bool = False
+    ):
         """What the server announces to an account: its person's reminders and notifications (for its
         surface), and the state of the server. Without an account: only the state of the server and what
-        is for everybody."""
-        if bool(surface) != bool(user_id):
+        is for everybody. `every_account` (a client of a whole surface): what is for any of its accounts."""
+        if every_account:
+            if not surface or user_id or not SURFACE_RE.match(surface):
+                raise HTTPException(422, "all=true needs a surface and no user_id")
+            if getattr(client, "user", None) is not None:
+                raise HTTPException(403, "Only a client may listen for a whole surface")
+            allowed = settings.client_surfaces.get(client)
+            if allowed is not None and surface not in allowed:
+                raise HTTPException(403, f"This client may not use the surface {surface!r}")
+        elif bool(surface) != bool(user_id):
             raise HTTPException(422, "Give both surface and user_id, or neither")
-        if surface is not None:
+        elif surface is not None:
             if not SURFACE_RE.match(surface) or not 1 <= len(user_id or "") <= 128:
                 raise HTTPException(422, "Bad surface or user_id")
             require_account(http, client, surface, user_id)
 
         async def events() -> AsyncIterator[str]:
             try:
-                stream = notifier.events(client, surface, user_id)
+                if every_account:
+                    stream = notifier.surface_events(client, surface, recipients(surface))
+                else:
+                    stream = notifier.events(client, surface, user_id)
                 async with contextlib.aclosing(with_keepalive(stream)) as keepalive:
                     async for event in keepalive:
                         yield ": keepalive\n\n" if event is None else sse(event)
@@ -446,9 +529,10 @@ def create_app(
 
     @app.get("/v1/notifications/stream")
     async def notification_stream(
-        client: Client, http: Request, surface: str | None = None, user_id: str | None = None
+        client: Client, http: Request, surface: str | None = None, user_id: str | None = None,
+        all: bool = False,  # noqa: A002 - the name of the query parameter
     ) -> StreamingResponse:
-        return await event_stream(client, http, surface, user_id)
+        return await event_stream(client, http, surface, user_id, all)
 
     @app.get("/v1/reminders/stream")
     async def reminder_stream(
@@ -670,7 +754,12 @@ def create_app(
             http.scope["clara_sensitive"] = True  # it holds a password: the traffic log does not keep it
         return {"output": result.output, "quit": result.quit}
 
+    # what the built-in Discord bot calls directly (discord_bot/local.py)
+    app.state.check_chat = checked
+    app.state.surface_recipients = recipients
+
     install(app)
+    install_clients(app)
     install_web(app)
     return app
 

@@ -41,7 +41,7 @@ from .memory import ConversationState, Fact, Memory, Person, StoredMessage, Turn
 from .notifications import SERVER, SURFACE_RE, NotificationError, Notifier
 from .prompt import SystemPrompt
 from .reminders import ReminderService
-from .tools import Toolbox, ToolContext
+from .tools import ABOUT_PERSON, Toolbox, ToolContext
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +57,14 @@ MAX_MESSAGE_SHARE = 0.5  # share of the window a single new message may take
 NOTIFIED_REPLY = 200  # characters of the answer quoted in the notification of a long turn
 TITLE_EXCERPT = 1_500  # characters of the first question, and of the first answer, a title is written from
 TITLE_LENGTH = 60
+MODES = ("answer", "observe", "maybe")
+PASS = "<pass>"  # what the model answers to a "maybe" message it has nothing to add to
+MAYBE_NOTE = (
+    "[This message was not addressed to you. Answer only if you have something genuinely useful or welcome to "
+    f"add, or if they clearly want you; otherwise reply exactly {PASS} and nothing else.]"
+)
+MAX_FOCUS = 5  # people the message is about whose facts are shown
+FOCUS_FACTS = 15  # facts shown for each of them (the newest)
 TITLE_INSTRUCTIONS = (
     "Write a title for the conversation below: 3 to 6 words saying what it is about, in the language it "
     "is written in. Answer with the title alone: no quotes, no full stop, no comment."
@@ -72,6 +80,12 @@ def clean_title(text: str) -> str:
     if len(line) > TITLE_LENGTH:
         line = line[:TITLE_LENGTH].rsplit(" ", 1)[0].rstrip(" ,;:-") + "…"
     return line
+
+
+def passed(reply: str) -> bool:
+    """Did the model decline to answer a "maybe" message?"""
+    text = reply.strip().strip("`*_.!").strip().lower()
+    return not text or text in (PASS, "pass", "[pass]") or text.startswith(PASS)
 
 
 def now_in(timezone: str | None) -> datetime:
@@ -145,10 +159,22 @@ class ChatRequest:
     timezone: str | None = None  # IANA name for the date and time shown to the model (default: the server's)
     no_tools: bool = False  # the server's own tools are not offered (the model can only write)
     quiet: bool = False  # never notify the person about this turn (it is itself an announcement)
+    # A group space (a Discord server): its id, the members who have an account, the people the message is about
+    space: str | None = None
+    roster: tuple[Person, ...] = ()
+    focus: tuple[Person, ...] = ()
+    # "answer" (the message is for Clara), "observe" (it was not: only stored, as context) or "maybe" (it was
+    # not, and Clara answers only if she has something worth adding; else it is only stored)
+    mode: str = "answer"
 
     @property
     def conversation_id(self) -> str:
         return self.conversation or f"{self.surface}:{self.user_id}"
+
+    @property
+    def group(self) -> bool:
+        """Several people talk in this conversation: every message carries its author's name."""
+        return self.space is not None
 
 
 @dataclass
@@ -231,6 +257,10 @@ class Agent:
     # ------------------------------------------------------------------
     def validate(self, request: ChatRequest) -> None:
         """Raise ValueError if the request's tools are unusable (checked before streaming)."""
+        if request.mode not in MODES:
+            raise ValueError(f"mode must be one of {', '.join(MODES)}")
+        if request.mode != "answer" and (request.ephemeral or request.tools):
+            raise ValueError("A message Clara may not answer cannot be ephemeral or bring tools.")
         if request.timezone:
             try:
                 ZoneInfo(request.timezone)
@@ -276,14 +306,15 @@ class Agent:
         content = f"{prefix}\n\n{text}" if prefix else text
         return f"{author}: {content}" if author else content
 
-    def _replay(self, stored: list[StoredMessage], person: Person) -> list[dict]:
-        """Past messages as the model wants them. Old tool outputs are cut to save context."""
+    def _replay(self, stored: list[StoredMessage], person: Person, group: bool = False) -> list[dict]:
+        """Past messages as the model wants them. Old tool outputs are cut to save context. Messages of other
+        people carry their name; in a group, everybody's do."""
         tool_rows = [i for i, message in enumerate(stored) if message.role == "tool"]
         stale = set(tool_rows[: max(0, len(tool_rows) - RECENT_TOOL_RESULTS_KEPT)])
         messages: list[dict] = []
         for index, message in enumerate(stored):
             if message.role == "user":
-                other = message.person_id != person.id and message.author
+                other = (group or message.person_id != person.id) and message.author
                 content = self._user_content(message.content, message.prefix, message.author if other else "")
                 messages.append({"role": "user", "content": content})
             elif message.role == "assistant":
@@ -317,16 +348,23 @@ class Agent:
                 messages.append({"role": "system", "content": request.instructions.strip()})
         else:
             facts, omitted = self._facts_for_prompt(person)
+            others = tuple(
+                (other, self.memory.facts(other.id, FOCUS_FACTS))
+                for other in request.focus[:MAX_FOCUS]
+                if other.id != person.id
+            )
             system = self.prompt.render(
                 person, request.surface, facts, now, request.instructions, state.summary, omitted,
+                self.memory.relation(person.id), request.roster, others,
             )
             messages.append({"role": "system", "content": system})
             stored = self.memory.history(request.conversation_id, self.history_turns, state.upto_id)
-            messages.extend(self._replay(stored, person))
-        content = self._user_content(request.message, request.prefix)
+            messages.extend(self._replay(stored, person, request.group))
+        content = self._user_content(request.message, request.prefix, person.name if request.group else "")
         if not request.ephemeral:
             # Only here, never stored: replayed history and system prompt stay identical between turns
-            content = f"[time: {now.strftime('%H:%M')}]\n\n{content}"
+            note = f"{MAYBE_NOTE}\n" if request.mode == "maybe" else ""
+            content = f"[time: {now.strftime('%H:%M')}]\n{note}\n{content}"
         messages.append({"role": "user", "content": content})
         return messages
 
@@ -410,12 +448,17 @@ class Agent:
         person = self.memory.resolve(request.surface, request.user_id, request.user_name)
         conversation = request.conversation_id
         ephemeral = request.ephemeral
+        if request.mode == "observe":
+            async for event in self._observe(request, person):
+                yield event
+            return
         context = ToolContext(
             person, self.memory, self.reminders, request.timezone, request.surface, request.user_id, conversation,
-            self.notifier,
+            self.notifier, roster=tuple(p for p in request.roster if p.id != person.id),
         )
         client_tools = {schema["function"]["name"] for schema in request.tools}
-        server_tools = [] if ephemeral or request.no_tools else list(self.toolbox.schemas)
+        hidden = set() if context.roster else {ABOUT_PERSON}
+        server_tools = [] if ephemeral or request.no_tools else self.toolbox.schemas_without(hidden)
         schemas = server_tools + list(request.tools)
         turn_id = uuid.uuid4().hex
         yield {"type": "turn", "id": turn_id}
@@ -517,7 +560,11 @@ class Agent:
                     rows.append(TurnRow("tool", results[call_id], tool_name=call.name))
 
             reply = "".join(reply_parts).strip()
-            if not ephemeral and (reply or rows):  # an empty answer would only pollute the history
+            declined = request.mode == "maybe" and passed(reply)
+            if declined:  # nothing to add: the message is kept as context, without the model's work
+                reply, rows = "", []
+                self.memory.add_turn(conversation, person.id, request.message, [], request.prefix)
+            elif not ephemeral and (reply or rows):  # an empty answer would only pollute the history
                 self.memory.add_turn(conversation, person.id, request.message, rows, request.prefix)
                 self.memory.set_context_tokens(conversation, context_tokens)
                 if self.compact_percent and 100 * context_tokens / self.window >= self.compact_percent:
@@ -539,6 +586,26 @@ class Agent:
             "context": self._context_info(context_tokens),
             "model": getattr(self.backend, "model", ""),  # may change between turns (/provider)
             "provider": getattr(self.backend, "active", ""),
+            "passed": declined,  # a "maybe" message Clara chose not to answer (reply is "")
+        }
+
+    async def _observe(self, request: ChatRequest, person: Person) -> AsyncIterator[dict]:
+        """A message that was not for Clara: stored in the conversation, so that she knows what was said."""
+        conversation = request.conversation_id
+        yield {"type": "turn", "id": uuid.uuid4().hex}
+        async with self._conversation_lock(conversation):
+            self.memory.add_turn(conversation, person.id, request.message, [], request.prefix)
+        yield {
+            "type": "done",
+            "reply": "",
+            "conversation": conversation,
+            "person": {"id": person.id, "name": person.name},
+            "tools": [],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+            "context": self._context_info(self.memory.state(conversation).context_tokens),
+            "model": getattr(self.backend, "model", ""),
+            "provider": getattr(self.backend, "active", ""),
+            "observed": True,
         }
 
     async def _model(self, messages: list[dict], tools: list[dict] | None) -> AsyncIterator[LlmChunk]:

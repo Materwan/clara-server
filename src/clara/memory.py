@@ -1,6 +1,7 @@
 """The one memory, in one SQLite file. Only the server process opens it.
 
-    people(id, name)                        one row per real person
+    people(id, name, relation)              one row per real person; relation: Clara's relationship with them
+                                            (0-100, NULL: none yet)
     accounts(surface, external_id, person)  "discord:1234" and "cli:erwan" can be the same person
     facts(id, person, text, text_key)       what Clara knows about a person (shared by every surface);
                                             text_key is the text folded for comparison (no duplicates)
@@ -15,6 +16,13 @@
     conversations(conversation, person, title, pinned, ...)
                                             the conversations a client can list: who started each, its
                                             title, when it was last written in (from its first turn on)
+    account_logins(surface, external_id, user)
+                                            accounts a client (the Discord bot) signed in for a user: on the
+                                            surfaces of CLARA_LOGIN_SURFACES only these may talk to Clara
+    spaces(id, surface, name, chime, present)
+                                            the group places a client is in (a Discord server): whether
+                                            Clara may answer messages there that were not addressed to her
+    options(key, value)                     small settings changed at run time (the default of `chime`)
 
 Facts follow the *person*, history follows the *conversation*: Clara knows you
 are the same human on every surface, but a Discord channel and a terminal
@@ -38,6 +46,8 @@ from pathlib import Path
 MAX_FACT_LENGTH = 300
 MAX_NAME_LENGTH = 80
 MAX_TITLE_LENGTH = 100
+RELATION_START = 50  # where a relationship starts when it first moves
+CHIME_OPTION = "chime_default"
 PREVIEW_LENGTH = 300  # characters of a conversation's first message given with a list of them
 
 _SCHEMA = """
@@ -132,10 +142,34 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_used_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions (user);
+CREATE TABLE IF NOT EXISTS account_logins (
+    surface     TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    user        TEXT NOT NULL REFERENCES users (name) ON DELETE CASCADE,
+    client      TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    PRIMARY KEY (surface, external_id)
+);
+CREATE INDEX IF NOT EXISTS idx_account_logins_user ON account_logins (user);
+CREATE TABLE IF NOT EXISTS spaces (
+    id      TEXT PRIMARY KEY,
+    surface TEXT NOT NULL,
+    name    TEXT NOT NULL DEFAULT '',
+    chime   INTEGER,
+    present INTEGER NOT NULL DEFAULT 1,
+    seen_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS options (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 # Columns added after the first release: databases created before have to get them.
 _ADDED_COLUMNS = {
+    "people": {
+        "relation": "INTEGER",  # Clara's relationship with the person, 0-100 (NULL: none yet)
+    },
     "messages": {
         "prefix": "TEXT NOT NULL DEFAULT ''",
         "tool_calls": "TEXT",
@@ -173,6 +207,19 @@ class PersonSummary:
     person: Person
     accounts: list[str]  # "surface:external_id"
     facts: int
+    relation: int | None = None
+
+
+@dataclass(frozen=True)
+class Space:
+    """A group place a client is in (a Discord server)."""
+
+    id: str  # "discord:guild:123"
+    surface: str
+    name: str
+    chime: bool | None  # may Clara answer what was not addressed to her? None: the default
+    present: bool  # the client is still in it (as it last said)
+    seen_at: str  # ISO, UTC
 
 
 @dataclass(frozen=True)
@@ -397,7 +444,7 @@ class Memory:
     def summaries(self) -> list[PersonSummary]:
         with self._lock:
             rows = self._db.execute(
-                "SELECT p.id, p.name, (SELECT COUNT(*) FROM facts f WHERE f.person_id = p.id)"
+                "SELECT p.id, p.name, p.relation, (SELECT COUNT(*) FROM facts f WHERE f.person_id = p.id)"
                 " AS fact_count FROM people p ORDER BY p.id"
             ).fetchall()
             return [
@@ -405,6 +452,7 @@ class Memory:
                     Person(row["id"], row["name"]),
                     [f"{surface}:{external}" for surface, external in self.accounts_of(row["id"])],
                     row["fact_count"],
+                    row["relation"],
                 )
                 for row in rows
             ]
@@ -508,6 +556,11 @@ class Memory:
             self._db.execute("DELETE FROM reminders WHERE person_id = ?", (person_id,))
             self._db.execute("DELETE FROM reminder_events WHERE person_id = ?", (person_id,))
             self._db.execute("DELETE FROM facts WHERE person_id = ?", (person_id,))
+            self._db.execute(
+                "DELETE FROM account_logins WHERE EXISTS (SELECT 1 FROM accounts a WHERE a.person_id = ?"
+                " AND a.surface = account_logins.surface AND a.external_id = account_logins.external_id)",
+                (person_id,),
+            )
             self._db.execute("DELETE FROM accounts WHERE person_id = ?", (person_id,))
             self._db.execute("DELETE FROM users WHERE person_id = ?", (person_id,))  # their sessions go with them
             self._db.execute("DELETE FROM people WHERE id = ?", (person_id,))
@@ -522,6 +575,10 @@ class Memory:
 
     def _merge(self, source: int, target: int) -> None:
         db = self._db
+        db.execute(
+            "UPDATE people SET relation = COALESCE(relation, (SELECT relation FROM people WHERE id = ?)) WHERE id = ?",
+            (source, target),
+        )
         db.execute("UPDATE OR IGNORE facts SET person_id = ? WHERE person_id = ?", (target, source))
         db.execute("DELETE FROM facts WHERE person_id = ?", (source,))  # duplicates left behind
         db.execute("UPDATE accounts SET person_id = ? WHERE person_id = ?", (target, source))
@@ -531,6 +588,121 @@ class Memory:
         db.execute("UPDATE conversations SET person_id = ? WHERE person_id = ?", (target, source))
         db.execute("UPDATE users SET person_id = ? WHERE person_id = ?", (target, source))
         db.execute("DELETE FROM people WHERE id = ?", (source,))
+
+    def move_account(self, surface: str, external_id: str, target: Person) -> None:
+        """Give an account to `target` without merging anybody: the person it had keeps everything else.
+        For an account used by several users one after the other (a Discord account signed in as one user,
+        then as another)."""
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT INTO accounts (surface, external_id, person_id) VALUES (?, ?, ?)"
+                " ON CONFLICT (surface, external_id) DO UPDATE SET person_id = excluded.person_id",
+                (surface, external_id, target.id),
+            )
+
+    def create_person(self, name: str) -> Person:
+        """A new person with no account (one will be given to them)."""
+        display = _one_line(name)[:MAX_NAME_LENGTH] or "?"
+        with self._lock, self._db:
+            created = self._db.execute("INSERT INTO people (name, created_at) VALUES (?, ?)", (display, _now()))
+        return Person(created.lastrowid, display)
+
+    # ------------------------------------------------------------------
+    # Relationship
+    # ------------------------------------------------------------------
+    def relation(self, person_id: int) -> int | None:
+        """Clara's relationship with a person, 0-100; None: there is none yet."""
+        with self._lock:
+            row = self._db.execute("SELECT relation FROM people WHERE id = ?", (person_id,)).fetchone()
+        return row["relation"] if row else None
+
+    def set_relation(self, person_id: int, value: int | None) -> int | None:
+        """Set it (clamped to 0-100), or forget it (None)."""
+        value = None if value is None else max(0, min(100, int(value)))
+        with self._lock, self._db:
+            self._db.execute("UPDATE people SET relation = ? WHERE id = ?", (value, person_id))
+        return value
+
+    def adjust_relation(self, person_id: int, change: int) -> int:
+        """Move it by `change` (a relationship that does not exist yet starts at RELATION_START)."""
+        with self._lock, self._db:
+            current = self.relation(person_id)
+            value = max(0, min(100, (RELATION_START if current is None else current) + int(change)))
+            self._db.execute("UPDATE people SET relation = ? WHERE id = ?", (value, person_id))
+        return value
+
+    # ------------------------------------------------------------------
+    # Spaces (the group places of a client) and run-time options
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _space(row: sqlite3.Row) -> Space:
+        chime = row["chime"]
+        return Space(
+            row["id"], row["surface"], row["name"], None if chime is None else bool(chime), bool(row["present"]),
+            row["seen_at"],
+        )
+
+    def sync_spaces(self, surface: str, spaces: list[tuple[str, str]]) -> list[Space]:
+        """A client says which spaces of `surface` it is in now (id, name): they are stored or renamed and
+        marked present, the others of that surface absent (their setting is kept)."""
+        now = _now()
+        with self._lock, self._db:
+            self._db.execute("UPDATE spaces SET present = 0 WHERE surface = ?", (surface,))
+            self._db.executemany(
+                "INSERT INTO spaces (id, surface, name, present, seen_at) VALUES (?, ?, ?, 1, ?)"
+                " ON CONFLICT (id) DO UPDATE SET name = excluded.name, present = 1, seen_at = excluded.seen_at",
+                [(space_id, surface, _one_line(name)[:MAX_NAME_LENGTH], now) for space_id, name in spaces],
+            )
+        return self.spaces(surface)
+
+    def spaces(self, surface: str | None = None) -> list[Space]:
+        with self._lock:
+            if surface is None:
+                rows = self._db.execute("SELECT * FROM spaces ORDER BY surface, present DESC, name").fetchall()
+            else:
+                rows = self._db.execute(
+                    "SELECT * FROM spaces WHERE surface = ? ORDER BY present DESC, name", (surface,)
+                ).fetchall()
+        return [self._space(row) for row in rows]
+
+    def space(self, space_id: str) -> Space | None:
+        with self._lock:
+            row = self._db.execute("SELECT * FROM spaces WHERE id = ?", (space_id,)).fetchone()
+        return self._space(row) if row else None
+
+    def set_space_chime(self, space_id: str, chime: bool | None) -> bool:
+        """On, off, or back to the default (None). False if there is no such space."""
+        with self._lock, self._db:
+            return self._db.execute(
+                "UPDATE spaces SET chime = ? WHERE id = ?", (None if chime is None else int(chime), space_id)
+            ).rowcount > 0
+
+    def chime_default(self) -> bool:
+        return self.option(CHIME_OPTION) == "on"
+
+    def set_chime_default(self, on: bool) -> None:
+        self.set_option(CHIME_OPTION, "on" if on else "off")
+
+    def chime_allowed(self, space_id: str | None) -> bool:
+        """May Clara answer, in that space, a message that was not addressed to her?"""
+        if not space_id:
+            return False
+        space = self.space(space_id)
+        if space is None or space.chime is None:
+            return self.chime_default()
+        return space.chime
+
+    def option(self, key: str) -> str | None:
+        with self._lock:
+            row = self._db.execute("SELECT value FROM options WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def set_option(self, key: str, value: str) -> None:
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT INTO options (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
 
     # ------------------------------------------------------------------
     # Facts

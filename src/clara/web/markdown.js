@@ -2,7 +2,7 @@
 // markup or script. Covers what a chat needs: headings, paragraphs, lists, quotes, code, tables, rules, links,
 // bold, italic, strikethrough and inline code. Links open only http(s) and mailto addresses.
 
-import { copy, h } from "./ui.js";
+import { copy, h, icon } from "./ui.js";
 
 const SAFE_LINK = /^(https?:\/\/|mailto:)/i;
 
@@ -136,7 +136,8 @@ function cellNode(tag, text, align) {
 function codeBlock(code, language) {
   const pre = h("pre", {}, h("code", {}, code));
   return h("div", { class: "codeblock" },
-    h("div", { class: "lang" }, language, h("button", { class: "ghost", onclick: () => copy(code) }, "Copy")), pre);
+    h("div", { class: "lang" }, h("span", {}, language || "text"),
+      h("button", { class: "ghost", onclick: () => copy(code), "aria-label": "Copy the code" }, icon("copy", { size: 14 }), "Copy")), pre);
 }
 
 // ---- inline ---------------------------------------------------------------------------------------------

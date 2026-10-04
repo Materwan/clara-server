@@ -1,34 +1,47 @@
 // What Clara remembers about you, and your account: password, devices, linking accounts.
 
 import { api } from "./api.js";
-import { ago, clear, confirmDialog, dateTime, h, secretDialog, toast } from "./ui.js";
+import { mark } from "./icons.js";
+import { ago, avatar, clear, confirmDialog, dateTime, h, icon, pageHead, secretDialog, toast } from "./ui.js";
 
 const who = (user) => ({ surface: "web", user_id: user.name });
 
 // ---- memory ------------------------------------------------------------------------------------------------
 
 export function mountMemory(container, user) {
-  const list = h("ul", { class: "facts" });
-  const filter = h("input", { type: "search", placeholder: "Filter", "aria-label": "Filter facts" });
+  const list = h("ul", { class: "list", "aria-label": "What Clara remembers" });
+  const count = h("span", { class: "count" });
+  const filter = h("input", { type: "search", placeholder: "Search what Clara remembers", "aria-label": "Search facts" });
   const text = h("input", { type: "text", placeholder: "Something Clara should remember about you", maxLength: 300, "aria-label": "New fact" });
   let facts = [];
+  let loaded = false;
 
   const draw = () => {
     clear(list);
     const needle = filter.value.trim().toLowerCase();
     const shown = facts.filter((fact) => fact.text.toLowerCase().includes(needle));
-    if (!shown.length) list.append(h("li", { class: "muted" }, facts.length ? "No fact matches." : "Clara does not know anything about you yet."));
+    count.textContent = !loaded ? "" : needle ? `${shown.length} of ${facts.length}` : `${facts.length} ${facts.length === 1 ? "thing" : "things"}`;
+    if (!loaded) return;
+    if (!facts.length) {
+      list.append(h("li", { class: "empty-row" }, h("div", { class: "empty-state" }, mark(36),
+        h("strong", {}, "Clara doesn't know anything about you yet"),
+        "Tell her about yourself in a chat, or add something above.")));
+      return;
+    }
+    if (!shown.length) list.append(h("li", { class: "empty-row" }, "Nothing matches your search."));
     for (const fact of shown) {
-      list.append(h("li", {}, h("span", { class: "grow" }, fact.text),
-        h("button", { class: "ghost icon danger", title: "Forget this", "aria-label": `Forget: ${fact.text}`, onclick: async () => {
+      list.append(h("li", {}, h("span", { class: "fact-dot" }), h("span", { class: "text" }, fact.text),
+        h("button", { class: "ghost icon-btn danger forget", title: "Forget this", "aria-label": `Forget: ${fact.text}`, onclick: async () => {
           try {
             await api.delete(`/v1/memory/facts/${fact.id}`, who(user));
             facts = facts.filter((f) => f.id !== fact.id);
             draw();
+            toast("Forgotten.");
           } catch (error) { toast(error.detail, true); }
-        } }, "✕")));
+        } }, icon("trash", { size: 18 }))));
     }
   };
+  filter.addEventListener("input", draw);
 
   const add = async (event) => {
     event.preventDefault();
@@ -37,7 +50,7 @@ export function mountMemory(container, user) {
     try {
       const body = await api.post("/v1/memory/facts", { ...who(user), text: value });
       text.value = "";
-      if (body.stored === false) toast("Clara already knows that.");
+      toast(body.stored === false ? "Clara already knows that." : "Clara will remember that.");
       await load();
     } catch (error) { toast(error.detail, true); }
   };
@@ -49,23 +62,44 @@ export function mountMemory(container, user) {
       if (error.status !== 404) toast(error.detail, true);
       facts = [];
     }
+    loaded = true;
     draw();
   }
 
-  container.append(h("div", { class: "container" },
-    h("h2", {}, "What Clara remembers"),
-    h("p", { class: "muted" }, "Clara saves facts about you during conversations and uses them in every chat, on all your devices. You can add or remove them here."),
-    h("form", { class: "row", onsubmit: add }, h("div", { class: "grow row" }, text), h("button", { class: "primary", type: "submit" }, "Add")),
-    h("div", { class: "card" }, h("div", { class: "row", style: undefined }, filter), list)));
+  container.append(pageHead("Memory"), h("div", { class: "scroll" }, h("div", { class: "container" },
+    h("p", { class: "intro" }, "Clara picks up facts about you as you talk, and uses them in every conversation, on all your devices. Add what she should know, or remove what she shouldn't."),
+    h("form", { class: "panel panel-body add-form", onsubmit: add }, text, h("button", { class: "primary", type: "submit" }, icon("plus", { size: 18 }), "Remember")),
+    h("div", { class: "toolbar" }, h("div", { class: "search-field" }, icon("search", { size: 17 }), filter), count),
+    h("div", { class: "panel" }, list))));
+  draw();
   load();
   return { destroy() {} };
 }
 
 // ---- account -----------------------------------------------------------------------------------------------
 
+function deviceGlyph(session) {
+  const text = `${session.surface} ${session.device || ""}`.toLowerCase();
+  if (/cli|terminal|admin/.test(session.surface)) return "terminal";
+  if (/iphone|android|mobile|ipad/.test(text)) return "phone";
+  if (session.surface === "web") return "globe";
+  return "laptop";
+}
+
+/** A browser's user agent, in words a person recognises. */
+function deviceName(text) {
+  if (!text) return "";
+  const browser = /Edg\//.test(text) ? "Edge" : /OPR\//.test(text) ? "Opera" : /Firefox\//.test(text) ? "Firefox"
+    : /Chrome\//.test(text) ? "Chrome" : /Safari\//.test(text) ? "Safari" : "";
+  const system = /iPhone/.test(text) ? "iPhone" : /iPad/.test(text) ? "iPad" : /Android/.test(text) ? "Android"
+    : /Windows/.test(text) ? "Windows" : /Mac OS X|Macintosh/.test(text) ? "macOS" : /Linux/.test(text) ? "Linux" : "";
+  if (browser && system) return `${browser} on ${system}`;
+  return browser || system || text.slice(0, 60);
+}
+
 export function mountAccount(container, user, onSignOut) {
   const page = h("div", { class: "container" });
-  container.append(page);
+  container.append(pageHead("Account"), h("div", { class: "scroll" }, page));
 
   async function draw() {
     let me, devices;
@@ -76,7 +110,6 @@ export function mountAccount(container, user, onSignOut) {
     }
     clear(page);
     page.append(
-      h("h2", {}, "Account"),
       profileCard(me),
       passwordCard(),
       devicesCard(devices.sessions),
@@ -84,88 +117,100 @@ export function mountAccount(container, user, onSignOut) {
     );
   }
 
-  const profileCard = (me) => h("div", { class: "card" },
-    h("h3", {}, me.name, " ", me.is_admin && h("span", { class: "badge admin" }, "administrator")),
-    h("p", { class: "muted" }, `Clara knows you as ${me.person?.name || me.name}. Your accounts: ${me.accounts.join(", ") || "none yet"}.`),
-    h("button", { onclick: onSignOut }, "Sign out"));
+  const profileCard = (me) => h("section", { class: "panel panel-body profile" },
+    avatar(me.person?.name || me.name, "lg"),
+    h("div", { class: "who" },
+      h("h2", {}, me.person?.name || me.name, me.is_admin && h("span", { class: "badge admin" }, "Administrator")),
+      h("p", { class: "muted small" }, `Signed in as ${me.name}. Clara knows you on these accounts:`),
+      h("div", { class: "accounts" }, me.accounts.length ? me.accounts.map((a) => h("span", { class: "badge" }, a)) : h("span", { class: "muted small" }, "none yet"))),
+    h("button", { onclick: onSignOut }, icon("logout", { size: 18 }), "Sign out"));
 
   function passwordCard() {
     const current = h("input", { type: "password", autocomplete: "current-password", required: true });
     const next = h("input", { type: "password", autocomplete: "new-password", required: true, minLength: 10 });
     const again = h("input", { type: "password", autocomplete: "new-password", required: true });
-    const note = h("p", { class: "small" });
-    return h("form", { class: "card stack", onsubmit: async (event) => {
-      event.preventDefault();
-      note.className = "small";
-      if (next.value !== again.value) { note.className = "small error"; note.textContent = "The two new passwords differ."; return; }
-      try {
-        const done = await api.post("/v1/auth/password", { current_password: current.value, new_password: next.value });
-        current.value = next.value = again.value = "";
-        toast(done.signed_out_elsewhere ? `Password changed; ${done.signed_out_elsewhere} other device(s) signed out.` : "Password changed.");
-        draw();
-      } catch (error) { note.className = "small error"; note.textContent = error.detail; }
-    } },
-    h("h3", {}, "Change password"),
-    h("label", { class: "field" }, "Current password", current),
-    h("label", { class: "field" }, "New password (10 characters or more)", next),
-    h("label", { class: "field" }, "New password again", again),
-    note,
-    h("div", {}, h("button", { class: "primary", type: "submit" }, "Change password")));
+    const note = h("p", { class: "small", hidden: true, role: "alert" });
+    const fail = (text) => { note.hidden = false; note.className = "small error"; note.textContent = text; };
+    return h("section", { class: "panel" },
+      h("div", { class: "panel-head" }, h("div", {}, h("h3", {}, "Password"), h("p", { class: "muted small" }, "Changing it signs you out on your other devices."))),
+      h("form", { class: "panel-body stack", onsubmit: async (event) => {
+        event.preventDefault();
+        note.hidden = true;
+        if (next.value !== again.value) return fail("The two new passwords are different.");
+        try {
+          const done = await api.post("/v1/auth/password", { current_password: current.value, new_password: next.value });
+          current.value = next.value = again.value = "";
+          toast(done.signed_out_elsewhere ? `Password changed. ${done.signed_out_elsewhere} other device(s) signed out.` : "Password changed.");
+          draw();
+        } catch (error) { fail(error.detail); }
+      } },
+      h("div", { class: "form-grid" },
+        h("label", { class: "field" }, "Current password", current),
+        h("label", { class: "field" }, "New password", next, h("span", { class: "hint" }, "10 characters or more")),
+        h("label", { class: "field" }, "New password again", again)),
+      note,
+      h("div", {}, h("button", { class: "primary", type: "submit" }, "Change password"))));
   }
 
   function devicesCard(sessions) {
     const others = sessions.filter((s) => !s.current);
-    return h("div", { class: "card" },
-      h("h3", {}, "Your devices"),
-      h("p", { class: "muted small" }, "Each place you are signed in. A device you do not use for 90 days is signed out."),
-      h("div", { class: "table-wrap" }, h("table", { class: "grid" },
-        h("thead", {}, h("tr", {}, ["Where", "Last used", "Signed in", ""].map((t) => h("th", {}, t)))),
-        h("tbody", {}, sessions.map((s) => h("tr", {},
-          h("td", {}, h("strong", {}, s.surface), " ", s.current && h("span", { class: "badge ok" }, "this device"), h("div", { class: "muted small" }, (s.device || "").slice(0, 60), s.address && ` · ${s.address}`)),
-          h("td", { title: dateTime(s.last_used_at) }, ago(s.last_used_at)),
-          h("td", {}, dateTime(s.created_at)),
-          h("td", {}, !s.current && h("button", { onclick: async () => { await signOut(s.id); } }, "Sign out"))))))),
-      others.length > 0 && h("p", {}, h("button", { class: "danger", onclick: async () => {
-        if (await confirmDialog("Sign out other devices", `Sign out ${others.length} other device(s)?`, "Sign out", true)) for (const s of others) await signOut(s.id, true);
-        draw();
-      } }, "Sign out all other devices")));
+    return h("section", { class: "panel" },
+      h("div", { class: "panel-head" },
+        h("div", { class: "grow" }, h("h3", {}, "Your devices"), h("p", { class: "muted small" }, "Where you are signed in. A device unused for 90 days is signed out.")),
+        others.length > 0 && h("button", { class: "danger sm", onclick: async () => {
+          if (await confirmDialog("Sign out other devices", `Sign out ${others.length} other device(s)? This one stays signed in.`, "Sign out", true)) {
+            for (const s of others) await signOut(s.id, true);
+            toast("Other devices signed out.");
+          }
+          draw();
+        } }, "Sign out the others")),
+      h("ul", { class: "list" }, sessions.map((s) => h("li", { class: "device" },
+        h("span", { class: "glyph" }, icon(deviceGlyph(s))),
+        h("div", { class: "meta" },
+          h("div", {}, h("strong", {}, deviceName(s.device) || s.surface), " ", s.current && h("span", { class: "badge ok" }, "This device")),
+          h("div", { class: "sub", title: s.device || "" }, `${s.surface}${s.address ? `, from ${s.address}` : ""}. Signed in ${dateTime(s.created_at)}`)),
+        h("div", { class: "when", title: `Last used ${dateTime(s.last_used_at)}` }, ago(s.last_used_at)),
+        !s.current && h("button", { class: "ghost icon-btn", title: "Sign out this device", "aria-label": "Sign out this device", onclick: () => signOut(s.id) }, icon("logout", { size: 18 }))))));
   }
 
   async function signOut(id, quiet) {
     try { await api.delete(`/v1/auth/sessions/${id}`); } catch (error) { toast(error.detail, true); }
-    if (!quiet) draw();
+    if (!quiet) { toast("Device signed out."); draw(); }
   }
 
   function linkCard(me) {
     const code = h("div", {});
-    const surface = h("input", { type: "text", placeholder: "discord", pattern: "[a-z0-9_-]{1,32}", "aria-label": "Surface", required: true });
-    const account = h("input", { type: "text", placeholder: "1234", "aria-label": "Account id", required: true });
-    const secret = h("input", { type: "text", placeholder: "code", "aria-label": "Link code", required: true, autocomplete: "off" });
-    return h("div", { class: "card stack" },
-      h("h3", {}, "Link another account"),
-      h("p", { class: "muted small" }, "Signing in already makes the web, the desktop app and the terminal one person. This is for accounts that do not log in with a password, such as Discord."),
-      h("div", {}, h("strong", {}, "Add an account to you"),
-        h("p", { class: "muted small" }, "On the other account's client ask for its link code (for example /linkcode), then type it here."),
-        h("form", { class: "row wrap", onsubmit: async (event) => {
-          event.preventDefault();
-          try {
-            const done = await api.post("/v1/accounts/link", {
-              surface: surface.value.trim().toLowerCase(), user_id: account.value.trim(), code: secret.value.trim(),
-              to_surface: "web", to_user_id: me.name,
-            });
-            toast(`Linked. Your accounts: ${done.accounts.join(", ")}`);
-            surface.value = account.value = secret.value = "";
-            draw();
-          } catch (error) { toast(error.detail, true); }
-        } }, surface, account, secret, h("button", { class: "primary", type: "submit" }, "Link"))),
-      h("div", {}, h("strong", {}, "Let another account join you from its side"),
-        h("p", { class: "muted small" }, `Get a code for ${me.name} on the web (valid 10 minutes, usable once), then give it to the other client: /link web ${me.name} <code>.`),
-        h("button", { onclick: async () => {
-          try {
-            const done = await api.post("/v1/accounts/link-code", who(me));
-            clear(code).append(h("div", { class: "secret-box" }, done.code), h("p", { class: "muted small" }, `Valid ${Math.round(done.expires_in / 60)} minutes.`));
-          } catch (error) { toast(error.detail, true); }
-        } }, "Get a link code"), code));
+    const surface = h("input", { type: "text", placeholder: "Surface, e.g. discord", pattern: "[a-z0-9_-]{1,32}", "aria-label": "Surface", required: true, autocapitalize: "none" });
+    const account = h("input", { type: "text", placeholder: "Account id, e.g. 1234", "aria-label": "Account id", required: true, autocapitalize: "none" });
+    const secret = h("input", { type: "text", placeholder: "Link code", "aria-label": "Link code", required: true, autocomplete: "off", autocapitalize: "none" });
+    return h("section", { class: "panel" },
+      h("div", { class: "panel-head" }, h("div", {}, h("h3", {}, "Linked accounts"),
+        h("p", { class: "muted small" }, "Signing in already makes the web, the desktop app and the terminal one person. Linking is for accounts without a password, such as Discord."))),
+      h("div", { class: "panel-body link-grid" },
+        h("div", {},
+          h("h4", { class: "section-title" }, "Bring an account to you"),
+          h("p", { class: "muted small" }, "In the other account's client, ask for its link code (for example /linkcode), then enter it here."),
+          h("form", { class: "link-form", onsubmit: async (event) => {
+            event.preventDefault();
+            try {
+              const done = await api.post("/v1/accounts/link", {
+                surface: surface.value.trim().toLowerCase(), user_id: account.value.trim(), code: secret.value.trim(),
+                to_surface: "web", to_user_id: me.name,
+              });
+              toast(`Linked. Your accounts: ${done.accounts.join(", ")}`);
+              surface.value = account.value = secret.value = "";
+              draw();
+            } catch (error) { toast(error.detail, true); }
+          } }, surface, account, h("div", { class: "full" }, secret), h("div", { class: "full" }, h("button", { class: "primary", type: "submit" }, icon("link", { size: 18 }), "Link account")))),
+        h("div", {},
+          h("h4", { class: "section-title" }, "Join from the other account"),
+          h("p", { class: "muted small" }, `Get a code for ${me.name}, valid 10 minutes and usable once. Then send /link web ${me.name} <code> from the other client.`),
+          h("button", { onclick: async () => {
+            try {
+              const done = await api.post("/v1/accounts/link-code", who(me));
+              clear(code).append(h("div", { class: "secret-box" }, done.code), h("p", { class: "muted small" }, `Valid for ${Math.round(done.expires_in / 60)} minutes.`));
+            } catch (error) { toast(error.detail, true); }
+          } }, icon("key", { size: 18 }), "Get a link code"), code)));
   }
 
   draw();

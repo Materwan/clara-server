@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import re
 import threading
 import time
@@ -14,6 +15,9 @@ from clara.memory import Memory
 from clara.providers import ProviderManager
 from clara.server import create_app
 from clara.settings import Settings
+
+# The Discord bot's own tests need discord.py, which is optional (pip install clara-server[discord])
+collect_ignore = [] if importlib.util.find_spec("discord") else ["discord_bot"]
 
 
 class FakeBackend:
@@ -69,6 +73,8 @@ def settings(tmp_path: Path) -> Settings:
             "CLARA_CLOUD_MODEL": "fake-big",
             "CLARA_DATA_DIR": str(tmp_path / "data"),
             "CLARA_SYSTEM_PROMPT_FILE": str(tmp_path / "missing.md"),
+            # discord accounts talk without signing in here; test_discord.py turns signing in on
+            "CLARA_LOGIN_SURFACES": "none",
         }
     )
 

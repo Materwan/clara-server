@@ -126,17 +126,27 @@ def authenticate_user(request: Request) -> Caller:
     return caller
 
 
-def require_account(request: Request, client: str, surface: str, user_id: str) -> None:
+NOT_SIGNED_IN = "not signed in"  # in the 403 of an account that must sign in first (clients look for it)
+
+
+def require_account(request: Request, client: str, surface: str, user_id: str, signed_in: bool = True) -> None:
     """403 unless the caller may speak for the account `surface:user_id`: a client within its surfaces
-    (CLARA_CLIENT_SURFACES), a user as themselves on the surface they logged in on."""
+    (CLARA_CLIENT_SURFACES), a user as themselves on the surface they logged in on. On the surfaces of
+    CLARA_LOGIN_SURFACES the account must also be signed in as a user (unless `signed_in` is False: the
+    routes that sign it in)."""
     user: User | None = getattr(client, "user", None)
     if user is not None:
         if surface != client.surface or user_id != user.name:  # type: ignore[attr-defined]
             raise HTTPException(403, "This login may only act as its own account")
         return
-    allowed = request.app.state.settings.client_surfaces.get(client)
+    settings: Settings = request.app.state.settings
+    allowed = settings.client_surfaces.get(client)
     if allowed is not None and surface not in allowed:
         raise HTTPException(403, f"This client may not use the surface {surface!r}")
+    if signed_in and surface in settings.login_surfaces:
+        users: Users = request.app.state.users
+        if users.account_user(surface, user_id) is None:
+            raise HTTPException(403, f"The account {surface}:{user_id} is {NOT_SIGNED_IN}: sign in or register first")
 
 
 def require_conversation(request: Request, client: str, conversation: str) -> None:
@@ -150,6 +160,18 @@ def require_conversation(request: Request, client: str, conversation: str) -> No
     allowed = request.app.state.settings.client_surfaces.get(client)
     if allowed is not None and not any(conversation.startswith(f"{surface}:") for surface in allowed):
         raise HTTPException(403, "This client may not use that conversation")
+
+
+def require_space(request: Request, client: str, space: str, surface: str) -> None:
+    """403 unless the client may name that space: it is of the request's surface (`discord:guild:42` for
+    `discord`), one the client may use. A user who logged in has no spaces."""
+    if getattr(client, "user", None) is not None:
+        raise HTTPException(403, "Only a client may speak in a space")
+    if not space.startswith(f"{surface}:"):
+        raise HTTPException(403, f"A space of the surface {surface!r} starts with {surface}:")
+    allowed = request.app.state.settings.client_surfaces.get(client)
+    if allowed is not None and surface not in allowed:
+        raise HTTPException(403, f"This client may not use the surface {surface!r}")
 
 
 Client = Annotated[Caller, Depends(authenticate)]

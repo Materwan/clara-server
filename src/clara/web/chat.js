@@ -1,9 +1,10 @@
-// The chat page: conversations at the side, the conversation, documents, the context meter.
+// The chat page: conversations in the navigation rail, the conversation, documents, the context meter.
 
 import { ApiError, api, conversationPath, streamChat } from "./api.js";
 import { DocumentError, MAX_TOTAL_CHARS, compose, readDocument, splitMessage, totalChars } from "./documents.js";
+import { icon, mark, ring } from "./icons.js";
 import { renderMarkdown } from "./markdown.js";
-import { clear, confirmDialog, h, parseDate, popupMenu, promptDialog, randomId, toast } from "./ui.js";
+import { clear, confirmDialog, h, pageHead, parseDate, popupMenu, promptDialog, randomId, toast, toggleRail } from "./ui.js";
 
 const SURFACE = "web";
 const INSTRUCTIONS =
@@ -11,41 +12,52 @@ const INSTRUCTIONS =
   "short and conversational. The user can attach files (PDF, code, Markdown, text): their content comes in the " +
   'message, each inside <document name="..." type="..."> tags. Refer to them by name.';
 
-export function mountChat(container, user) {
+function greeting() {
+  const hour = new Date().getHours();
+  return hour < 5 ? "Hello" : hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+}
+
+export function mountChat(container, user, { slot, fresh = false } = {}) {
   const who = { surface: SURFACE, user_id: user.name };
   const lastKey = `clara.last.${user.name}`;
+  const displayName = user.person?.name || user.name;
   const state = {
     list: [], query: "", current: null, messages: [], summary: "", earlier: false,
     busy: false, abort: null, docs: [], context: null, live: null, stick: true,
   };
 
-  // ---- the page ---------------------------------------------------------------------------------------
+  // ---- the conversations, in the rail ----------------------------------------------------------------
   const search = h("input", { type: "search", placeholder: "Search conversations", "aria-label": "Search conversations" });
-  const listBox = h("div", { class: "convos", role: "list" });
-  const sidebar = h("aside", { class: "sidebar" },
-    h("div", { class: "sidebar-head" }, h("button", { class: "primary", onclick: () => { newChat(); closeSidebar(); } }, "+ New chat"), search),
-    listBox);
+  const listBox = h("div", { class: "convos", role: "list", "aria-label": "Conversations" });
+  const railPart = [h("div", { class: "convo-search" }, icon("search", { size: 16 }), search), listBox];
+  slot?.append(...railPart);
 
-  const title = h("div", { class: "title grow" }, "New chat");
-  const bar = h("i", {});
-  const meter = h("div", { class: "meter", role: "img", "aria-label": "Context used" }, bar);
-  const compactButton = h("button", { class: "ghost small", onclick: compact, title: "Replace the older messages by a summary" }, "Summarise");
+  // ---- the page ---------------------------------------------------------------------------------------
+  const title = h("h1", { class: "title grow" }, "New chat");
+  const meter = ring(18);
+  const percentText = h("span", {}, "0%");
+  const context = h("div", { class: "context", role: "img", "aria-label": "Context used", hidden: true },
+    meter, percentText, h("span", { class: "label" }, "of context"));
+  const compactButton = h("button", { class: "ghost sm hide-sm", onclick: compact, title: "Replace the older messages with a summary, to make room", hidden: true },
+    icon("compress", { size: 16 }), "Summarise");
+  const moreButton = h("button", { class: "ghost icon-btn", "aria-label": "Conversation actions", title: "Conversation actions", hidden: true,
+    onclick: (event) => { event.stopPropagation(); conversationMenu(moreButton); } }, icon("more"));
+  const newButton = h("button", { class: "ghost icon-btn only-narrow", "aria-label": "New chat", title: "New chat", onclick: () => newChat() }, icon("edit"));
+
   const messagesInner = h("div", { class: "messages-inner" });
-  const messagesBox = h("div", { class: "messages", role: "log", "aria-live": "polite" }, messagesInner);
-  const input = h("textarea", { rows: 1, placeholder: "Message Clara…  (Enter to send, Shift+Enter for a new line)", "aria-label": "Message" });
+  const messagesBox = h("div", { class: "messages", role: "log", "aria-live": "polite", "aria-label": "Conversation" }, messagesInner);
+  const input = h("textarea", { rows: 1, placeholder: `Message Clara`, "aria-label": "Message", enterkeyhint: "send" });
   const chips = h("div", { class: "chips" });
   const picker = h("input", { type: "file", multiple: true, hidden: true, onchange: () => { addFiles([...picker.files]); picker.value = ""; } });
-  const attach = h("button", { class: "ghost icon", title: "Attach documents (PDF, code, text)", "aria-label": "Attach documents", onclick: () => picker.click() }, "📎");
-  const sendButton = h("button", { class: "primary", onclick: send }, "Send");
+  const attach = h("button", { class: "ghost icon-btn", title: "Attach documents (PDF, code, text)", "aria-label": "Attach documents", onclick: () => picker.click() }, icon("clip"));
+  const sendButton = h("button", { class: "send", "aria-label": "Send", title: "Send", onclick: send, disabled: true }, icon("send", { size: 19 }));
+  const docInfo = h("span", { class: "grow docinfo" });
   const composer = h("div", { class: "composer" },
-    h("div", { class: "composer-inner" }, chips, input, h("div", { class: "composer-bar" }, attach, picker, h("span", { class: "grow muted small", id: "docinfo" }), sendButton)));
-  const menuButton = h("button", { class: "menu-btn ghost icon", "aria-label": "Conversations", onclick: () => root.classList.toggle("open") }, "☰");
-  const main = h("section", { class: "main" },
-    h("div", { class: "chat-head" }, menuButton, title, meter, compactButton), messagesBox, composer);
-  const root = h("div", { class: "chat" }, sidebar, main);
+    h("div", { class: "composer-inner" }, chips, input, h("div", { class: "composer-bar" }, attach, picker, docInfo, sendButton)),
+    h("p", { class: "composer-hint" }, "Enter to send, Shift + Enter for a new line. Drop files here to attach them."));
+  const root = h("section", { class: "page chat" },
+    pageHead(title, context, compactButton, moreButton, newButton), messagesBox, composer);
   container.append(root);
-
-  const closeSidebar = () => root.classList.remove("open");
 
   // ---- the list of conversations ----------------------------------------------------------------------
   let searchTimer = null;
@@ -62,6 +74,7 @@ export function mountChat(container, user) {
       return;
     }
     renderList();
+    renderHead();
   }
 
   function groupOf(info) {
@@ -74,10 +87,12 @@ export function mountChat(container, user) {
     return days <= 0 ? "Today" : days === 1 ? "Yesterday" : days < 7 ? "Previous 7 days" : "Older";
   }
 
+  const labelOf = (info) => info.title || (info.preview ? splitMessage(info.preview).text || info.preview : "") || "New chat";
+
   function renderList() {
     clear(listBox);
     if (!state.list.length) {
-      listBox.append(h("p", { class: "muted small", style: undefined }, state.query ? "Nothing found." : "No conversation yet."));
+      listBox.append(h("p", { class: "empty-note" }, state.query ? "No conversation matches." : "Your conversations will appear here."));
       return;
     }
     const order = ["Pinned", "Today", "Yesterday", "Previous 7 days", "Older"];
@@ -90,22 +105,33 @@ export function mountChat(container, user) {
     }
   }
 
+  function actionsFor(info) {
+    return [
+      { label: "Rename", icon: "edit", run: () => rename(info) },
+      { label: info.pinned ? "Unpin" : "Pin to the top", icon: "pin", run: () => pin(info) },
+      "-",
+      { label: "Delete", icon: "trash", danger: true, run: () => remove(info) },
+    ];
+  }
+
   function convoRow(info) {
-    const label = info.title || (info.preview ? splitMessage(info.preview).text || info.preview : "") || "New chat";
-    const more = h("button", { class: "ghost icon more", "aria-label": "Conversation menu", title: "More",
-      onclick: (event) => {
-        event.stopPropagation();
-        popupMenu(more, [
-          { label: "Rename", run: () => rename(info) },
-          { label: info.pinned ? "Unpin" : "Pin", run: () => pin(info) },
-          { label: "Delete", danger: true, run: () => remove(info) },
-        ]);
-      } }, "⋯");
+    const label = labelOf(info);
+    const more = h("button", { class: "ghost icon-btn more", "aria-label": `Actions for ${label}`, title: "More",
+      onclick: (event) => { event.stopPropagation(); popupMenu(more, actionsFor(info)); } }, icon("more", { size: 18 }));
+    const active = info.id === state.current;
     return h("div", {
-      class: "convo" + (info.id === state.current ? " active" : ""), role: "listitem", tabindex: 0,
-      onclick: () => { open(info.id); closeSidebar(); },
-      onkeydown: (event) => { if (event.key === "Enter") { open(info.id); closeSidebar(); } },
-    }, info.pinned && h("span", { class: "pin" }, "📌"), h("span", { class: "title", title: label }, label), more);
+      class: "convo" + (active ? " active" : ""), role: "listitem", tabindex: 0, "aria-current": active ? "true" : null,
+      onclick: () => { open(info.id); toggleRail(false); },
+      onkeydown: (event) => { if (event.key === "Enter" && event.target === event.currentTarget) { open(info.id); toggleRail(false); } },
+    }, info.pinned && h("span", { class: "pin", title: "Pinned" }, icon("pin", { size: 15 })), h("span", { class: "title", title: label }, label), more);
+  }
+
+  function conversationMenu(anchor) {
+    const info = state.list.find((item) => item.id === state.current);
+    if (!info) return;
+    const items = actionsFor(info);
+    if (!compactButton.hidden) items.splice(2, 0, { label: "Summarise older messages", icon: "compress", run: compact });
+    popupMenu(anchor, items);
   }
 
   async function rename(info) {
@@ -115,7 +141,6 @@ export function mountChat(container, user) {
       await api.patch(conversationPath(info.id), { ...who, title: value.trim() });
       if (!value.trim()) await api.post(conversationPath(info.id) + "/title", who).catch(() => {});
       await loadList();
-      if (info.id === state.current) setTitle();
     });
   }
 
@@ -142,9 +167,10 @@ export function mountChat(container, user) {
   }
 
   // ---- the conversation ------------------------------------------------------------------------------
-  function setTitle() {
+  function renderHead() {
     const info = state.list.find((item) => item.id === state.current);
-    title.textContent = info?.title || "New chat";
+    title.textContent = info ? labelOf(info) : "New chat";
+    moreButton.hidden = !info;
   }
 
   function newChat() {
@@ -181,6 +207,7 @@ export function mountChat(container, user) {
         return toast(error.detail || String(error), true);
       }
     }
+    state.context = null;
     renderAll();
     refreshContext();
   }
@@ -196,27 +223,38 @@ export function mountChat(container, user) {
   function renderMeter() {
     const info = state.context;
     const percent = info ? Math.min(100, info.percent || 0) : 0;
-    bar.style.width = percent + "%";
-    meter.classList.toggle("hot", percent >= 80);
-    meter.title = info ? `Context ${percent.toFixed(0)}% full (${(info.tokens || 0).toLocaleString()} of ${(info.window || 0).toLocaleString()} tokens)` : "Context";
+    meter.set(percent);
+    percentText.textContent = `${percent.toFixed(0)}%`;
+    context.hidden = !info || !state.messages.length;
+    context.classList.toggle("hot", percent >= 80);
+    const text = info ? `Context ${percent.toFixed(0)}% full: ${(info.tokens || 0).toLocaleString()} of ${(info.window || 0).toLocaleString()} tokens` : "Context";
+    context.title = text;
+    context.setAttribute("aria-label", text);
     compactButton.hidden = !info || !(info.messages > 2);
   }
 
   function renderAll() {
     renderList();
-    setTitle();
+    renderHead();
     renderMessages();
     renderMeter();
+  }
+
+  function assistantNode(message) {
+    const body = h("div", { class: "body" },
+      message.content ? renderMarkdown(message.content) : null,
+      message.failed && h("div", { class: "failed-note", role: "alert" }, icon("bolt", { size: 17 }), h("span", {}, message.failed)));
+    return h("div", { class: "msg assistant" + (message.failed ? " failed" : "") }, h("div", { class: "who" }, mark(26)), body);
   }
 
   function messageNode(message) {
     if (message.role === "user") {
       const { text, names } = splitMessage(message.content);
-      return h("div", { class: "msg user" },
-        h("div", { class: "bubble" }, text, names.length > 0 && h("div", { class: "chips" }, names.map((name) => h("span", { class: "chip" }, "📎 " + name)))));
+      return h("div", { class: "msg user" }, h("div", { class: "body" },
+        text && h("div", { class: "bubble" }, text),
+        names.length > 0 && h("div", { class: "chips" }, names.map((name) => h("span", { class: "chip" }, icon("file", { size: 15 }), h("span", { class: "name" }, name))))));
     }
-    return h("div", { class: "msg assistant" + (message.failed ? " failed" : "") },
-      h("div", { class: "bubble" }, message.content ? renderMarkdown(message.content) : null, message.failed && h("p", { class: "error" }, message.failed)));
+    return assistantNode(message);
   }
 
   function renderMessages() {
@@ -224,7 +262,10 @@ export function mountChat(container, user) {
     if (state.summary) messagesInner.append(h("div", { class: "summary" }, h("strong", {}, "Earlier in this conversation: "), state.summary));
     else if (state.earlier) messagesInner.append(h("div", { class: "summary" }, "Older messages are not shown."));
     if (!state.messages.length && !state.live) {
-      messagesInner.append(h("div", { class: "empty" }, h("h2", {}, `Hello ${user.person?.name || user.name}`), h("p", {}, "How can I help?")));
+      messagesInner.append(h("div", { class: "welcome" },
+        h("div", { class: "halo" }, mark(52)),
+        h("h1", {}, `${greeting()}, ${displayName.charAt(0).toUpperCase()}${displayName.slice(1)}`),
+        h("p", {}, "What would you like to talk about?")));
     }
     for (const message of state.messages) messagesInner.append(messageNode(message));
     scrollDown(true);
@@ -238,12 +279,25 @@ export function mountChat(container, user) {
   });
 
   // ---- sending ------------------------------------------------------------------------------------------
+  function canSend() {
+    return state.busy || Boolean(input.value.trim()) || state.docs.length > 0;
+  }
+
   function setBusy(busy) {
     state.busy = busy;
-    sendButton.textContent = busy ? "Stop" : "Send";
-    sendButton.classList.toggle("danger", busy);
-    sendButton.classList.toggle("primary", !busy);
+    clear(sendButton).append(icon(busy ? "stop" : "send", { size: busy ? 18 : 19 }));
+    sendButton.classList.toggle("stop", busy);
+    sendButton.setAttribute("aria-label", busy ? "Stop the answer" : "Send");
+    sendButton.title = busy ? "Stop the answer" : "Send";
+    sendButton.disabled = !canSend();
     input.disabled = false;
+  }
+
+  /** The caret goes at the very end of the text being written, not on a line of its own. */
+  function placeCaret(node) {
+    let at = node;
+    while (at.lastChild && at.lastChild.nodeType === Node.ELEMENT_NODE && !["PRE", "TABLE", "DIV", "HR", "BR"].includes(at.lastChild.tagName)) at = at.lastChild;
+    at.classList.add("caret");
   }
 
   async function send() {
@@ -261,24 +315,29 @@ export function mountChat(container, user) {
     state.messages.push(reply);
     state.live = { reply, node: null };
     renderMessages();
-    const bubble = messagesInner.lastElementChild.querySelector(".bubble");
-    bubble.classList.add("typing");
+    const node = messagesInner.lastElementChild;
+    node.classList.add("live");
+    const body = node.querySelector(".body");
+    body.append(h("span", { class: "typing-dots", "aria-label": "Clara is writing" }, h("i", {}), h("i", {}), h("i", {})));
     state.stick = true;
+    scrollDown(true);
     state.abort = new AbortController();
     setBusy(true);
     let frame = 0;
     const paint = () => {
       frame = 0;
-      clear(bubble).append(...(reply.content ? [renderMarkdown(reply.content)] : []));
+      const md = renderMarkdown(reply.content);
+      placeCaret(md);
+      clear(body).append(md);
       scrollDown();
     };
     let finished = false;
     try {
-      const body = {
-        ...who, user_name: user.person?.name || user.name, message, conversation, instructions: INSTRUCTIONS,
+      const request = {
+        ...who, user_name: displayName, message, conversation, instructions: INSTRUCTIONS,
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       };
-      for await (const event of streamChat(body, state.abort.signal)) {
+      for await (const event of streamChat(request, state.abort.signal)) {
         if (event.type === "token") {
           reply.content += event.text;
           if (!frame) frame = requestAnimationFrame(paint);
@@ -292,7 +351,7 @@ export function mountChat(container, user) {
         }
       }
     } catch (error) {
-      if (error.name === "AbortError") reply.failed = "Stopped. (What was written is not kept by Clara.)";
+      if (error.name === "AbortError") reply.failed = "Stopped. What was written so far is not kept by Clara.";
       else if (error instanceof ApiError) reply.failed = error.status === 401 ? "" : error.detail;
       else reply.failed = String(error);
     }
@@ -305,7 +364,7 @@ export function mountChat(container, user) {
       renderMessages();
       renderMeter();
     }
-    input.focus();
+    if (matchMedia("(hover: hover)").matches) input.focus(); // a phone would pop its keyboard back up
     await loadList();
     if (finished && !reply.failed) titleIfNeeded(conversation);
   }
@@ -316,7 +375,6 @@ export function mountChat(container, user) {
     try {
       await api.post(conversationPath(id) + "/title", who);
       await loadList();
-      if (id === state.current) setTitle();
     } catch { /* the preview stands in for a title */ }
   }
 
@@ -338,18 +396,20 @@ export function mountChat(container, user) {
   function autosize() {
     input.style.height = "auto";
     input.style.height = Math.min(input.scrollHeight, 220) + "px";
+    sendButton.disabled = !canSend();
   }
   input.addEventListener("input", autosize);
   input.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); send(); }
+    // on a touch screen Enter makes a new line; the send button sends
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing && matchMedia("(hover: hover)").matches) { event.preventDefault(); send(); }
   });
   input.addEventListener("paste", (event) => {
     const files = [...(event.clipboardData?.files || [])];
     if (files.length) { event.preventDefault(); addFiles(files); }
   });
-  for (const type of ["dragenter", "dragover"]) composer.addEventListener(type, (event) => { event.preventDefault(); composer.classList.add("drop"); });
-  for (const type of ["dragleave", "drop"]) composer.addEventListener(type, () => composer.classList.remove("drop"));
-  composer.addEventListener("drop", (event) => { event.preventDefault(); addFiles([...event.dataTransfer.files]); });
+  for (const type of ["dragenter", "dragover"]) root.addEventListener(type, (event) => { event.preventDefault(); composer.classList.add("drop"); });
+  for (const type of ["dragleave", "drop"]) root.addEventListener(type, (event) => { if (type === "drop" || !root.contains(event.relatedTarget)) composer.classList.remove("drop"); });
+  root.addEventListener("drop", (event) => { event.preventDefault(); addFiles([...event.dataTransfer.files]); });
 
   async function addFiles(files) {
     for (const file of files) {
@@ -371,16 +431,17 @@ export function mountChat(container, user) {
   function renderChips() {
     clear(chips);
     for (const doc of state.docs) {
-      chips.append(h("span", { class: "chip", title: doc.note }, "📎 " + doc.name,
-        h("button", { class: "ghost", "aria-label": `Remove ${doc.name}`, onclick: () => { state.docs = state.docs.filter((d) => d !== doc); renderChips(); } }, "✕")));
+      chips.append(h("span", { class: "chip", title: doc.note }, icon("file", { size: 15 }), h("span", { class: "name" }, doc.name),
+        h("button", { "aria-label": `Remove ${doc.name}`, title: "Remove", onclick: () => { state.docs = state.docs.filter((d) => d !== doc); renderChips(); } }, icon("close", { size: 14 }))));
     }
-    const info = main.querySelector("#docinfo");
-    info.textContent = state.docs.length ? `${totalChars(state.docs).toLocaleString()} / ${MAX_TOTAL_CHARS.toLocaleString()} characters of documents` : "";
+    docInfo.textContent = state.docs.length ? `${totalChars(state.docs).toLocaleString()} of ${MAX_TOTAL_CHARS.toLocaleString()} characters` : "";
+    sendButton.disabled = !canSend();
   }
 
   // ---- start -------------------------------------------------------------------------------------------
   (async () => {
     await loadList();
+    if (fresh) return newChat();
     let last = null;
     try { last = localStorage.getItem(lastKey); } catch { /* private mode */ }
     const start = state.list.find((info) => info.id === last) || state.list[0];
@@ -389,6 +450,7 @@ export function mountChat(container, user) {
   })();
 
   return {
-    destroy() { state.abort?.abort(); clearTimeout(searchTimer); root.remove(); },
+    newChat,
+    destroy() { state.abort?.abort(); clearTimeout(searchTimer); root.remove(); for (const node of railPart) node.remove(); },
   };
 }
