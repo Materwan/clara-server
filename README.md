@@ -138,7 +138,7 @@ All routes except `/health` need `Authorization: Bearer <token>`.
 | Route | |
 | --- | --- |
 | `POST /v1/chat` | `{surface, user_id, user_name?, message, conversation?, quiet?, space?, roster?, focus?, mode?}` → `{reply, conversation, person, tools, usage, passed}`; 413 if it cannot fit the model's window, 504 if the model hangs, 503 if the server is stopping. `quiet`: never notify the person about this turn; the group fields are described in *Discord* |
-| `POST /v1/chat/stream` | same body; Server-Sent Events `turn` / `thinking` / `token` / `tool` / `tool_requests` / `usage` / `compacted` / `warning` / `done` / `error` |
+| `POST /v1/chat/stream` | same body; Server-Sent Events `turn` / `thinking` / `token` / `tool` / `qcm` / `tool_requests` / `usage` / `compacted` / `warning` / `done` / `error` |
 | `POST /v1/turns/{id}/tool-results` | `{results: [{id, content}]}`: a client's answer to a `tool_requests` event (see below) |
 | `GET /v1/conversations?surface=&user_id=&q=&limit=` | `{conversations: [{id, title, titled_by, pinned, created_at, updated_at, preview}]}`: the conversations the account's person started on that surface, pinned first, then the last written in; `q` keeps those whose title, messages or summary contain it (see *Conversation history*) |
 | `GET /v1/conversations/{id}/messages?surface=&user_id=&limit=` | the same fields, and `{messages: [{id, role, content, created_at}], summary, earlier}`: its last questions and answers (200), to show it again |
@@ -187,8 +187,8 @@ written in. Conversations from before this list existed are not in it; their mes
 - **Listing** is per person and surface: `GET /v1/conversations?surface=app&user_id=erwan` gives what that
   account's person started in the app, not their terminal or Discord conversations. Each comes with the start
   of its first message (`preview`), for those without a title yet.
-- **Reading one back** (`/messages`) gives its questions and answers, not the tool calls and their results.
-  When older messages were deleted after a compaction (`CLARA_PURGE_SUMMARISED`), the summary that stands for
+- **Reading one back** (`/messages`) gives its questions and answers, not the tool calls and their results,
+  except the QCM Clara asked (see *QCM*). When older messages were deleted after a compaction (`CLARA_PURGE_SUMMARISED`), the summary that stands for
   them comes with it.
 - **Titles**: a client asks for one after an answer (`POST .../title`). Clara writes 3 to 6 words from the
   first question and answer (or from the summary), in a separate model call that is not stored in the
@@ -547,6 +547,27 @@ desktop app both manage them).
 | `POST /v1/projects/{id}/github` | `{repo, ref?}`: `owner/name`, `owner/name@branch` or a github.com address |
 | `POST /v1/projects/{id}/sources/{sid}/sync`, `DELETE /v1/projects/{id}/sources/{sid}` | download it again, remove it and its files |
 
+## QCM
+
+On the web site and in the desktop app (surfaces `web` and `app`; the tool is not offered on the others), Clara can
+ask a **QCM** with the `qcm` tool: a form the client displays. It is not blocking: the turn ends with the form
+shown, and the user's answers come back as their next message, which Clara then comments.
+
+- **Questions**: `type` is `single` (one option, radio buttons), `multiple` (check boxes) or `text` (a free
+  answer, typed). Limits: **20 questions** per QCM, **2 to 10 options** per choice question, one QCM per answer;
+  a form that breaks them is refused with a reason Clara reads and fixes (`qcm.py` has the other limits: lengths).
+- **Quiz**: a choice question may carry `correct` (the numbers of the right options, the first being 0); when every
+  choice question has it the client scores the QCM and shows the corrections, with the optional `explanation`
+  of each question and the `answer` expected of a text question. Without `correct` it is a questionnaire. Text
+  answers are not scored by the client: Clara reads them.
+- **Event**: the stream carries `{"type": "qcm", "form": {"ref", "title", "graded", "questions": [...]}}` after
+  the `tool` event of the call. `ref` identifies the form (a hash of its questions).
+- **Answers**: the client sends `[QCM answers <ref>] <title>`, then for each question `n. <question>` and
+  `Answer: B. Lyon; C. Paris` (the letter of each option chosen; the text for a text question; `(no answer)`).
+  `qcm.format_answers` writes it, `clara-app` and the web site write the same.
+- **Opening a conversation again** (`GET .../messages`): an answer that asked a QCM carries `qcm`, the forms,
+  each with `answers` (read back from the message that answered it) or `null` while it waits.
+
 ## The web site
 
 `http://127.0.0.1:8765/` (or the Tailscale address) opens Clara in a browser, with the surface `web`:
@@ -754,6 +775,7 @@ src/clara/
   headless.py   `--headless`: ignore SIGHUP, leave the terminal, log to a rotating file
   selftest.py   `--test`: the checks run before the server starts
   server.py     FastAPI routes, auth, embedded console
+  qcm.py        the QCM form Clara asks (tool `qcm`): limits, checking, the answers message
   client.py     clara-chat (also shows reminders and notifications, and has /remind and /notify)
   admin.py      clara-admin (remote console)
 config/system_prompt.md   Clara's personality, re-read when edited

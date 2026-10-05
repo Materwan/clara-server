@@ -19,7 +19,7 @@
                                         (also served as /v1/reminders/stream)
     GET    /v1/conversations            the conversations an account's person started on its surface
                                         (?project=<id>: those of a project; ?project=none: those in none)
-    GET    /v1/conversations/{id}/messages  its questions and answers, to show it again
+    GET    /v1/conversations/{id}/messages  its questions and answers, to show it again (with the QCM asked, qcm.py)
     PATCH  /v1/conversations/{id}       rename, pin, move to a project
     GET|POST|PATCH|DELETE /v1/projects...  a person's projects: their files and repositories (projectapi.py)
     POST   /v1/conversations/{id}/title Clara writes its title (if nobody has)
@@ -79,6 +79,7 @@ from .projectapi import install as install_projects
 from .projects import Projects
 from .prompt import SystemPrompt
 from .providers import ProviderManager
+from .qcm import with_answers
 from .ratelimit import FailureLimiter
 from .reminders import ReminderError, ReminderService, describe
 from .settings import Settings, SettingsError
@@ -733,7 +734,7 @@ def create_app(
         limit: Annotated[int, Query(ge=1, le=1000)] = 200,
     ) -> dict:
         info = own_conversation(client, http, surface, user_id, conversation)
-        shown, more = memory.transcript(conversation, limit)
+        shown, more = memory.transcript(conversation, limit, forms=True)
         state = memory.state(conversation)
         first_kept = shown[0].id if shown else 0
         return {
@@ -742,7 +743,10 @@ def create_app(
             "summary": state.summary if state.summary and (not shown or state.upto_id < first_kept) else "",
             "earlier": more,  # older messages exist that are not given
             "messages": [
-                {"id": m.id, "role": m.role, "content": m.content, "created_at": m.created_at} for m in shown
+                {"id": m.id, "role": m.role, "content": m.content, "created_at": m.created_at}
+                # a QCM asked by this answer, with the answers the user gave it later (null: not answered)
+                | ({"qcm": with_answers(list(m.forms), [n.content for n in shown[at + 1 :] if n.role == "user"])} if m.forms else {})
+                for at, m in enumerate(shown)
             ],
         }
 

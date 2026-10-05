@@ -5,6 +5,7 @@ import { ApiError, api, conversationPath, streamChat } from "./api.js";
 import { DocumentError, MAX_TOTAL_CHARS, compose, readDocument, splitMessage, totalChars } from "./documents.js";
 import { icon, mark, ring } from "./icons.js";
 import { renderMarkdown } from "./markdown.js";
+import { displayAnswers, qcmNode } from "./qcm.js";
 import { chooseProject, listProjects } from "./projects.js";
 import { clear, confirmDialog, h, pageHead, parseDate, popupMenu, promptDialog, randomId, toast, toggleRail } from "./ui.js";
 
@@ -13,7 +14,9 @@ const INSTRUCTIONS =
   "You are talking through Clara's web site, in a chat window. Markdown is displayed, but keep answers " +
   "short and conversational. Write mathematical formulas in LaTeX: $...$ inline and $$...$$ on their own lines " +
   "(they are typeset). The user can attach files (PDF, code, Markdown, text): their content comes in the " +
-  'message, each inside <document name="..." type="..."> tags. Refer to them by name.';
+  'message, each inside <document name="..." type="..."> tags. Refer to them by name. To quiz the user or to ' +
+  "collect several answers at once, call the qcm tool: the page shows it as a form (radio buttons, check boxes " +
+  "or a text box) and their answers come back in their next message.";
 
 function greeting() {
   const hour = new Date().getHours();
@@ -232,7 +235,7 @@ export function mountChat(container, user, { slot, fresh = false, project = null
     remember();
     try {
       const body = await api.get(conversationPath(id) + "/messages", who);
-      state.messages = body.messages.map((m) => ({ role: m.role, content: m.content }));
+      state.messages = body.messages.map((m) => ({ role: m.role, content: m.content, qcm: m.qcm }));
       state.summary = body.summary || "";
       state.earlier = Boolean(body.earlier);
       state.project = body.project || null;
@@ -276,16 +279,26 @@ export function mountChat(container, user, { slot, fresh = false, project = null
     renderMeter();
   }
 
+  /** A QCM answered here is sent as the next message, unless Clara is still writing. */
+  function submitAnswers(text) {
+    if (state.busy) { toast("Wait for Clara to finish, then send your answers."); return false; }
+    send(text);
+    return true;
+  }
+
+  const cardsOf = (message) => (message.qcm || []).map((form) => qcmNode(form, { submit: submitAnswers }));
+
   function assistantNode(message) {
     const body = h("div", { class: "body" },
-      message.content ? renderMarkdown(message.content) : null,
+      h("div", { class: "text" }, message.content ? renderMarkdown(message.content) : null),
+      h("div", { class: "cards" }, cardsOf(message)),
       message.failed && h("div", { class: "failed-note", role: "alert" }, icon("bolt", { size: 17 }), h("span", {}, message.failed)));
     return h("div", { class: "msg assistant" + (message.failed ? " failed" : "") }, h("div", { class: "who" }, mark(26)), body);
   }
 
   function messageNode(message) {
     if (message.role === "user") {
-      const { text, names } = splitMessage(message.content);
+      const { text, names } = splitMessage(displayAnswers(message.content));
       return h("div", { class: "msg user" }, h("div", { class: "body" },
         text && h("div", { class: "bubble" }, text),
         names.length > 0 && h("div", { class: "chips" }, names.map((name) => h("span", { class: "chip" }, icon("file", { size: 15 }), h("span", { class: "name" }, name))))));
@@ -337,16 +350,20 @@ export function mountChat(container, user, { slot, fresh = false, project = null
     at.classList.add("caret");
   }
 
-  async function send() {
+  /** Send what is in the box (with its documents), or, given a text, that text alone (the answers of a QCM). */
+  async function send(answers) {
     if (state.busy) { state.abort?.abort(); return; }
-    const text = input.value;
-    if (!text.trim() && !state.docs.length) return;
-    const message = compose(text, state.docs);
+    const direct = typeof answers === "string";
+    const text = direct ? answers : input.value;
+    if (!direct && !text.trim() && !state.docs.length) return;
+    const message = direct ? text : compose(text, state.docs);
     const conversation = state.current;
-    input.value = "";
-    autosize();
-    state.docs = [];
-    renderChips();
+    if (!direct) {
+      input.value = "";
+      autosize();
+      state.docs = [];
+      renderChips();
+    }
     state.messages.push({ role: "user", content: message });
     const reply = { role: "assistant", content: "" };
     state.messages.push(reply);
@@ -354,7 +371,8 @@ export function mountChat(container, user, { slot, fresh = false, project = null
     renderMessages();
     const node = messagesInner.lastElementChild;
     node.classList.add("live");
-    const body = node.querySelector(".body");
+    const body = node.querySelector(".text");
+    const cards = node.querySelector(".cards");
     body.append(h("span", { class: "typing-dots", "aria-label": "Clara is writing" }, h("i", {}), h("i", {}), h("i", {})));
     state.stick = true;
     scrollDown(true);
@@ -379,6 +397,12 @@ export function mountChat(container, user, { slot, fresh = false, project = null
         if (event.type === "token") {
           reply.content += event.text;
           if (!frame) frame = requestAnimationFrame(paint);
+        } else if (event.type === "qcm") {
+          const form = { ...event.form, answers: null };
+          (reply.qcm ||= []).push(form);
+          cards.append(qcmNode(form, { submit: submitAnswers }));
+          if (!reply.content) clear(body); // nothing written before the form: no dots above it
+          scrollDown();
         } else if (event.type === "compacted") toast("Older messages were summarised to make room.");
         else if (event.type === "warning") toast(event.message);
         else if (event.type === "error") { reply.failed = event.message; finished = true; }

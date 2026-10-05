@@ -19,6 +19,7 @@ from typing import Any, Callable
 from .memory import Memory, Person
 from .notifications import CLARA, NotificationError, Notifier
 from .projects import READ_MAX_LINES, Projects
+from .qcm import MAX_OPTION, MAX_OPTIONS, MAX_QUESTION, MAX_QUESTIONS, MIN_OPTIONS, TYPES, build_form
 from .reminders import REPEATS, ReminderError, ReminderService
 from .web import WebClient, WebError
 
@@ -30,6 +31,7 @@ RELATION_STEP_UP = 10  # the most one answer may move a relationship, up and dow
 RELATION_STEP_DOWN = -25
 ABOUT_PERSON = "about_person"  # only offered when other people with an account are here
 ABOUT_LIMIT = 30  # facts about_person gives without a query (the newest)
+QCM = "qcm"  # only offered to the clients that can show a form (see qcm.SURFACES)
 
 # The surfaces of the clients of this repository, for the model to choose where something is shown
 KNOWN_SURFACES = {
@@ -59,6 +61,7 @@ class ToolContext:
     roster: tuple[Person, ...] = ()  # in a group space: the members with an account (about_person reads them)
     projects: Projects | None = None  # the project of the conversation, whose files the project tools read
     project_id: int | None = None
+    events: list[dict] = field(default_factory=list)  # for the client: the agent sends them after the tool call
 
     @property
     def origin(self) -> tuple[str, str, str]:
@@ -227,6 +230,20 @@ def _notify(context: ToolContext, text: str, title: str = "", targets: Any = Non
         raise ValueError(str(error)) from None
     context.counts["notify"] = sent + 1
     return f"Notification {event.id} sent{_where(context, event.targets)}."
+
+
+def _qcm(context: ToolContext, questions: Any, title: str = "") -> str:
+    if context.counts.get(QCM):
+        raise ValueError("Only one QCM per answer: the user has not answered the first one yet.")
+    form = build_form({"title": title, "questions": questions})
+    context.counts[QCM] = 1
+    context.events.append({"type": "qcm", "form": form})
+    graded = " The client scores it and shows the corrections." if form["graded"] else ""
+    return (
+        f"The QCM ({len(form['questions'])} questions) is now shown to the user, who answers it themselves.{graded} "
+        "Do not answer or repeat its questions: say at most one short sentence and stop. Their answers come in "
+        "their next message."
+    )
 
 
 def _cancel_reminder(context: ToolContext, reminder_id: Any) -> str:
@@ -465,6 +482,64 @@ def default_toolbox(web: WebClient | None = None) -> Toolbox:
                 function=_cancel_reminder,
                 parameters={"reminder_id": {"type": "integer", "description": "Id of the reminder."}},
                 required=("reminder_id",),
+            ),
+            Tool(
+                name=QCM,
+                description=(
+                    "Show the user a QCM (multiple-choice questionnaire) they answer in a form: use it to quiz them, "
+                    "to test their knowledge or to collect several answers at once, not for a single question. "
+                    f"At most {MAX_QUESTIONS} questions, one QCM per answer. The turn ends there: their answers "
+                    "arrive in their next message, and you then comment on them."
+                ),
+                function=_qcm,
+                parameters={
+                    "title": {"type": "string", "description": "Optional short title of the QCM."},
+                    "questions": {
+                        "type": "array",
+                        "description": f"The questions, in order (1 to {MAX_QUESTIONS}).",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "text": {"type": "string", "description": f"The question (at most {MAX_QUESTION} characters)."},
+                                "type": {
+                                    "type": "string",
+                                    "enum": list(TYPES),
+                                    "description": (
+                                        "single: one option; multiple: any number of options; text: a free "
+                                        "answer, typed. Default: single."
+                                    ),
+                                },
+                                "options": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": (
+                                        f"{MIN_OPTIONS} to {MAX_OPTIONS} options (at most {MAX_OPTION} characters "
+                                        "each), without letters or numbers in front. None for a text question."
+                                    ),
+                                },
+                                "correct": {
+                                    "type": "array",
+                                    "items": {"type": "integer"},
+                                    "description": (
+                                        "Optional: the numbers of the correct options, the first option being 0 "
+                                        "(exactly one for single). When every choice question has it, the user "
+                                        "sees their score and the corrections."
+                                    ),
+                                },
+                                "explanation": {
+                                    "type": "string",
+                                    "description": "Optional: why the answer is right, shown after the user answers.",
+                                },
+                                "answer": {
+                                    "type": "string",
+                                    "description": "Text question only, optional: the expected answer, shown after.",
+                                },
+                            },
+                            "required": ["text"],
+                        },
+                    },
+                },
+                required=("questions",),
             ),
             Tool(
                 name="adjust_relation",

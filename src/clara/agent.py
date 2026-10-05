@@ -41,8 +41,9 @@ from .memory import ConversationState, Fact, Memory, Person, StoredMessage, Turn
 from .notifications import SERVER, SURFACE_RE, NotificationError, Notifier
 from .projects import PROJECT_TOOLS, Projects
 from .prompt import SystemPrompt
+from .qcm import SURFACES as QCM_SURFACES
 from .reminders import ReminderService
-from .tools import ABOUT_PERSON, Toolbox, ToolContext
+from .tools import ABOUT_PERSON, QCM, Toolbox, ToolContext
 
 log = logging.getLogger(__name__)
 
@@ -510,6 +511,8 @@ class Agent:
         hidden = set() if context.roster else {ABOUT_PERSON}
         if not self._project_tools_needed(request):
             hidden |= PROJECT_TOOLS
+        if request.surface not in QCM_SURFACES:
+            hidden.add(QCM)  # the other clients have no form to show
         server_tools = [] if ephemeral or request.no_tools else self.toolbox.schemas_without(hidden)
         schemas = server_tools + list(request.tools)
         turn_id = uuid.uuid4().hex
@@ -615,6 +618,9 @@ class Agent:
                                 "arguments": call.arguments,
                                 "result": _shorten(results[call_id], TOOL_EVENT_RESULT),
                             }
+                            for extra in context.events:  # what the tool asks the client to show (a QCM)
+                                yield extra
+                            context.events.clear()
                     if remote:
                         self._pending[turn_id] = _Pending(
                             owner, frozenset(call_id for call_id, _ in remote),

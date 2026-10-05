@@ -743,3 +743,62 @@ dialog .actions { display: flex; justify-content: flex-end; gap: .55rem; margin-
 .md .math-block { display: block; margin: .5em 0 .9em; overflow-x: auto; overflow-y: hidden; text-align: center; }
 .md .math-block .katex-display { margin: 0; }
 .md .katex { font-size: 1.08em; }
+
+/* ---- QCM: a form Clara asks (qcm.js) ------------------------------------------------------------------ */
+.msg .cards:not(:empty) { display: flex; flex-direction: column; gap: 1rem; margin-top: .6rem; }
+.qcm {
+  background: var(--panel); border: 1px solid var(--line-strong); border-radius: var(--r-lg); padding: 1rem 1.1rem 1rem;
+  box-shadow: var(--shadow-sm); display: flex; flex-direction: column; gap: 1rem; font-size: .96rem; line-height: 1.5;
+}
+.qcm-head { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+.qcm-head h3 { font-size: 1.05rem; margin: 0; flex: 1 1 auto; min-width: 0; }
+.qcm-kind {
+  background: var(--accent-soft); color: var(--accent-text); border-radius: 6px; padding: .1rem .45rem;
+  font-size: .72rem; font-weight: 700; letter-spacing: .06em;
+}
+.qcm-count { color: var(--muted); font-size: .84rem; }
+.qcm-question { border: none; padding: 0; margin: 0; min-width: 0; display: flex; flex-direction: column; gap: .45rem; }
+.qcm-question legend { display: flex; gap: .6rem; padding: 0; font-weight: 600; float: left; width: 100%; margin-bottom: .45rem; }
+.qcm-question legend + * { clear: both; }
+.qcm-question .num {
+  flex: none; width: 1.55rem; height: 1.55rem; border-radius: 50%; display: grid; place-items: center;
+  background: var(--panel-2); color: var(--text-2); font-size: .8rem; font-weight: 700;
+}
+.qcm-question .q-text { min-width: 0; overflow-wrap: anywhere; }
+.qcm-hint { margin: 0; color: var(--muted); font-size: .84rem; }
+.qcm-options { display: flex; flex-direction: column; gap: .4rem; }
+.qcm-option {
+  display: flex; align-items: center; gap: .65rem; padding: .55rem .75rem; border: 1px solid var(--line); border-radius: var(--r);
+  cursor: pointer; background: var(--bg); transition: border-color .12s, background .12s; min-height: 44px;
+}
+.qcm-option:hover { border-color: var(--line-strong); background: var(--hover); }
+.qcm-option:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+.qcm-option:has(input:focus-visible) { box-shadow: 0 0 0 3px var(--accent-glow); }
+.qcm-option input { flex: none; margin: 0; }
+.qcm-option input[type="radio"] { width: 1.1rem; height: 1.1rem; accent-color: var(--accent); }
+.qcm-option .letter { flex: none; width: 1.3rem; color: var(--muted); font-weight: 700; font-size: .85rem; }
+.qcm-option .opt-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.qcm-note { flex: none; font-size: .78rem; color: var(--ok); font-weight: 600; }
+.qcm-question textarea { width: 100%; resize: vertical; min-height: 3.2rem; }
+.qcm-question:disabled .qcm-option { cursor: default; }
+.qcm-question:disabled .qcm-option:hover { background: var(--bg); border-color: var(--line); }
+.qcm-question:disabled .qcm-option.picked { background: var(--accent-soft); border-color: var(--accent); }
+.qcm-question:disabled textarea { opacity: .85; resize: none; }
+.qcm .qcm-question .qcm-option.right { border-color: var(--ok); background: var(--ok-soft); color: var(--text); }
+.qcm .qcm-question .qcm-option.right .icon { color: var(--ok); }
+.qcm .qcm-question .qcm-option.wrong { border-color: var(--danger); background: var(--danger-soft); }
+.qcm .qcm-question .qcm-option.wrong .icon { color: var(--danger); }
+.qcm .qcm-question .qcm-option.missed { border-style: dashed; border-color: var(--ok); background: var(--bg); }
+.qcm-verdict { display: flex; align-items: center; gap: .35rem; margin: .1rem 0 0; font-weight: 650; font-size: .88rem; }
+.qcm-question.right .qcm-verdict { color: var(--ok); }
+.qcm-question.wrong .qcm-verdict { color: var(--danger); }
+.qcm-explain { margin: 0; padding: .55rem .8rem; border-radius: var(--r-sm); background: var(--panel-2); color: var(--text-2); font-size: .9rem; }
+.qcm-foot { display: flex; align-items: center; justify-content: space-between; gap: .75rem; flex-wrap: wrap; border-top: 1px solid var(--line); padding-top: .8rem; }
+.qcm-foot button { display: inline-flex; align-items: center; gap: .4rem; }
+.qcm-progress, .qcm-score { color: var(--muted); font-size: .88rem; margin: 0; }
+.qcm-score strong { color: var(--text); font-size: 1.1rem; }
+.qcm.done { border-color: var(--line); }
+@media (max-width: 600px) {
+  .qcm { padding: .85rem .8rem; }
+  .qcm-foot button { width: 100%; justify-content: center; }
+}

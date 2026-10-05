@@ -45,6 +45,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .qcm import forms_in
+
 MAX_FACT_LENGTH = 300
 MAX_NAME_LENGTH = 80
 MAX_TITLE_LENGTH = 100
@@ -364,6 +366,7 @@ class ShownMessage:
     role: str  # "user" or "assistant"
     content: str
     created_at: str  # ISO, UTC
+    forms: tuple[dict, ...] = ()  # QCM the message asked (only when the transcript was read with `forms`)
 
 
 @dataclass(frozen=True)
@@ -1259,16 +1262,25 @@ class Memory:
             ).fetchone()
         return row["title"] if row else ""
 
-    def transcript(self, conversation: str, limit: int = 200) -> tuple[list[ShownMessage], bool]:
+    def transcript(
+        self, conversation: str, limit: int = 200, forms: bool = False
+    ) -> tuple[list[ShownMessage], bool]:
         """The last `limit` questions and answers of a conversation still stored, oldest first, and
-        whether older ones were left out."""
+        whether older ones were left out. With `forms`, an answer that asked a QCM is kept even when it
+        wrote nothing, and carries the QCM."""
+        # a call is stored as JSON: `"name": "qcm"` is how it shows; the forms are checked below
+        keep = " OR tool_calls LIKE '%\"qcm\"%'" if forms else ""
         with self._lock:
             rows = self._db.execute(
-                "SELECT id, role, content, created_at FROM messages WHERE conversation = ?"
-                " AND role IN ('user', 'assistant') AND content != '' ORDER BY id DESC LIMIT ?",
+                "SELECT id, role, content, created_at, tool_calls FROM messages WHERE conversation = ?"
+                f" AND role IN ('user', 'assistant') AND (content != ''{keep}) ORDER BY id DESC LIMIT ?",
                 (conversation, limit + 1),
             ).fetchall()
-        shown = [ShownMessage(row["id"], row["role"], row["content"], row["created_at"]) for row in rows[:limit]]
+        shown = []
+        for row in rows[:limit]:
+            asked = tuple(forms_in(json.loads(row["tool_calls"]))) if forms and row["tool_calls"] else ()
+            if row["content"] or asked:
+                shown.append(ShownMessage(row["id"], row["role"], row["content"], row["created_at"], asked))
         return shown[::-1], len(rows) > limit
 
     # ------------------------------------------------------------------
