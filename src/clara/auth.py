@@ -29,6 +29,7 @@ log = logging.getLogger("clara")
 
 COOKIE = "clara_session"
 WEB_HEADER = "x-clara-web"
+SHARED_SURFACES = ("web", "app")  # the surfaces whose conversations a user sees and continues on each of them
 
 
 class Caller(str):
@@ -149,14 +150,27 @@ def require_account(request: Request, client: str, surface: str, user_id: str, s
             raise HTTPException(403, f"The account {surface}:{user_id} is {NOT_SIGNED_IN}: sign in or register first")
 
 
+def shared_surfaces(request: Request, client: str, surface: str) -> tuple[str, ...]:
+    """The surfaces whose conversations a caller on `surface` sees as its own: the web site's and the app's are
+    one list (a user's two accounts are one person), as far as the caller may use them. Any other surface: itself."""
+    if surface not in SHARED_SURFACES:
+        return (surface,)
+    if getattr(client, "user", None) is not None:
+        return SHARED_SURFACES if client.surface in SHARED_SURFACES else (surface,)  # type: ignore[attr-defined]
+    allowed = request.app.state.settings.client_surfaces.get(client)
+    return SHARED_SURFACES if allowed is None else tuple(s for s in SHARED_SURFACES if s in allowed) or (surface,)
+
+
 def require_conversation(request: Request, client: str, conversation: str) -> None:
     """403 unless the conversation belongs to a surface the client may use, or is one of the user's own."""
     user: User | None = getattr(client, "user", None)
     if user is not None:
-        own = f"{client.surface}:{user.name}"  # type: ignore[attr-defined]
-        if conversation != own and not conversation.startswith(own + ":"):
-            raise HTTPException(403, "This login may not use that conversation")
-        return
+        surfaces = shared_surfaces(request, client, client.surface)  # type: ignore[attr-defined]
+        for surface in surfaces:
+            own = f"{surface}:{user.name}"
+            if conversation == own or conversation.startswith(own + ":"):
+                return
+        raise HTTPException(403, "This login may not use that conversation")
     allowed = request.app.state.settings.client_surfaces.get(client)
     if allowed is not None and not any(conversation.startswith(f"{surface}:") for surface in allowed):
         raise HTTPException(403, "This client may not use that conversation")

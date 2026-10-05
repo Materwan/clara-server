@@ -18,7 +18,8 @@
     POST   /v1/notifications            send a notification to a person, now
     GET    /v1/notifications/stream     Server-Sent Events of an account: `reminder`, `notification`, `server`
                                         (also served as /v1/reminders/stream)
-    GET    /v1/conversations            the conversations an account's person started on its surface
+    GET    /v1/conversations            the conversations an account's person started on its surface (the web
+                                        site and the app share theirs, auth.SHARED_SURFACES)
                                         (?project=<id>: those of a project; ?project=none: those in none)
     GET    /v1/conversations/{id}/messages  its questions and answers, to show it again (with the QCM asked, qcm.py)
     PATCH  /v1/conversations/{id}       rename, pin, move to a project
@@ -66,7 +67,7 @@ from .agent import (
     ServerStopping,
 )
 from .announce import compose
-from .auth import Admin, Client, peer_of, require_account, require_conversation, require_space
+from .auth import Admin, Client, peer_of, require_account, require_conversation, require_space, shared_surfaces
 from .clientapi import install as install_clients
 from .commands import CommandContext, CommandResult, registry
 from .discord_bot.local import LocalBackend
@@ -753,7 +754,8 @@ def create_app(
         require_account(http, client, surface, user_id)
         person = memory.find_person(surface, user_id)
         which: int | str | None = ANY_PROJECT if project is None else None if project == "none" else int(project)
-        found = memory.conversations_of(person.id, surface, q, limit, which) if person else []
+        surfaces = shared_surfaces(http, client, surface)
+        found = memory.conversations_of(person.id, surfaces, q, limit, which) if person else []
         return {"conversations": [describe_conversation(info) for info in found]}
 
     # Before GET /v1/conversations/{conversation:path}, which would take ".../messages" for an id

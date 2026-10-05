@@ -1278,13 +1278,15 @@ class Memory:
         return self._conversation(row) if row else None
 
     def conversations_of(
-        self, person_id: int, surface: str, query: str = "", limit: int = 200, project: int | str | None = ANY_PROJECT
+        self, person_id: int, surface: str | tuple[str, ...], query: str = "", limit: int = 200,
+        project: int | str | None = ANY_PROJECT,
     ) -> list[ConversationInfo]:
-        """The conversations a person started on a surface: pinned ones first, then the last written in.
-        `query` keeps those whose title, messages or summary contain it (case is ignored for ASCII letters);
-        `project` those of a project (None: those in no project; ANY_PROJECT: all of them)."""
-        sql = self._CONVERSATION_COLUMNS + " WHERE c.person_id = ? AND c.surface = ?"
-        params: list = [PREVIEW_LENGTH, person_id, surface]
+        """The conversations a person started on a surface (or on any of several): pinned ones first, then the
+        last written in. `query` keeps those whose title, messages or summary contain it (case is ignored for
+        ASCII letters); `project` those of a project (None: those in no project; ANY_PROJECT: all of them)."""
+        surfaces = (surface,) if isinstance(surface, str) else tuple(surface)
+        sql = self._CONVERSATION_COLUMNS + f" WHERE c.person_id = ? AND c.surface IN ({','.join('?' * len(surfaces))})"
+        params: list = [PREVIEW_LENGTH, person_id, *surfaces]
         if project is None:
             sql += " AND c.project_id IS NULL"
         elif project != ANY_PROJECT:

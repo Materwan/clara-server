@@ -189,8 +189,11 @@ person), the surface it was started on (the start of its id, `app` in `app:erwan
 written in. Conversations from before this list existed are not in it; their messages stay where they were.
 
 - **Listing** is per person and surface: `GET /v1/conversations?surface=app&user_id=erwan` gives what that
-  account's person started in the app, not their terminal or Discord conversations. Each comes with the start
-  of its first message (`preview`), for those without a title yet.
+  account's person started in the app, not their terminal or Discord conversations. The **web site and the app
+  share one list**: asked on either of them, it holds the conversations started on both (`web:erwan:…` and
+  `app:erwan:…`), and either can read, continue, rename, pin, move or delete any of them (a client token limited by
+  `CLARA_CLIENT_SURFACES` sees only the surfaces it may use). Projects are the person's, so they were already
+  the same. Each comes with the start of its first message (`preview`), for those without a title yet.
 - **Reading one back** (`/messages`) gives its questions and answers, not the tool calls and their results,
   except the QCM Clara asked (see *QCM*). When older messages were deleted after a compaction (`CLARA_PURGE_SUMMARISED`), the summary that stands for
   them comes with it.
@@ -504,8 +507,8 @@ are open, but share what they missed.
 A **user** is a name and a password. Signing in gives a token that is bound to that user and to one *surface*, so
 the server knows who is speaking and refuses anything that claims otherwise (HTTP 403): a user cannot read
 another's conversations or facts, whatever the request says. One user is **one person on every surface**: signing in
-on the web, in the desktop app and in the terminal gives the same memories and the same conversations list per
-surface, with no link codes.
+on the web, in the desktop app and in the terminal gives the same memories, with no link codes; the web site and the
+desktop app also show and continue each other's conversations (the terminal's and Discord's stay apart).
 
 | Surface | Used by |
 | --- | --- |

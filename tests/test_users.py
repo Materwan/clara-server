@@ -200,6 +200,34 @@ def test_users_cannot_read_each_others_conversations(http):
     assert http.get("/v1/conversations/app:erwan:one/messages", params=params, headers=theirs).status_code == 403
 
 
+def test_the_web_site_and_the_app_share_their_conversations(http):
+    app, web = bearer(http, surface="app"), bearer(http, surface="web")
+    chat(http, app, conversation="app:erwan:one")
+    chat(http, web, surface="web", conversation="web:erwan:two")
+    for headers, surface in ((app, "app"), (web, "web")):
+        params = {"surface": surface, "user_id": "erwan"}
+        listed = http.get("/v1/conversations", params=params, headers=headers).json()["conversations"]
+        assert {c["id"] for c in listed} == {"app:erwan:one", "web:erwan:two"}
+    # each reads, continues, renames, moves and deletes the other's
+    params = {"surface": "app", "user_id": "erwan"}
+    assert http.get("/v1/conversations/web:erwan:two/messages", params=params, headers=app).status_code == 200
+    assert chat(http, app, conversation="web:erwan:two").status_code == 200
+    assert http.patch("/v1/conversations/web:erwan:two", json={**params, "title": "Shared"}, headers=app).status_code == 200
+    web_params = {"surface": "web", "user_id": "erwan"}
+    titles = {c["id"]: c["title"] for c in http.get("/v1/conversations", params=web_params, headers=web).json()["conversations"]}
+    assert titles["web:erwan:two"] == "Shared"
+    assert http.delete("/v1/conversations/app:erwan:one", params=web_params, headers=web).status_code == 200
+    # but only the user's own, and only the two surfaces
+    assert chat(http, app, conversation="web:alice:one").status_code == 403
+    assert chat(http, app, conversation="cli:erwan:one").status_code == 403
+    chat(http, bearer(http, "alice", "web"), surface="web", user_id="alice", conversation="web:alice:one")
+    assert http.get("/v1/conversations/web:alice:one/messages", params=params, headers=app).status_code == 403
+    cli = bearer(http, surface="cli")
+    cli_params = {"surface": "cli", "user_id": "erwan"}
+    assert http.get("/v1/conversations", params=cli_params, headers=cli).json()["conversations"] == []
+    assert chat(http, cli, surface="cli", conversation="web:erwan:two").status_code == 403
+
+
 def test_one_user_is_one_person_on_every_surface_without_link_codes(http):
     http.post("/v1/memory/facts", json={"surface": "app", "user_id": "erwan", "text": "Likes tea"}, headers=bearer(http))
     cli = bearer(http, surface="cli")

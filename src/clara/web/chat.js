@@ -73,6 +73,7 @@ export function mountChat(container, user, { slot, fresh = false, project = null
   const state = {
     list: [], query: "", current: null, messages: [], summary: "", earlier: false,
     busy: false, abort: null, docs: [], context: null, live: null, stick: true,
+    stamp: null, // when the conversation shown was last written in, as we read it: another device may have gone on
     project: null, projects: new Map(), // the project of the conversation shown; every project's name, by id
   };
 
@@ -275,6 +276,7 @@ export function mountChat(container, user, { slot, fresh = false, project = null
     state.earlier = false;
     state.context = null;
     state.live = null;
+    state.stamp = null;
     remember();
     renderAll();
     input.focus();
@@ -295,9 +297,10 @@ export function mountChat(container, user, { slot, fresh = false, project = null
       state.summary = body.summary || "";
       state.earlier = Boolean(body.earlier);
       state.project = body.project || null;
+      state.stamp = body.updated_at || null;
     } catch (error) {
       if (error.status === 404 || error.status === 403) {
-        state.messages = []; state.summary = ""; state.earlier = false; state.project = null;
+        state.messages = []; state.summary = ""; state.earlier = false; state.project = null; state.stamp = null;
       } else {
         return toast(error.detail || String(error), true);
       }
@@ -504,8 +507,24 @@ export function mountChat(container, user, { slot, fresh = false, project = null
     }
     if (matchMedia("(hover: hover)").matches) input.focus(); // a phone would pop its keyboard back up
     await loadList();
+    if (conversation === state.current) state.stamp = state.list.find((item) => item.id === conversation)?.updated_at ?? state.stamp;
     if (finished && !reply.failed) titleIfNeeded(conversation);
   }
+
+  // The web site and the app share their conversations: while this page is in front, read the list again now and
+  // then, and the conversation shown if it went on elsewhere (never while an answer is being written here).
+  const REFRESH = 30000;
+  async function refresh() {
+    if (document.hidden || state.busy) return;
+    const id = state.current;
+    await loadList();
+    const info = state.list.find((item) => item.id === id);
+    if (!info || state.busy || id !== state.current || !state.stamp || info.updated_at === state.stamp) return;
+    await open(id);
+  }
+  const refreshTimer = setInterval(refresh, REFRESH);
+  document.addEventListener("visibilitychange", refresh);
+  addEventListener("focus", refresh);
 
   async function titleIfNeeded(id) {
     const info = state.list.find((item) => item.id === id);
@@ -610,6 +629,10 @@ export function mountChat(container, user, { slot, fresh = false, project = null
 
   return {
     newChat: () => newChat(),
-    destroy() { state.abort?.abort(); clearTimeout(searchTimer); root.remove(); for (const node of railPart) node.remove(); },
+    destroy() {
+      state.abort?.abort(); clearTimeout(searchTimer); clearInterval(refreshTimer);
+      document.removeEventListener("visibilitychange", refresh); removeEventListener("focus", refresh);
+      root.remove(); for (const node of railPart) node.remove();
+    },
   };
 }
