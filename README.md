@@ -164,6 +164,7 @@ All routes except `/health` need `Authorization: Bearer <token>`.
 | `POST /v1/accounts/link` | `{surface, user_id, code, to_surface, to_user_id}`; 403 bad code, 409 both accounts have memories |
 | `DELETE /v1/conversations/{id}?surface=&user_id=` | forget a thread, keep the facts; with an account, only one its person started (404 otherwise) |
 | `POST /v1/auth/login` | `{username, password, surface?, device?}` → `{token, user, surface}`; with the header `X-Clara-Web: 1` (the web site) the token goes in an HttpOnly cookie instead; 401 wrong, 403 surface not allowed, 409 accounts cannot be merged, 429 too many tries (see *Users*) |
+| `GET /v1/auth/signup`, `POST /v1/auth/register` | `{open}`: whether the web site lets people make their own user; `{username, password}` makes a user (never an administrator) and logs them in on `web`, as login does. 403 when `CLARA_WEB_SIGNUP` is off, 409 name taken, 422 rules, 429 too many (see *Users*) |
 | `POST /v1/auth/logout`, `GET /v1/auth/me`, `POST /v1/auth/password` `{current_password, new_password}`, `GET /v1/auth/sessions`, `DELETE /v1/auth/sessions/{id}` | the signed-in user's own account and devices |
 | `POST /v1/documents/extract` | the bytes of a PDF as the body → `{text, pages, truncated}` |
 | `GET /health` | no auth; shows the active provider and model |
@@ -482,6 +483,13 @@ surface, with no link codes.
 | `/user logout <name>` | signs a user out of all their devices |
 | `/user list` | users, roles, devices, last sign-in |
 
+**Letting people make their own.** Off by default. With `CLARA_WEB_SIGNUP=true` the web site's sign-in page offers
+*Create one*: a user name, a password (repeated), and the new user is signed in at once. Such a user is never an
+administrator, and always a **new person**: unlike `/user add`, it does not take over the memories of an account that
+has their name (anyone could claim `discord:1234` otherwise), so a name an account already uses is refused. An
+address (other than this machine) may make 5 users a minute, then none for an hour. Leave it off on a server that
+strangers can reach (Tailscale Funnel).
+
 The same things are on the web site's *Admin* page, where a password can also be typed instead of generated. A user
 changes their own password on the *Account* page, which signs out their other devices.
 
@@ -543,6 +551,7 @@ desktop app both manage them).
 
 `http://127.0.0.1:8765/` (or the Tailscale address) opens Clara in a browser, with the surface `web`:
 
+- **Sign in**, or *Create an account* when `CLARA_WEB_SIGNUP` allows it (see *Users*).
 - **Chat**: answers stream in as Markdown, with LaTeX formulas (`$x^2$`, `\(x^2\)`, `$$…$$`, `\[…\]`) typeset by KaTeX
   (vendored in `web/katex/`, so it works offline; the script is only loaded once an answer has a formula); your conversations at the side (search, pin, rename, delete, titles
   written by Clara); a bar showing how full the context is and *Summarise* to compact it; documents with 📎, by
@@ -628,6 +637,8 @@ listen and say "Clara is stopping / is not running / is running again".
 
 ## Security
 
+- **Making an account on the web site is off** unless `CLARA_WEB_SIGNUP=true`; turn it on only where everyone who can
+  reach the server may use it (it spends your model's tokens). Open sign-ups never inherit another account's memories.
 - **People sign in with a password** (see *Users*); the server then knows who is speaking, and a token it
   gives cannot act as anybody else. Passwords are kept only as salted scrypt hashes; the tokens only as
   SHA-256 hashes; neither is ever written to the traffic log.
@@ -723,7 +734,7 @@ src/clara/
   reminders.py  reminders: parsing, repeats, the scheduler
   users.py      users, password hashes, login tokens (the tables are in memory.py)
   auth.py       who is calling (client token, user token or web cookie) and what they may touch
-  webapi.py     login, account, administration and PDF routes, and the web site's files
+  webapi.py     login, sign-up, account, administration and PDF routes, and the web site's files
   clientapi.py  what a client of many people (the Discord bot) uses: signing accounts in, spaces; chime in, the
                 relationship and the Discord page for administrators
   discord_bot/  the Discord bot: service.py runs it in the server (local.py: direct calls), standalone.py on its

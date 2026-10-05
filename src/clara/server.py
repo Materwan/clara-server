@@ -87,7 +87,7 @@ from .tools import default_toolbox
 from .traffic import TrafficLog, TrafficMiddleware
 from .users import Users
 from .web import WebClient
-from .webapi import install, install_web
+from .webapi import SIGNUPS, SIGNUPS_BLOCK, install, install_web
 
 log = logging.getLogger("clara")
 
@@ -363,6 +363,7 @@ def create_app(
     )
     app.state.settings = settings
     app.state.auth_limiter = FailureLimiter(settings.auth_max_failures, settings.auth_block_seconds)
+    app.state.signup_limiter = FailureLimiter(SIGNUPS, SIGNUPS_BLOCK)
     app.state.users = users
     app.state.tailscale = tailscale
     app.state.memory = memory

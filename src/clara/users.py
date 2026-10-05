@@ -93,6 +93,14 @@ def generate_password() -> str:
     return secrets.token_urlsafe(12)  # 16 characters
 
 
+def check_name(name: str) -> str:
+    """The user name as stored (trimmed, lower case), or a UserError."""
+    name = name.strip().lower()
+    if not NAME_RE.match(name):
+        raise UserError("A user name has 1 to 32 characters: a-z, 0-9, '.', '_' or '-', not starting with a symbol.")
+    return name
+
+
 def check_password_rules(password: str) -> None:
     if len(password) < MIN_PASSWORD:
         raise UserError(f"The password needs at least {MIN_PASSWORD} characters.")
@@ -139,9 +147,7 @@ class Users:
     def create(self, name: str, password: str, admin: bool = False, person: Person | None = None) -> User:
         """A new user. They are `person` if given, else the person already known by an account with this
         name (`cli:erwan`, `app:erwan`...), or a new one."""
-        name = name.strip().lower()
-        if not NAME_RE.match(name):
-            raise UserError("A user name has 1 to 32 characters: a-z, 0-9, '.', '_' or '-', not starting with a symbol.")
+        name = check_name(name)
         check_password_rules(password)
         db = self._memory.database
         with self._memory.lock, db:
@@ -159,6 +165,22 @@ class Users:
                 (name, person_id, hash_password(password), int(admin), _stamp(self._clock())),
             )
         return self.get(name)  # type: ignore[return-value]
+
+    def register(self, name: str, password: str) -> User:
+        """A user who made themselves (the web site's sign-up). Unlike `create`, they never take over the
+        memories of an account that already has their name (`cli:erwan`, `discord:1234`...): anybody could
+        claim them, so such a name is refused and the person is always a new one."""
+        name = check_name(name)
+        check_password_rules(password)
+        with self._memory.lock:
+            if self._memory.database.execute("SELECT 1 FROM accounts WHERE external_id = ?", (name,)).fetchone():
+                raise UserError(f"The name {name} is already taken.")
+            person = self._memory.create_person(name)
+        try:
+            return self.create(name, password, person=person)
+        except UserError:
+            self._memory.delete_person(person.id)
+            raise
 
     def person_of(self, user: User) -> Person:
         person = self._memory.person_by_id(user.person_id)

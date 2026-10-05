@@ -279,6 +279,82 @@ def test_wrong_passwords_are_limited_per_address(settings):
         assert login(http).status_code == 429  # even the right one
 
 
+@pytest.fixture
+def open_http(settings):
+    opened = replace(settings, web_signup=True)
+    with TestClient(create_app(opened, fake_providers(opened, FakeBackend(*[say("ok") for _ in range(5)])))) as client:
+        client.app.state.users.create("erwan", PASSWORD)
+        yield client
+
+
+def register(http, name="newcomer", password=PASSWORD, **headers):
+    return http.post("/v1/auth/register", json={"username": name, "password": password}, headers=headers)
+
+
+def test_signing_up_is_closed_unless_the_server_allows_it(http):
+    assert http.get("/v1/auth/signup").json() == {"open": False}
+    assert register(http).status_code == 403
+    assert http.app.state.users.get("newcomer") is None
+
+
+def test_the_sign_in_page_can_ask_whether_signing_up_is_open(open_http):
+    assert open_http.get("/v1/auth/signup").json() == {"open": True}  # no login needed
+
+
+def test_signing_up_makes_a_plain_user_who_is_logged_in_on_the_web(open_http):
+    answer = register(open_http, **WEB)
+    assert answer.status_code == 201
+    body = answer.json()
+    assert "token" not in body and body["surface"] == "web"
+    assert body["user"]["name"] == "newcomer" and not body["user"]["is_admin"]
+    assert "HttpOnly" in answer.headers["set-cookie"]
+    assert open_http.get("/v1/auth/me", headers=WEB).json()["name"] == "newcomer"
+    assert login(open_http, "newcomer", "web", password=PASSWORD).status_code == 200  # and the password works
+
+
+def test_signing_up_applies_the_user_rules_and_refuses_taken_names(open_http):
+    assert register(open_http, "erwan").status_code == 409
+    assert register(open_http, "ERWAN").status_code == 409
+    assert register(open_http, "bad name!").status_code == 422
+    assert register(open_http, password="short").status_code == 422
+    assert open_http.app.state.users.get("bad name!") is None
+
+
+def test_signing_up_never_takes_over_the_memories_of_an_account_with_that_name(open_http):
+    memory = open_http.app.state.memory
+    stranger = memory.resolve("discord", "1234", "Someone")
+    memory.add_fact(stranger.id, "likes tea")
+    assert register(open_http, "1234").status_code == 409  # a Discord id: it is not theirs to claim
+    assert register(open_http, "cli-person").status_code == 201
+    mine = memory.find_person("web", "cli-person")
+    assert mine is not None and mine.id != stranger.id
+    assert memory.facts(stranger.id)[0].text == "likes tea"  # nothing moved
+
+
+def test_a_refused_sign_up_leaves_no_person_behind(open_http):
+    database = open_http.app.state.memory.database
+    before = database.execute("SELECT COUNT(*) FROM people").fetchone()[0]
+    assert register(open_http, "erwan").status_code == 409
+    assert register(open_http, password="short").status_code == 422
+    assert database.execute("SELECT COUNT(*) FROM people").fetchone()[0] == before
+
+
+def test_sign_ups_are_limited_per_address(settings):
+    opened = replace(settings, web_signup=True)
+    with TestClient(create_app(opened, fake_providers(opened, FakeBackend())), client=("203.0.113.5", 1)) as http:
+        made = [register(http, f"user{n}").status_code for n in range(5)]
+        assert made == [201] * 5
+        assert register(http, "one-more").status_code == 429
+
+
+def test_sign_up_passwords_never_reach_the_traffic_log(open_http):
+    secret = "a very private sign-up password"
+    assert register(open_http, "quiet", secret).status_code == 201
+    open_http.app.state.traffic.flush()
+    text = "".join(path.read_text(encoding="utf-8") for path in open_http.app.state.settings.logs_dir.glob("traffic-*.jsonl"))
+    assert "quiet" in text and secret not in text
+
+
 def test_a_disabled_user_is_signed_out_at_once(http):
     headers = bearer(http)
     assert http.patch("/v1/admin/users/erwan", json={"disabled": True}, headers=ADMIN_TOKEN).status_code == 200

@@ -2,6 +2,8 @@
 administration of users and people, reading a PDF, and the web site itself (`web/`, served at `/`).
 
     POST   /v1/auth/login               {username, password, surface?, device?} -> a token (or a session cookie)
+    GET    /v1/auth/signup              {open}: whether the web site lets people make their own user
+    POST   /v1/auth/register            {username, password}: make a user and log them in on the web (CLARA_WEB_SIGNUP)
     POST   /v1/auth/logout              sign out of this device
     GET    /v1/auth/me                  who am I, which accounts are mine
     POST   /v1/auth/password            {current_password, new_password}: change it, other devices are signed out
@@ -44,6 +46,8 @@ log = logging.getLogger("clara")
 WEB_DIR = Path(__file__).parent / "web"
 MAX_PDF_BYTES = 30_000_000
 MAX_PDF_CHARS = 400_000
+SIGNUPS = 5  # an address that makes this many users within a minute...
+SIGNUPS_BLOCK = 3600  # ...may make no other for an hour
 
 router = APIRouter()
 
@@ -53,6 +57,11 @@ class LoginBody(BaseModel):
     password: str = Field(min_length=1, max_length=512)
     surface: str = Field(default="web", pattern=r"^[A-Za-z0-9_-]{1,32}$")
     device: str = Field(default="", max_length=80)
+
+
+class RegisterBody(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=512)
 
 
 class PasswordBody(BaseModel):
@@ -123,25 +132,65 @@ async def login(body: LoginBody, request: Request) -> JSONResponse:
             log.warning("%s sent %d wrong passwords: refused for %d s", address, limiter.max_failures, limiter.block_seconds)
         raise HTTPException(401, "Wrong user name or password")
     limiter.succeeded(address)
+    response = start_session(request, user, surface, body.device)
+    log.info("%s logged in on %s from %s", user.name, surface, address)
+    return response
+
+
+def start_session(request: Request, user: User, surface: str, device: str = "", status: int = 200) -> JSONResponse:
+    """Log `user` in on `surface`: a token in the answer, or for the web site a cookie out of reach of scripts."""
+    state = request.app.state
+    users, settings = state.users, state.settings
+    address = request.client.host if request.client else None
     try:  # this user is one person on every surface: the account of this surface joins theirs
         state.memory.link_account(surface, user.name, users.person_of(user))
     except MergeRefused as error:
         raise HTTPException(409, f"{error} (account {surface}:{user.name})") from None
-    device = body.device or request.headers.get("user-agent", "")[:80]
+    device = device or request.headers.get("user-agent", "")[:80]
     token, session = users.open_session(user, surface, device, address or "")
-    log.info("%s logged in on %s from %s", user.name, surface, address)
     payload: dict[str, Any] = {
         "user": describe_user(request.app, user), "surface": surface, "expires_in_days": settings.session_days,
     }
     web = request.headers.get(WEB_HEADER) == "1"
     if not web:
         payload["token"] = token
-    response = JSONResponse(payload)
+    response = JSONResponse(payload, status_code=status)
     if web:  # a browser: the token stays in a cookie, out of reach of scripts
         response.set_cookie(
             COOKIE, token, max_age=(settings.session_days or 3650) * 86400, httponly=True, samesite="strict",
             path="/", secure=request.url.scheme == "https",
         )
+    return response
+
+
+@router.get("/v1/auth/signup")
+async def signup_open(request: Request) -> dict:
+    """Asked by the sign-in page, before anybody is logged in: should it offer to make an account?"""
+    return {"open": request.app.state.settings.web_signup}
+
+
+@router.post("/v1/auth/register", status_code=201)
+async def register(body: RegisterBody, request: Request) -> JSONResponse:
+    """Make a user (never an administrator) and log them in on the web site, when the server allows it."""
+    state = request.app.state
+    settings = state.settings
+    if not settings.web_signup:
+        raise HTTPException(403, "Making an account here is not allowed: ask the person who runs this server.")
+    if "web" not in settings.user_surfaces:
+        raise HTTPException(403, "Logging in on 'web' is not allowed (CLARA_USER_SURFACES).")
+    address = request.client.host if request.client else None
+    wait = state.signup_limiter.blocked_for(address)
+    if wait:
+        raise HTTPException(
+            429, "Too many accounts made from this address: try again later.", headers={"Retry-After": str(int(wait) + 1)},
+        )
+    try:
+        user = await asyncio.to_thread(state.users.register, body.username, body.password)  # scrypt takes a moment
+    except UserError as error:
+        raise HTTPException(409 if "already" in str(error) else 422, str(error)) from None
+    state.signup_limiter.failed(address)  # counts the users made, not failures
+    response = start_session(request, user, "web", status=201)
+    log.info("%s made the user %s on the web site", address, user.name)
     return response
 
 

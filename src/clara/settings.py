@@ -194,6 +194,8 @@ class Settings:
     # the surfaces a login may be made on (a user token is bound to one of them)
     session_days: int = 90
     user_surfaces: frozenset[str] = frozenset({"web", "app", "cli", "console"})
+    # Whether anybody who reaches the web site may make their own user there (off: administrators make them)
+    web_signup: bool = False
     # Surfaces where a client signs its people in (POST /v1/accounts/login or register): there, an account that
     # is not signed in as a user cannot talk to Clara
     login_surfaces: frozenset[str] = frozenset({"discord"})
@@ -342,6 +344,7 @@ class Settings:
             auth_block_seconds=_positive_int(env, "CLARA_AUTH_BLOCK_SECONDS", 300),
             session_days=_non_negative_int(env, "CLARA_SESSION_DAYS", 90),
             user_surfaces=parse_user_surfaces(text("CLARA_USER_SURFACES", "web,app,cli,console")),
+            web_signup=_flag(env, "CLARA_WEB_SIGNUP"),
             login_surfaces=parse_login_surfaces(text("CLARA_LOGIN_SURFACES", "discord")),
             discord_token=text("DISCORD_BOT_TOKEN") or None,
             discord_auto_start=_flag(env, "AUTO_START_DISCORD_BOT"),

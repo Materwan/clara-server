@@ -36,6 +36,21 @@ function themeSwitch() {
 
 // ---- signing in ----------------------------------------------------------------------------------------
 
+function authPage(title, lede, form, foot) {
+  clear(app).append(h("div", { class: "login-wrap" }, h("main", { class: "login" },
+    h("div", { class: "halo" }, mark(60)),
+    h("h1", {}, title),
+    h("p", { class: "lede" }, lede),
+    form,
+    foot,
+    themeSwitch())));
+}
+
+/** Whether this server lets people make their own account; a server that cannot say is taken as closed. */
+async function signupOpen() {
+  try { return (await api.get("/v1/auth/signup")).open === true; } catch { return false; }
+}
+
 function showLogin(message = "") {
   stop();
   user = null;
@@ -66,13 +81,53 @@ function showLogin(message = "") {
   h("label", { class: "field" }, "Password", password),
   note,
   button);
-  clear(app).append(h("div", { class: "login-wrap" }, h("main", { class: "login" },
-    h("div", { class: "halo" }, mark(60)),
-    h("h1", {}, "Sign in to Clara"),
-    h("p", { class: "lede" }, "Your conversations, and what Clara remembers about you."),
-    form,
-    h("p", { class: "foot" }, "No account yet? Ask the person who runs this server."),
-    themeSwitch())));
+  const foot = h("p", { class: "foot" }, "No account yet? Ask the person who runs this server.");
+  authPage("Sign in to Clara", "Your conversations, and what Clara remembers about you.", form, foot);
+  name.focus();
+  signupOpen().then((open) => {
+    if (open && foot.isConnected) clear(foot).append("No account yet? ", h("a", { href: "/", onclick: (event) => { event.preventDefault(); showSignup(); } }, "Create one"), ".");
+  });
+}
+
+function showSignup() {
+  stop();
+  user = null;
+  document.title = "Create an account – Clara";
+  const name = h("input", { type: "text", autocomplete: "username", autocapitalize: "none", spellcheck: false, required: true, autofocus: true, maxlength: 32 });
+  const password = h("input", { type: "password", autocomplete: "new-password", required: true, minlength: 10 });
+  const again = h("input", { type: "password", autocomplete: "new-password", required: true });
+  const note = h("p", { hidden: true, role: "alert" });
+  const button = h("button", { class: "primary", type: "submit" }, "Create my account");
+  const warn = (text) => { note.hidden = false; note.className = "notice warn small"; note.textContent = text; };
+  const form = h("form", { class: "stack", onsubmit: async (event) => {
+    event.preventDefault();
+    note.hidden = true;
+    if (password.value !== again.value) {
+      warn("The two passwords are not the same.");
+      again.select();
+      return;
+    }
+    button.disabled = true;
+    button.textContent = "Creating…";
+    try {
+      await api.post("/v1/auth/register", { username: name.value.trim(), password: password.value }, { quiet401: true });
+      password.value = again.value = "";
+      await boot(); // the server signed this account in
+    } catch (error) {
+      warn(error.detail || String(error));
+      button.disabled = false;
+      button.textContent = "Create my account";
+    }
+  } },
+  h("label", { class: "field" }, "User name", name,
+    h("span", { class: "hint" }, "Letters a–z, digits, '.', '_' or '-' (up to 32). It cannot be changed later.")),
+  h("label", { class: "field" }, "Password", password, h("span", { class: "hint" }, "At least 10 characters.")),
+  h("label", { class: "field" }, "Repeat the password", again),
+  note,
+  button);
+  const foot = h("p", { class: "foot" }, "Already have an account? ",
+    h("a", { href: "/", onclick: (event) => { event.preventDefault(); showLogin(); } }, "Sign in"), ".");
+  authPage("Create your account", "Then Clara can know you, and keep your conversations.", form, foot);
   name.focus();
 }
 
