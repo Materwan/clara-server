@@ -567,7 +567,8 @@ desktop app both manage them).
   files), and **GitHub repositories**: the server downloads a snapshot of a branch, tag or commit (the archive
   GitHub makes, no git needed) into a folder named after the repository; *Sync* downloads it again. Public
   repositories need nothing; private ones need `GITHUB_TOKEN` (a fine-grained token with read access to their
-  contents) in the server's `.env`, and it never leaves the server.
+  contents) in the server's `.env`, and it never leaves the server. (To let Clara *change* a repository, see
+  *Integrations*: each person connects their own GitHub account.)
 - **What is left out**: anything that is not text (images, programs, fonts, archives inside archives), dependencies
   and build output (`node_modules`, `.venv`, `.git`, `dist`, `build`, `target`…), lock files and minified files, and
   any file of more than 1 million characters of text. Each one left out is listed with the reason.
@@ -595,6 +596,89 @@ desktop app both manage them).
 | `DELETE /v1/projects/{id}/files?path=&folder=` | a file, or every file of a folder |
 | `POST /v1/projects/{id}/github` | `{repo, ref?}`: `owner/name`, `owner/name@branch` or a github.com address |
 | `POST /v1/projects/{id}/sources/{sid}/sync`, `DELETE /v1/projects/{id}/sources/{sid}` | download it again, remove it and its files |
+
+## Integrations
+
+Projects keep a *copy* of files. Integrations are the other way: a person connects their own **GitHub** and **Google
+Drive** accounts and adds **folders** (on the server, or on their own computer through the desktop app), attaches them
+to a project or to one conversation, and Clara reads and works on them **live**, with tools, as that person. What she
+may do is decided per kind of action, and anything that replaces or deletes asks first, **without stopping her**.
+
+- **What can be attached**: a GitHub repository (and optionally a branch), a Google Drive folder or file, a folder of
+  the server, a folder of the person's computer. They are added once in the *Integrations* page (web site and app:
+  *Settings*, next to Account) and then attached to a **project** (every conversation of it has them) or to one
+  **conversation** (the *Connections* button of the chat). A conversation may give a resource other permissions than
+  its project does.
+- **Her tools** (offered only where something is attached): `resources`, `res_list`, `res_read` (with line numbers),
+  `res_search`, `res_write` (`create`, `overwrite`, `append`), `res_delete`, `res_move`, and for GitHub
+  `github_branch`, `github_pr` and `github_issue`. Her prompt lists what is attached, with the permissions.
+- **Permissions**: three *levels* of action: **look** (list, read, search), **change** (add something new, or change what
+  stays recoverable: a new file, a commit on a branch, a pull request, an issue, a branch) and **replace or delete**
+  (overwrite, delete, move, commit to the default branch, merge, close, delete a branch). Each one is *allow*, *ask* or
+  *deny*. Where a level's answer comes from, most specific first: the project's or the conversation's own setting for
+  that resource, the resource's, the account's, then the default (look: allow; the others: ask). A call the connector
+  cannot classify counts as *replace or delete*. Overwriting a file is *replace*, creating one is *change*; on GitHub a
+  commit to the repository's default branch is *replace*, to another branch *change*.
+- **Asking without blocking**: when a call needs permission the tool answers at once, "waiting for permission (request
+  #12), this was NOT done", and she carries on with whatever does not depend on it. The request shows as a card in
+  the conversation (web and app), and in the rail ("Waiting for you"). If it is not answered within
+  `CLARA_APPROVAL_NOTIFY_AFTER` seconds (60; each person can change it, or turn it off, on the Integrations page)
+  it is pushed to the person's **other surfaces**: a notification in the app, a private message with
+  **Approve / Deny buttons** on Discord (the buttons keep working after the bot restarts), the badge on the web site.
+  Whoever answers first decides; the others are told it is settled. A request nobody answers lapses after
+  `CLARA_APPROVAL_EXPIRE_AFTER` seconds (24 h) and she is told it was not done.
+- **When it is answered**: *Approve* runs the action on the server exactly as it was asked (the arguments are frozen),
+  records it, and a short **follow-up turn** tells her how it ended so that she can go on; a denial, or a failure, is
+  told the same way. *Approve and do not ask again* (in this conversation, or for the resource) changes the setting.
+  Only a signed-in person can answer, through the API (`POST /v1/approvals/{id}/decide`) from an account of theirs;
+  **she has no tool to approve her own request**.
+- **Connecting**: *GitHub*: paste a fine-grained personal access token (github.com/settings/personal-access-tokens)
+  with access to the repositories she may use: "Contents: read and write" to commit, plus "Pull requests" and
+  "Issues" if wanted. *Google Drive*: the administrator creates an OAuth client in a Google Cloud project, enables the
+  Drive API, and puts `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in `.env`; the redirect URI to register is
+  `<the server's address>/v1/integrations/google/callback` (Google wants `https` or `localhost`: the Tailscale address
+  does) and `CLARA_PUBLIC_URL` is that address when the server is reached through a proxy. Keep the app **In
+  production** in Google's console: in *Testing* mode Google ends the connection after 7 days (the page then says
+  "Connect it again"). Each person then clicks *Connect Google Drive* and confirms on the page they come back to,
+  which names the Clara user the Drive would be given to.
+- **Folders on the server** are only reachable inside the roots an administrator lists (Integrations page, bottom): a
+  person picks a folder under one, and Clara cannot leave it: paths are resolved (links followed, `..` refused) and
+  checked at every call. Remove a root and what was added from it stops working. They are off until the administrator
+  turns them on.
+- **Folders on a computer** are added from the desktop app (*Integrations*, *Add*, *Folder on this computer*). The
+  server never learns the path: it only knows the computer's id and the folder's alias. A call becomes a *job* that
+  the app fetches (a `job` event wakes it), does **inside the folders that were added on that computer**, and answers.
+  Whatever a job says, the app refuses a path that leaves them, so even a server that was taken over cannot read the
+  rest of the disk. If the app is not running a read answers "offline" at once (and she carries on without it); a change
+  is queued until it is back, and given up after a day.
+- **Secrets** (a GitHub token, a Google refresh token) are encrypted in the database with `CLARA_SECRET_KEY` (a Fernet
+  key or any long text; else a key is made in `data/secret.key`). They are never returned by the API, never shown,
+  and kept out of the traffic log. Whoever has both the database and the key can read them.
+- **Administrator**: each integration can be turned on or off for the server and, per person; the most open a level may
+  be set (*ceiling*: "always ask" or "never"; it beats what a person chose, at every call); the folders of the
+  server; and a **log** of everything she asked and did (who, what, where, how it ended). Finished requests are kept 30
+  days. Erasing a person erases their accounts, resources and requests.
+
+| Route | |
+| --- | --- |
+| `GET /v1/integrations?surface=&user_id=` | the kinds that are on, the person's accounts and resources (with their effective permissions), their settings |
+| `PUT /v1/integrations/settings` | `{approval_notify_after}` seconds (0: never; null: the server's) |
+| `POST /v1/integrations/github` | `{token}`: connect a GitHub account (checked, then kept encrypted) |
+| `POST /v1/integrations/google/start` | the address to send the person to; Google then calls `GET …/google/callback`, which asks them to confirm (`POST …/google/confirm`) |
+| `PATCH`, `DELETE /v1/integrations/accounts/{id}` | `{levels}` default permissions; disconnect (its resources go) |
+| `GET /v1/integrations/browse/github`, `…/drive`, `…/server` | repositories, Drive folders, folders of the server, to pick from |
+| `POST /v1/integrations/resources` | `{kind, account?, repo?, ref?, file_id?, path?, device?, alias?, label?, levels?}` (`kind`: `github_repo`, `drive_folder`, `drive_file`, `server_path`, `computer_path`) |
+| `PATCH`, `DELETE /v1/integrations/resources/{id}` | `{label?, levels?}`; remove |
+| `GET`, `PUT /v1/integrations/attachments` | what is attached to `?project=` or `?conversation=` (with what a conversation inherits); `{resource, project \| conversation, levels?}` |
+| `DELETE /v1/integrations/attachments/{id}` | detach |
+| `GET /v1/approvals?status=pending\|all&conversation=` | the requests for permission |
+| `POST /v1/approvals/{id}/decide` | `{approve, remember?}`; 409 if it was answered already |
+| `GET /v1/integrations/jobs?device=`, `POST /v1/integrations/jobs/{id}/result` | for the desktop app: what Clara asked of this computer's folders, and the answer |
+| `GET`, `PUT /v1/admin/integrations`, `GET /v1/admin/integrations/log` | the administrator's switches, ceilings and folders; the log |
+
+Notification events `approval` (a request to answer, with its summary and buttons) and `approval_resolved` come on the
+same stream as reminders, for the surfaces `app`, `discord` and `web`; the chat stream carries an `approval` event when
+she asks during a turn.
 
 ## Models
 
@@ -902,6 +986,10 @@ src/clara/
   ingest.py     the text of uploaded files: text, code, PDF, .docx, .zip; what is left out
   github.py     downloads a snapshot of a GitHub repository
   projectapi.py the routes of projects
+  integrations/ GitHub, Google Drive and folders that Clara works on live: store.py (tables), permissions.py, vault.py
+                (encrypted secrets), broker.py (every call is checked here), approvals.py (requests for permission,
+                pushing, follow-up), service.py, and connectors/ (github_live, gdrive, serverfs, computer)
+  integrationapi.py the routes of integrations and approvals
   tools.py      tools the model can call
   reminders.py  reminders: parsing, repeats, the scheduler
   tasks.py      the to-do list: tasks, their reminders, the rules, the scheduler (storage: taskstore.py)
@@ -942,5 +1030,7 @@ config/system_prompt.md   Clara's personality, re-read when edited
 ## Next steps
 
 - Semantic recall of facts (embeddings).
+- Integrations: merging pull requests with their checks, Drive sharing, Docs/Sheets editing as documents, a shell on the
+  computer (only reading and file changes are there for now).
 - Semantic search in projects (embeddings), for the projects too big to be read whole.
 - Scheduled / proactive tasks.

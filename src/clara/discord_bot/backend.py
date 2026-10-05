@@ -63,6 +63,9 @@ class ClaraBackend(Protocol):
     async def tasks(self, user_id: int, status: str = "open") -> list[dict]: ...
     async def task(self, user_id: int, task_id: int) -> dict: ...
 
+    # requests for permission
+    async def decide_approval(self, user_id: int, approval_id: int, approve: bool) -> dict: ...
+
     # talking
     async def chat(
         self,

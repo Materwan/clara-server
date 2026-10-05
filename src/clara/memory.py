@@ -259,6 +259,87 @@ CREATE TABLE IF NOT EXISTS markdown_files (
     updated_at TEXT NOT NULL,
     UNIQUE (person_id, name)
 );
+CREATE TABLE IF NOT EXISTS integration_accounts (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id  INTEGER NOT NULL REFERENCES people (id) ON DELETE CASCADE,
+    kind       TEXT NOT NULL,  -- "github" or "gdrive"
+    label      TEXT NOT NULL,  -- who it is on the other side (a GitHub login, a Google address)
+    secret     TEXT NOT NULL DEFAULT '',  -- encrypted (integrations/secrets.py), never given back
+    status     TEXT NOT NULL DEFAULT 'ok',  -- "ok" or "needs_reconnect"
+    levels     TEXT NOT NULL DEFAULT '{}',  -- default permission of each level for its resources (JSON)
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_integration_accounts_person ON integration_accounts (person_id);
+CREATE TABLE IF NOT EXISTS integration_resources (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id  INTEGER NOT NULL REFERENCES people (id) ON DELETE CASCADE,
+    account_id INTEGER REFERENCES integration_accounts (id) ON DELETE CASCADE,
+    kind       TEXT NOT NULL,  -- github_repo, drive_folder, drive_file, server_path, computer_path
+    label      TEXT NOT NULL,
+    locator    TEXT NOT NULL,  -- JSON: what the connector needs to find it
+    levels     TEXT NOT NULL DEFAULT '{}',  -- its own permissions (JSON); a level not in it follows the account's
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_integration_resources_person ON integration_resources (person_id);
+CREATE TABLE IF NOT EXISTS integration_attachments (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    resource_id     INTEGER NOT NULL REFERENCES integration_resources (id) ON DELETE CASCADE,
+    project_id      INTEGER REFERENCES projects (id) ON DELETE CASCADE,
+    conversation    TEXT,  -- exactly one of project_id and conversation is set
+    levels          TEXT NOT NULL DEFAULT '{}',  -- permissions that apply here instead of the resource's (JSON)
+    created_at      TEXT NOT NULL,
+    UNIQUE (resource_id, project_id, conversation)
+);
+CREATE INDEX IF NOT EXISTS idx_integration_attachments_project ON integration_attachments (project_id);
+CREATE INDEX IF NOT EXISTS idx_integration_attachments_conversation ON integration_attachments (conversation);
+CREATE TABLE IF NOT EXISTS approvals (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id    INTEGER NOT NULL REFERENCES people (id) ON DELETE CASCADE,
+    conversation TEXT NOT NULL,
+    surface      TEXT NOT NULL DEFAULT '',  -- where the conversation is, and as which account:
+    user_id      TEXT NOT NULL DEFAULT '',  -- the follow-up turn is run there
+    resource_id  INTEGER REFERENCES integration_resources (id) ON DELETE SET NULL,
+    op           TEXT NOT NULL,  -- the operation asked for (write, delete...)
+    level        TEXT NOT NULL,  -- read, write or destructive
+    args         TEXT NOT NULL,  -- JSON, frozen when asked
+    args_hash    TEXT NOT NULL,
+    summary      TEXT NOT NULL,  -- what is shown to the person, written by the server from the arguments
+    reason       TEXT NOT NULL DEFAULT '',  -- what the model said about it (shown as a quote only)
+    status       TEXT NOT NULL DEFAULT 'pending',  -- pending, approved, denied, expired, done, failed
+    result       TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL,
+    notified_at  TEXT,
+    decided_at   TEXT,
+    decided_on   TEXT NOT NULL DEFAULT '',  -- the surface the person answered on
+    told         INTEGER NOT NULL DEFAULT 0  -- has the model been told how it ended?
+);
+CREATE INDEX IF NOT EXISTS idx_approvals_person ON approvals (person_id, status);
+CREATE INDEX IF NOT EXISTS idx_approvals_conversation ON approvals (conversation, status);
+CREATE TABLE IF NOT EXISTS integration_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id   INTEGER REFERENCES people (id) ON DELETE SET NULL,
+    conversation TEXT NOT NULL DEFAULT '',
+    resource    TEXT NOT NULL,  -- label of the resource, as it was
+    op          TEXT NOT NULL,
+    level       TEXT NOT NULL,
+    summary     TEXT NOT NULL,
+    outcome     TEXT NOT NULL,  -- done, failed, denied, asked
+    approval_id INTEGER,
+    at          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_integration_log_at ON integration_log (at);
+CREATE TABLE IF NOT EXISTS integration_jobs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id   INTEGER NOT NULL REFERENCES people (id) ON DELETE CASCADE,
+    device      TEXT NOT NULL,
+    op          TEXT NOT NULL,
+    args        TEXT NOT NULL,  -- JSON
+    status      TEXT NOT NULL DEFAULT 'queued',  -- queued, sent, done, failed
+    result      TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_integration_jobs_device ON integration_jobs (person_id, device, status);
 """
 
 # Columns added after the first release: databases created before have to get them.
@@ -266,6 +347,7 @@ _ADDED_COLUMNS = {
     "people": {
         "relation": "INTEGER",  # Clara's relationship with the person, 0-100 (NULL: none yet)
         "notify_after": "INTEGER",  # seconds a task takes before it notifies the person (0: never, NULL: default)
+        "approval_notify_after": "INTEGER",  # seconds before a request for permission is pushed (NULL: default)
     },
     "conversations": {
         "project_id": "INTEGER",  # the project it belongs to (projects.py), NULL: none
@@ -292,6 +374,7 @@ _ADDED_COLUMNS = {
         "targets": "TEXT NOT NULL DEFAULT ''",
         "source": "TEXT NOT NULL DEFAULT ''",  # who sent a notification: "clara", "server" or a client
         "conversation": "TEXT NOT NULL DEFAULT ''",  # the conversation it is about, if any
+        "payload": "TEXT",  # JSON a client acts on (an approval's id and summary); NULL: none
     },
 }
 
@@ -398,6 +481,7 @@ class ReminderEvent:
     source: str = ""  # who sent a notification
     person_id: int | None = None  # None: for everybody
     conversation: str = ""
+    payload: dict | None = None  # what a client acts on (an approval to answer, a job to run)
 
 
 @dataclass(frozen=True)
@@ -667,6 +751,8 @@ class Memory:
             self._db.execute("DELETE FROM usage WHERE person_id = ?", (person_id,))
             self._db.execute("DELETE FROM model_choices WHERE person_id = ?", (person_id,))
             self._db.execute("DELETE FROM tasks WHERE person_id = ?", (person_id,))  # their reminders go with them
+            # their connected accounts, resources and requests go with them (the tables cascade); so does their log
+            self._db.execute("DELETE FROM integration_log WHERE person_id = ?", (person_id,))
             self._db.execute("DELETE FROM messages WHERE person_id = ?", (person_id,))
             self._db.execute("DELETE FROM reminders WHERE person_id = ?", (person_id,))
             self._db.execute("DELETE FROM reminder_events WHERE person_id = ?", (person_id,))
@@ -791,6 +877,24 @@ class Memory:
                 raise ValueError(f"A delay is 0 (never) to {MAX_NOTIFY_AFTER} seconds.")
         with self._lock, self._db:
             self._db.execute("UPDATE people SET notify_after = ? WHERE id = ?", (seconds, person_id))
+        return seconds
+
+    def approval_notify_after(self, person_id: int) -> int | None:
+        """Seconds a request for permission waits in its conversation before it is pushed to the person's other
+        surfaces (0: never pushed); None: the server's default."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT approval_notify_after FROM people WHERE id = ?", (person_id,)
+            ).fetchone()
+        return row["approval_notify_after"] if row else None
+
+    def set_approval_notify_after(self, person_id: int, seconds: int | None) -> int | None:
+        if seconds is not None:
+            seconds = int(seconds)
+            if not 0 <= seconds <= MAX_NOTIFY_AFTER:
+                raise ValueError(f"A delay is 0 (never) to {MAX_NOTIFY_AFTER} seconds.")
+        with self._lock, self._db:
+            self._db.execute("UPDATE people SET approval_notify_after = ? WHERE id = ?", (seconds, person_id))
         return seconds
 
     # ------------------------------------------------------------------
@@ -1053,21 +1157,27 @@ class Memory:
         targets: tuple[str, ...] = (),
         source: str = "",
         conversation: str = "",
+        kind: str = "notification",
+        payload: dict | None = None,
     ) -> ReminderEvent:
-        """Store a notification for one person (None: for everybody), to be streamed to their clients."""
+        """Store a notification for one person (None: for everybody), to be streamed to their clients. `kind`
+        and `payload`: an event a client acts on (an approval to answer) rather than shows."""
         stamp = self._stamp(now)
         with self._lock, self._db:
             cursor = self._db.execute(
                 "INSERT INTO reminder_events (person_id, text, due_at, fired_at, kind, title, targets, source,"
-                " conversation) VALUES (?, ?, ?, ?, 'notification', ?, ?, ?, ?)",
-                (person_id, text, stamp, stamp, title, join_targets(targets), source, conversation),
+                " conversation, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    person_id, text, stamp, stamp, kind, title, join_targets(targets), source, conversation,
+                    json.dumps(payload, ensure_ascii=False) if payload is not None else None,
+                ),
             )
             row = self._db.execute(self._EVENT_COLUMNS + " WHERE e.id = ?", (cursor.lastrowid,)).fetchone()
         return self._event(row)
 
     _EVENT_COLUMNS = (
         "SELECT e.id, e.text, e.due_at, e.fired_at, p.name, e.message, e.kind, e.title, e.targets, e.source,"
-        " e.person_id, e.conversation FROM reminder_events e LEFT JOIN people p ON p.id = e.person_id"
+        " e.person_id, e.conversation, e.payload FROM reminder_events e LEFT JOIN people p ON p.id = e.person_id"
     )
 
     @staticmethod
@@ -1085,6 +1195,7 @@ class Memory:
             row["source"],
             row["person_id"],
             row["conversation"],
+            json.loads(row["payload"]) if row["payload"] else None,
         )
 
     EVERYONE = object()  # reminder_events_after(): no filter on the person
@@ -1248,6 +1359,7 @@ class Memory:
 
     def clear_conversation(self, conversation: str) -> int:
         with self._lock, self._db:
+            self._db.execute("DELETE FROM integration_attachments WHERE conversation = ?", (conversation,))
             self._db.execute("DELETE FROM conversation_state WHERE conversation = ?", (conversation,))
             self._db.execute("DELETE FROM conversations WHERE conversation = ?", (conversation,))
             return self._db.execute(

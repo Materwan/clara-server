@@ -118,6 +118,51 @@ def human_size(characters: int) -> str:
     return f"{characters / 1_000_000:.1f} M chars"
 
 
+def read_lines(path: str, content: str, start: int = 1, end: int | None = None) -> str:
+    """A file's lines `start`-`end`, numbered, within READ_MAX_LINES and READ_MAX_CHARS, with a note saying where to
+    go on when there is more."""
+    lines = content.splitlines()
+    start = max(1, start)
+    last = min(len(lines), end if end else start + READ_MAX_LINES - 1, start + READ_MAX_LINES - 1)
+    if start > len(lines):
+        return f"{path} has only {len(lines)} lines."
+    out: list[str] = []
+    used = 0
+    for number in range(start, last + 1):
+        line = f"{number:>5}  {lines[number - 1]}"
+        if used + len(line) > READ_MAX_CHARS and out:
+            last = number - 1
+            break
+        out.append(line)
+        used += len(line) + 1
+    header = f"{path}, lines {start}-{last} of {len(lines)}"
+    if last < len(lines):
+        header += f" (read on with start_line={last + 1})"
+    return header + ":\n" + "\n".join(out)
+
+
+def search_pattern(query: str, regex: bool = False) -> re.Pattern:
+    """What a search looks for: the words (any case) or a regular expression. ValueError says what is wrong."""
+    if not query.strip():
+        raise ValueError("query is empty.")
+    try:
+        return re.compile(query if regex else re.escape(query), re.IGNORECASE)
+    except re.error as error:
+        raise ValueError(f"not a valid regular expression ({error}).") from None
+
+
+def matching_lines(path: str, content: str, pattern: re.Pattern, room: int) -> list[str]:
+    """`path:number: line` for the lines of `content` that match, at most `room` of them."""
+    found: list[str] = []
+    for number, line in enumerate(content.splitlines(), 1):
+        if len(found) >= room:
+            break
+        if pattern.search(line):
+            text = line.strip()
+            found.append(f"{path}:{number}: {text if len(text) <= SEARCH_LINE else text[: SEARCH_LINE - 1] + '…'}")
+    return found
+
+
 def file_tokens(path: str, size: int) -> int:
     """What a file weighs in a prompt: its text, and its <document> wrapping."""
     return estimate_tokens("x" * size) + estimate_tokens(path) + 12
@@ -472,32 +517,10 @@ class Projects:
         if found is None:
             return f"No file {path!r} in the project (list_project_files gives the paths)."
         info, content = found
-        lines = content.splitlines()
-        start = max(1, start)
-        last = min(len(lines), end if end else start + READ_MAX_LINES - 1, start + READ_MAX_LINES - 1)
-        if start > len(lines):
-            return f"{info.path} has only {len(lines)} lines."
-        out: list[str] = []
-        used = 0
-        for number in range(start, last + 1):
-            line = f"{number:>5}  {lines[number - 1]}"
-            if used + len(line) > READ_MAX_CHARS and out:
-                last = number - 1
-                break
-            out.append(line)
-            used += len(line) + 1
-        header = f"{info.path}, lines {start}-{last} of {len(lines)}"
-        if last < len(lines):
-            header += f" (read on with start_line={last + 1})"
-        return header + ":\n" + "\n".join(out)
+        return read_lines(info.path, content, start, end)
 
     def search(self, project_id: int, query: str, folder: str = "", regex: bool = False) -> str:
-        if not query.strip():
-            raise ValueError("query is empty.")
-        try:
-            pattern = re.compile(query if regex else re.escape(query), re.IGNORECASE)
-        except re.error as error:
-            raise ValueError(f"not a valid regular expression ({error}).") from None
+        pattern = search_pattern(query, regex)
         folder = folder.strip().strip("/")
         sql = "SELECT path, content FROM project_files WHERE project_id = ?"
         params: list = [project_id]

@@ -90,6 +90,18 @@ def for_surface(event: ReminderEvent, surface: str | None) -> bool:
 
 
 def event_payload(event: ReminderEvent) -> dict[str, Any]:
+    if event.kind in ("approval", "approval_resolved", "job"):
+        # for a client to act on, not to show: an approval to answer, the end of one, a job for the app
+        return {
+            "type": event.kind,
+            "id": event.id,
+            "text": event.text,
+            "title": event.title,
+            "sent_at": event.fired_at,
+            "targets": list(event.targets),
+            "conversation": event.conversation or None,
+            **(event.payload or {}),
+        }
     if event.kind == "notification":
         return {
             "type": "notification",
@@ -120,7 +132,12 @@ class Notifier:
         self._clock = clock
         self._listeners: set[asyncio.Event] = set()  # one per open client stream
         self._sent: dict[int | None, deque[float]] = {}  # recent notifications per person, for the rate limit
+        self._present: dict[tuple[int, str], int] = {}  # open streams of (person, surface): who is listening now
         self.server_state = "running"
+
+    def connected(self, person_id: int, surface: str) -> bool:
+        """Is a client of that surface listening for this person right now (the desktop app is running)?"""
+        return self._present.get((person_id, surface), 0) > 0
 
     def wake(self) -> None:
         """Events were stored: every open stream looks for them."""
@@ -143,10 +160,13 @@ class Notifier:
         source: str = "",
         conversation: str = "",
         limited: bool = True,
+        kind: str = "notification",
+        payload: dict | None = None,
     ) -> ReminderEvent:
         """Send a notification to one person (None: everybody) on some of their surfaces (empty: all).
-        `limited`: counts towards the rate limit (the server's own notifications do not). Raises
-        :class:`NotificationError` when it is invalid or the person was sent too many."""
+        `limited`: counts towards the rate limit (the server's own notifications do not). `kind` and `payload`: an
+        event a client acts on (an approval to answer) rather than shows. Raises :class:`NotificationError` when it
+        is invalid or the person was sent too many."""
         text = (text or "").strip()
         title = " ".join((title or "").split())
         if not text:
@@ -159,7 +179,7 @@ class Notifier:
         if limited:
             self._count(person_id)
         event = self.memory.add_notification(
-            person_id, text, self._clock(), title, surfaces, source, conversation
+            person_id, text, self._clock(), title, surfaces, source, conversation, kind, payload
         )
         self.stored()
         return event
@@ -199,6 +219,10 @@ class Notifier:
         self._listeners.add(wake)
         told = ""
         name = self.listener(client, surface, user_id)
+        here = self.memory.find_person(surface, user_id) if surface and user_id else None
+        mark = (here.id, surface) if here is not None and surface else None
+        if mark is not None:
+            self._present[mark] = self._present.get(mark, 0) + 1
         try:
             cursor = self.memory.reminder_cursor(name)
             if cursor is None:  # first time: no backlog
@@ -225,6 +249,10 @@ class Notifier:
                 await wake.wait()
         finally:
             self._listeners.discard(wake)
+            if mark is not None:
+                self._present[mark] -= 1
+                if self._present[mark] <= 0:
+                    del self._present[mark]
 
     async def surface_events(
         self, client: str, surface: str, recipients: Callable[[int], list[str]]

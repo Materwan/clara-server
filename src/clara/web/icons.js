@@ -48,6 +48,9 @@ const ICONS = {
   calendar: ["M5.5 5.5h13a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1h-13a1 1 0 0 1-1-1v-12a1 1 0 0 1 1-1Z", "M4.5 10h15", "M8.5 3.5v3", "M15.5 3.5v3"],
   bell: ["M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 1.5h-15Z", "M10 20.5a2 2 0 0 0 4 0"],
   chevron: ["M9 6l6 6-6 6"],
+  plug: ["M9 3v5", "M15 3v5", "M6.5 8h11v2.5a5.5 5.5 0 0 1-11 0Z", "M12 16v5"],
+  cloud: ["M7.5 18.5a4.5 4.5 0 0 1-.6-8.96A5.8 5.8 0 0 1 18 9.8a4.35 4.35 0 0 1-.5 8.7Z"],
+  shield: ["M12 3.5l7 2.8v5.2c0 4.3-2.9 7.7-7 9.5-4.1-1.8-7-5.2-7-9.5V6.3Z", "M9 12l2.2 2.2L15.5 10"],
 };
 
 /** An icon as an <svg> element; `label` makes it announced, otherwise it is decorative. */

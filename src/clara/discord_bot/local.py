@@ -181,6 +181,14 @@ class LocalBackend:
         answered = not done.get("observed") and not done.get("passed")
         return Reply(done.get("reply", "") if answered else "", done.get("conversation", ""), answered)
 
+    # -- requests for permission ---------------------------------------------------------------------- #
+
+    async def decide_approval(self, user_id: int, approval_id: int, approve: bool) -> dict:
+        from .. import integrationapi
+
+        body = integrationapi.DecideBody(surface=SURFACE, user_id=str(user_id), approve=approve)
+        return await self._guard(integrationapi.decide_approval(approval_id, body, self.client, self.request))
+
     # -- spaces and events ---------------------------------------------------------------------------- #
 
     async def sync_spaces(self, spaces: list[tuple[str, str]]) -> dict:

@@ -73,6 +73,8 @@ from .commands import CommandContext, CommandResult, registry
 from .discord_bot.local import LocalBackend
 from .discord_bot.service import DiscordService
 from .github import GitHub
+from .integrationapi import install as install_integrations
+from .integrations.service import build as build_integrations
 from .lifecycle import Lifecycle
 from .limits import UsageLimitReached, UsageLimits
 from .linking import LinkCodes
@@ -302,6 +304,7 @@ def create_app(
     markdown = MarkdownFiles(memory)
     limits = UsageLimits(memory, settings.default_daily_tokens)
     models = ModelCatalog(memory, providers, settings.weight_reference_b)
+    integrations = build_integrations(memory, settings, notifier)
     agent = Agent(
         memory,
         providers,
@@ -326,7 +329,18 @@ def create_app(
         limits=limits,
         models=models,
         tasks=tasks,
+        integrations=integrations.broker,
     )
+
+    async def integration_followup(approval, project_id, message):
+        """A turn that tells Clara how the requests she held ended (the person answered elsewhere)."""
+        request = ChatRequest(
+            approval.surface, approval.user_id, None, message, approval.conversation, project=project_id
+        )
+        async for _ in agent.turn(request, "integrations"):
+            pass
+
+    integrations.approvals.followup = integration_followup
 
     if settings.reminder_ai_timeout:
         ai_timeout = float(settings.reminder_ai_timeout)
@@ -355,6 +369,7 @@ def create_app(
         lifecycle.loop = asyncio.get_running_loop()
         scheduler = asyncio.create_task(reminders.run())
         task_scheduler = asyncio.create_task(tasks.run())
+        approval_scheduler = asyncio.create_task(integrations.approvals.run())
         publishing = asyncio.create_task(tailscale.start())  # slow if tailscale hangs: not before the server is up
         bot_start = None
         if settings.discord_auto_start:
@@ -376,10 +391,14 @@ def create_app(
             await tailscale.stop()
             scheduler.cancel()
             task_scheduler.cancel()
+            approval_scheduler.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await scheduler
             with contextlib.suppress(asyncio.CancelledError):
                 await task_scheduler
+            with contextlib.suppress(asyncio.CancelledError):
+                await approval_scheduler
+            await integrations.approvals.close()
             memory.close()
             if traffic is not None:
                 traffic.close()
@@ -407,6 +426,7 @@ def create_app(
     app.state.limits = limits
     app.state.models = models
     app.state.github = GitHub(settings.github_token)
+    app.state.integrations = integrations
     app.state.commands = CommandContext(
         settings, memory, agent, providers, time.monotonic(), f"{settings.host}:{settings.port}", lifecycle,
         notifier, tailscale, users, discord_bot, limits, models,
@@ -878,6 +898,7 @@ def create_app(
     install_markdown(app)
     install_models(app)
     install_tasks(app)
+    install_integrations(app)
     install_web(app)
     return app
 

@@ -144,6 +144,30 @@ TEXTS: dict[str, dict[str, str]] = {
     # -- private messages from the server -------------------------------------------------------------
     "reminder": {FRENCH: "⏰ **Rappel** : {text}", ENGLISH: "⏰ **Reminder**: {text}"},
     "notification": {FRENCH: "🔔 {text}", ENGLISH: "🔔 {text}"},
+    # -- requests for permission (approvals.py) -----------------------------------------------------------
+    "approval_ask": {
+        FRENCH: "🛡️ **J'ai besoin de ta permission**\n{summary}\n_Sur {resource} · {level}_{reason}\nRien n'est fait tant que tu n'as pas approuvé.",
+        ENGLISH: "🛡️ **I need your permission**\n{summary}\n_On {resource} · {level}_{reason}\nNothing is done until you approve.",
+    },
+    "approval_reason": {FRENCH: "\nJe dis : « {reason} »", ENGLISH: "\nI say: “{reason}”"},
+    "approval_approve": {FRENCH: "Approuver", ENGLISH: "Approve"},
+    "approval_deny": {FRENCH: "Refuser", ENGLISH: "Deny"},
+    "approval_done": {FRENCH: "✅ Approuvé et fait : {summary}\n{result}", ENGLISH: "✅ Approved and done: {summary}\n{result}"},
+    "approval_failed": {
+        FRENCH: "⚠️ Approuvé, mais cela a échoué : {summary}\n{result}",
+        ENGLISH: "⚠️ Approved, but it failed: {summary}\n{result}",
+    },
+    "approval_denied": {FRENCH: "⛔ Refusé : {summary}. Rien n'a été fait.", ENGLISH: "⛔ Denied: {summary}. Nothing was done."},
+    "approval_expired": {FRENCH: "⌛ Expiré : {summary}. Rien n'a été fait.", ENGLISH: "⌛ Expired: {summary}. Nothing was done."},
+    "approval_late": {FRENCH: "Cette demande a déjà été traitée.", ENGLISH: "This request was already answered."},
+    "approval_unknown": {FRENCH: "Je ne retrouve pas cette demande.", ENGLISH: "I cannot find that request."},
+    "approval_error": {
+        FRENCH: "Je n'ai pas pu traiter ta réponse ({detail}).",
+        ENGLISH: "I could not process your answer ({detail}).",
+    },
+    "level_read": {FRENCH: "lecture", ENGLISH: "look"},
+    "level_write": {FRENCH: "ajout ou modification", ENGLISH: "add or change"},
+    "level_destructive": {FRENCH: "remplacement ou suppression", ENGLISH: "replace or delete"},
 }
 
 

@@ -992,3 +992,65 @@ dialog:has(.task-form), dialog:has(.task-view) { width: min(560px, calc(100vw - 
   .cal-chip .chip-text { display: none; }
   .cal-more { padding: 0; font-size: .66rem; }
 }
+
+/* ---- integrations: permissions, requests for permission, pickers ------------------------------------------- */
+.perm-badges { display: inline-flex; flex-wrap: wrap; gap: .3rem; margin-top: .25rem; }
+.badge.perm-allow { background: var(--ok-soft); color: var(--ok); }
+.badge.perm-ask { background: var(--accent-soft); color: var(--accent-text); }
+.badge.perm-deny { background: var(--danger-soft); color: var(--danger); }
+.badge.level-read { background: var(--panel-2); color: var(--text-2); }
+.badge.level-write { background: var(--accent-soft); color: var(--accent-text); }
+.badge.level-destructive { background: var(--danger-soft); color: var(--danger); }
+.perm-editor { display: flex; flex-direction: column; gap: .2rem; margin: 1rem 0 .4rem; }
+.perm-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(12rem, 15rem); gap: .75rem; align-items: center; padding: .6rem 0; border-bottom: 1px solid var(--line); }
+.perm-row:last-child { border-bottom: none; }
+.perm-name strong { font-weight: 650; }
+
+.approval {
+  background: transparent; border: 1px solid var(--line-strong); border-top: 2px solid var(--accent); border-radius: var(--r-xs) var(--r-xs) var(--r) var(--r);
+  padding: .9rem 1.1rem; display: flex; flex-direction: column; gap: .5rem; max-width: 640px;
+}
+.approval-head { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+.approval-head .icon { color: var(--accent-text); }
+.approval-head .badge { margin-left: auto; }
+.approval-summary { margin: 0; font-weight: 650; overflow-wrap: anywhere; }
+.approval p { margin: 0; }
+.approval-reason { color: var(--text-2); font-style: italic; overflow-wrap: anywhere; }
+.approval-actions { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin-top: .2rem; }
+.approval-status { color: var(--text-2); overflow-wrap: anywhere; }
+.approval.settled { border-top-color: var(--line-strong); opacity: .85; }
+.approval.denied .approval-status, .approval.failed .approval-status { color: var(--danger); }
+.approval.done .approval-status { color: var(--ok); }
+.approvals-stack { display: flex; flex-direction: column; gap: .75rem; padding: .25rem 0 1rem; }
+.approval-list { display: flex; flex-direction: column; gap: 1rem; margin: 1rem 0; }
+.approval-item { display: flex; flex-direction: column; gap: .35rem; }
+dialog:has(.approval-dialog) { width: min(700px, calc(100vw - 2rem)); }
+
+.rail .approvals-badge {
+  display: flex; align-items: center; gap: .6rem; width: 100%; justify-content: flex-start; margin: 0 0 .5rem;
+  padding: .5rem .7rem; background: transparent; color: var(--rail-text); border-color: var(--rail-signal);
+}
+.rail .approvals-badge .icon { color: var(--rail-signal); }
+.rail .approvals-badge .text { flex: 1; text-align: left; font-weight: 650; }
+.rail .approvals-badge .count { background: var(--rail-signal); color: var(--rail-bg); border-radius: 999px; padding: 0 .5rem; font-weight: 700; font-size: .8rem; font-variant-numeric: tabular-nums; }
+
+dialog:has(.picker) { width: min(640px, calc(100vw - 2rem)); }
+dialog:has(.connections-dialog) { width: min(720px, calc(100vw - 2rem)); }
+.picker h4 { margin: 0 0 .4rem; font-size: 1rem; }
+.picker .stack { margin: .5rem 0 0; }
+.picker-list { max-height: 320px; overflow: auto; border: 1px solid var(--line); border-radius: var(--r); margin: .5rem 0; }
+.picker-list > li { padding: 0; min-height: 0; }
+.picker-list > li.chosen { background: var(--select); }
+.picker-list > li.empty-row { padding: 1.2rem 1rem; }
+button.row-pick { display: flex; align-items: center; gap: .6rem; width: 100%; justify-content: flex-start; text-align: left; border-radius: 0; padding: .55rem .8rem; }
+button.row-pick .grow { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+button.choice { display: flex; align-items: center; gap: .7rem; width: 100%; justify-content: flex-start; padding: .8rem 1rem; font-weight: 600; }
+.list.connections > li .badge { margin-left: .5rem; }
+.chat-connect { position: relative; }
+.chat-connect .count { background: var(--accent); color: var(--accent-ink); border-radius: 999px; padding: 0 .4rem; font-size: .72rem; font-weight: 700; margin-left: .2rem; }
+@media (max-width: 600px) {
+  .perm-row { grid-template-columns: minmax(0, 1fr); gap: .4rem; }
+  .panel-head { flex-wrap: wrap; }
+  .panel-head > .grow { flex-basis: 14rem; }
+}
+.picker .row input { flex: 1 1 11rem; min-width: 0; }

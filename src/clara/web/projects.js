@@ -4,6 +4,7 @@
 import { api } from "./api.js";
 import { splitMessage } from "./documents.js";
 import { mark } from "./icons.js";
+import { connectionsPanel } from "./integrations.js";
 import { ago, clear, confirmDialog, copy, h, icon, openDialog, pageHead, parseDate, popupMenu, toast } from "./ui.js";
 
 const SURFACE = "web";
@@ -229,6 +230,8 @@ function mountProject(container, user, id) {
     h("button", { class: "sm", onclick: addRepository, title: "Download a GitHub repository" }, icon("branch", { size: 16 }), "GitHub"),
   ];
 
+  const connections = connectionsPanel(user, { project: Number(id) });
+
   const page = h("div", { class: "project-layout" },
     h("div", { class: "project-main" },
       description,
@@ -241,6 +244,7 @@ function mountProject(container, user, id) {
         h("div", { class: "panel-head" }, h("h3", { class: "grow" }, "Instructions"),
           h("button", { class: "ghost icon-btn", title: "Edit", "aria-label": "Edit the instructions", onclick: edit }, icon("edit", { size: 18 }))),
         instructions),
+      connections.node,
       h("div", { class: "panel drop-zone" },
         h("div", { class: "panel-head" }, h("h3", { class: "grow" }, "Files")),
         h("div", { class: "panel-body stack" },

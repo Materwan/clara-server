@@ -246,6 +246,19 @@ class Settings:
     weight_reference_b: float = 8.0
     # Reminders sent for one task before it is left alone (tasks.py): after that the person decides
     task_max_reminders: int = 10
+    # Integrations (integrations/): the key that encrypts the accounts people connect (empty: one is made in the
+    # data directory), the Google OAuth client (Drive), the address the server is reached at (Google redirects
+    # there), and when a request for permission that nobody answered is pushed to other surfaces, and dropped
+    secret_key: str = field(default="", repr=False)
+    google_client_id: str = ""
+    google_client_secret: str = field(default="", repr=False)
+    public_url: str = ""
+    approval_notify_after: int = 60
+    approval_expire_after: int = 86_400
+
+    @property
+    def secret_key_file(self) -> Path:
+        return self.data_dir / "secret.key"
 
     @property
     def logs_dir(self) -> Path:
@@ -391,4 +404,10 @@ class Settings:
             default_daily_tokens=_token_limit(env, "CLARA_DEFAULT_DAILY_TOKENS"),
             weight_reference_b=_positive_number(env, "CLARA_WEIGHT_REFERENCE_B", 8.0),
             task_max_reminders=_positive_int(env, "CLARA_TASK_MAX_REMINDERS", 10),
+            secret_key=text("CLARA_SECRET_KEY"),
+            google_client_id=text("GOOGLE_CLIENT_ID"),
+            google_client_secret=text("GOOGLE_CLIENT_SECRET"),
+            public_url=text("CLARA_PUBLIC_URL").rstrip("/"),
+            approval_notify_after=_non_negative_int(env, "CLARA_APPROVAL_NOTIFY_AFTER", 60),
+            approval_expire_after=_positive_int(env, "CLARA_APPROVAL_EXPIRE_AFTER", 86_400),
         )

@@ -2,11 +2,13 @@
 // conversations of projects are grouped under their project's name in the rail.
 
 import { ApiError, api, conversationPath, streamChat } from "./api.js";
+import { approvalCard, pendingApprovals } from "./approvals.js";
 import { DocumentError, MAX_TOTAL_CHARS, compose, readDocument, splitMessage, totalChars } from "./documents.js";
 import { icon, mark, ring } from "./icons.js";
 import { renderMarkdown } from "./markdown.js";
 import { fileCard } from "./files.js";
 import { labelOf, renderGroups } from "./history.js";
+import { connectionCount, openConnections } from "./integrations.js";
 import { chooseModel, costText, loadModels, modelSelect } from "./models.js";
 import { displayAnswers, qcmNode } from "./qcm.js";
 import { chooseProject, listProjects } from "./projects.js";
@@ -46,6 +48,16 @@ const TOOL_NOTES = {
   list_project_files: ["folder", "Listed the project's files"],
   read_project_file: ["folder", "Read", "path"],
   search_project: ["folder", "Searched the project for", "query"],
+  resources: ["plug", "Looked at what is connected"],
+  res_list: ["plug", "Listed", "path"],
+  res_read: ["plug", "Read", "path"],
+  res_search: ["plug", "Searched for", "query"],
+  res_write: ["plug", "Wrote", "path"],
+  res_delete: ["plug", "Asked to delete", "path"],
+  res_move: ["plug", "Asked to move", "path"],
+  github_branch: ["branch", "Worked on branches", "name"],
+  github_pr: ["branch", "Worked on a pull request", "title"],
+  github_issue: ["branch", "Worked on an issue", "title"],
 };
 const SILENT_TOOLS = new Set(["qcm", "adjust_relation"]); // the form is its own card; the relationship is not shown here
 
@@ -76,6 +88,8 @@ export function mountChat(container, user, { slot, fresh = false, project = null
     busy: false, abort: null, docs: [], context: null, live: null, stick: true,
     stamp: null, // when the conversation shown was last written in, as we read it: another device may have gone on
     project: null, projects: new Map(), // the project of the conversation shown; every project's name, by id
+    approvals: [], // the requests for permission of the conversation shown that wait for an answer
+    connections: 0, // how many resources are attached to it (or its project)
   };
 
   // ---- the conversations, in the rail ----------------------------------------------------------------
@@ -96,9 +110,13 @@ export function mountChat(container, user, { slot, fresh = false, project = null
   const moreButton = h("button", { class: "ghost icon-btn", "aria-label": "Conversation actions", title: "Conversation actions", hidden: true,
     onclick: (event) => { event.stopPropagation(); conversationMenu(moreButton); } }, icon("more"));
   const newButton = h("button", { class: "ghost icon-btn only-narrow", "aria-label": "New chat", title: "New chat", onclick: () => newChat() }, icon("edit"));
+  const connectCount = h("span", { class: "count", hidden: true });
+  const connectButton = h("button", { class: "ghost sm chat-connect", title: "What Clara can reach in this conversation: GitHub, Google Drive, folders",
+    onclick: () => connections() }, icon("plug", { size: 16 }), h("span", { class: "hide-sm" }, "Connections"), connectCount);
 
   const messagesInner = h("div", { class: "messages-inner" });
-  const messagesBox = h("div", { class: "messages", role: "log", "aria-live": "polite", "aria-label": "Conversation" }, messagesInner);
+  const approvalsBox = h("div", { class: "messages-inner approvals-stack", "aria-label": "Waiting for your permission" });
+  const messagesBox = h("div", { class: "messages", role: "log", "aria-live": "polite", "aria-label": "Conversation" }, messagesInner, approvalsBox);
   const input = h("textarea", { rows: 1, placeholder: `Message Clara`, "aria-label": "Message", enterkeyhint: "send" });
   const chips = h("div", { class: "chips" });
   const picker = h("input", { type: "file", multiple: true, hidden: true, onchange: () => { addFiles([...picker.files]); picker.value = ""; } });
@@ -110,7 +128,7 @@ export function mountChat(container, user, { slot, fresh = false, project = null
     h("div", { class: "composer-inner" }, chips, input, h("div", { class: "composer-bar" }, attach, picker, docInfo, modelBox, sendButton)),
     h("p", { class: "composer-hint" }, "Enter to send, Shift + Enter for a new line. Drop files here to attach them.")));
   const root = h("section", { class: "page chat" },
-    pageHead(h("div", { class: "grow chat-title" }, title, projectChip), context, compactButton, moreButton, newButton), messagesBox, composer);
+    pageHead(h("div", { class: "grow chat-title" }, title, projectChip), context, connectButton, compactButton, moreButton, newButton), messagesBox, composer);
   container.append(root);
 
   // ---- the list of conversations ----------------------------------------------------------------------
@@ -215,6 +233,63 @@ export function mountChat(container, user, { slot, fresh = false, project = null
     }
   }
 
+  // ---- connections and requests for permission --------------------------------------------------------
+  async function connections() {
+    if (!state.current) return;
+    await openConnections(user, state.current, state.project ? state.projects.get(state.project) : "");
+    countConnections();
+  }
+
+  async function countConnections() {
+    const id = state.current;
+    const count = await connectionCount(user, id);
+    if (id !== state.current) return;
+    state.connections = count;
+    connectCount.hidden = !count;
+    connectCount.textContent = String(count);
+  }
+
+  function drawApprovals() {
+    clear(approvalsBox);
+    for (const item of state.approvals) {
+      approvalsBox.append(approvalCard(item, user, { onDecided: () => { dropApproval(item.id); watchFollowUp(); } }));
+    }
+    scrollDown();
+  }
+
+  function dropApproval(id) {
+    state.approvals = state.approvals.filter((a) => a.id !== id);
+    drawApprovals();
+  }
+
+  /** What waits for an answer in the conversation shown (the stream tells of the new ones; this finds the others). */
+  async function loadApprovals() {
+    const id = state.current;
+    if (!id || document.hidden) return;
+    let found;
+    try { found = await pendingApprovals(user, id); } catch { return; }
+    if (id !== state.current) return;
+    const key = (list) => list.map((a) => a.id).join(",");
+    if (key(found) === key(state.approvals)) return;
+    state.approvals = found;
+    drawApprovals();
+  }
+
+  // Once a request was answered, Clara goes on by herself (a follow-up turn on the server): read the conversation again
+  // until it moves, for a minute at most.
+  let followUp = null;
+  function watchFollowUp() {
+    clearInterval(followUp);
+    const until = Date.now() + 60000;
+    followUp = setInterval(async () => {
+      if (Date.now() > until) return clearInterval(followUp);
+      const before = state.stamp;
+      await refresh();
+      if (state.stamp !== before) clearInterval(followUp);
+    }, 3000);
+  }
+  const approvalTimer = setInterval(loadApprovals, 8000);
+
   // ---- the conversation ------------------------------------------------------------------------------
   function renderHead() {
     const info = state.list.find((item) => item.id === state.current);
@@ -238,8 +313,10 @@ export function mountChat(container, user, { slot, fresh = false, project = null
     state.context = null;
     state.live = null;
     state.stamp = null;
+    state.approvals = [];
     remember();
     renderAll();
+    countConnections();
     input.focus();
   }
 
@@ -267,8 +344,11 @@ export function mountChat(container, user, { slot, fresh = false, project = null
       }
     }
     state.context = null;
+    state.approvals = [];
     renderAll();
     refreshContext();
+    countConnections();
+    loadApprovals();
   }
 
   async function refreshContext() {
@@ -297,6 +377,7 @@ export function mountChat(container, user, { slot, fresh = false, project = null
     renderHead();
     renderMessages();
     renderMeter();
+    drawApprovals();
   }
 
   /** A QCM answered here is sent as the next message, unless Clara is still writing. */
@@ -443,6 +524,9 @@ export function mountChat(container, user, { slot, fresh = false, project = null
             (reply.notes ||= []).push(note);
             notes.append(noteNode(note));
           }
+        } else if (event.type === "approval") {
+          if (!state.approvals.some((a) => a.id === event.approval.id)) state.approvals.push(event.approval);
+          if (conversation === state.current) drawApprovals();
         } else if (event.type === "compacted") toast("Older messages were summarised to make room.");
         else if (event.type === "warning") toast(event.message);
         else if (event.type === "error") { reply.failed = event.message; finished = true; }
@@ -591,7 +675,7 @@ export function mountChat(container, user, { slot, fresh = false, project = null
   return {
     newChat: () => newChat(),
     destroy() {
-      state.abort?.abort(); clearTimeout(searchTimer); clearInterval(refreshTimer);
+      state.abort?.abort(); clearTimeout(searchTimer); clearInterval(refreshTimer); clearInterval(approvalTimer); clearInterval(followUp);
       document.removeEventListener("visibilitychange", refresh); removeEventListener("focus", refresh);
       root.remove(); for (const node of railPart) node.remove();
     },

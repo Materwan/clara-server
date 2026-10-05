@@ -14,7 +14,7 @@ import inspect
 import logging
 import unicodedata
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from .markdownfiles import READ_MAX_CHARS as MARKDOWN_READ_CHARS
 from .markdownfiles import SURFACES as MARKDOWN_SURFACES
@@ -28,6 +28,9 @@ from .tasks import NO_DUE, TaskError, TaskService, task_detail, task_line
 from .taskstore import DONE, OPEN, STATUSES
 from .web import WebClient, WebError
 
+if TYPE_CHECKING:
+    from .integrations.broker import Broker
+
 log = logging.getLogger(__name__)
 
 RECALL_LIMIT = 10
@@ -38,6 +41,10 @@ ABOUT_PERSON = "about_person"  # only offered when other people with an account 
 MARKDOWN_TOOLS = frozenset(
     {"create_markdown_file", "edit_markdown_file", "append_markdown_file", "read_markdown_file", "list_markdown_files"}
 )  # the tools of markdown_tools(): hidden from a turn that has no files to write (agent.py)
+INTEGRATION_TOOLS = frozenset(
+    {"resources", "res_list", "res_read", "res_search", "res_write", "res_delete", "res_move", "github_branch",
+     "github_pr", "github_issue"}
+)  # the tools of integration_tools(): hidden from a turn that has nothing connected (agent.py)
 ABOUT_LIMIT = 30  # facts about_person gives without a query (the newest)
 QCM = "qcm"  # only offered to the clients that can show a form (see qcm.SURFACES)
 
@@ -72,6 +79,7 @@ class ToolContext:
     events: list[dict] = field(default_factory=list)  # for the client: the agent sends them after the tool call
     markdown: MarkdownFiles | None = None  # the person's markdown files, which the markdown tools write
     tasks: TaskService | None = None  # the person's to-do list, which the task tools change
+    integrations: Broker | None = None  # what is connected (GitHub, Drive, folders): every call goes through it
 
     @property
     def origin(self) -> tuple[str, str, str]:
@@ -552,6 +560,240 @@ def project_tools() -> list[Tool]:
     ]
 
 
+def _broker(context: ToolContext) -> Broker:
+    if context.integrations is None:
+        raise ValueError("Connected resources are not available.")
+    return context.integrations
+
+
+async def _resources(context: ToolContext) -> str:
+    from .integrations import permissions
+
+    broker = _broker(context)
+    found = broker.attached(context.conversation, context.project_id, context.person.id)
+    if not found:
+        return "Nothing is connected to this conversation."
+    return "\n".join(
+        f"[{a.resource.id}] {permissions.TYPE_NAMES[a.resource.type]}: {a.resource.label} ({a.scope}) — "
+        + permissions.describe(broker.levels(a))
+        for a in found
+    )
+
+
+async def _res_list(context: ToolContext, resource: Any, path: str = "", branch: str = "") -> str:
+    return await _broker(context).call(context, "list", resource, {"path": path, "branch": branch or None})
+
+
+async def _res_read(
+    context: ToolContext, resource: Any, path: str = "", start_line: Any = None, end_line: Any = None, branch: str = ""
+) -> str:
+    return await _broker(context).call(
+        context, "read", resource,
+        {"path": path, "start_line": start_line, "end_line": end_line, "branch": branch or None},
+    )
+
+
+async def _res_search(context: ToolContext, resource: Any, query: str, path: str = "", regex: Any = False) -> str:
+    return await _broker(context).call(context, "search", resource, {"query": query, "path": path, "regex": regex})
+
+
+async def _res_write(
+    context: ToolContext, resource: Any, path: str, content: str, mode: str = "create", reason: str = "",
+    branch: str = "", message: str = "",
+) -> str:
+    return await _broker(context).call(
+        context, "write", resource,
+        {"path": path, "content": content, "mode": mode, "branch": branch or None, "message": message or None},
+        str(reason or ""),
+    )
+
+
+async def _res_delete(context: ToolContext, resource: Any, path: str, reason: str = "", branch: str = "") -> str:
+    return await _broker(context).call(
+        context, "delete", resource, {"path": path, "branch": branch or None}, str(reason or "")
+    )
+
+
+async def _github_branch(
+    context: ToolContext, resource: Any, action: str, name: str = "", from_branch: str = "", reason: str = ""
+) -> str:
+    return await _broker(context).call(
+        context, "branch", resource, {"action": action, "name": name, "from": from_branch or None}, str(reason or "")
+    )
+
+
+async def _github_pr(
+    context: ToolContext, resource: Any, action: str, title: str = "", head: str = "", base: str = "",
+    body: str = "", number: Any = None, reason: str = "",
+) -> str:
+    return await _broker(context).call(
+        context, "pr", resource,
+        {"action": action, "title": title, "head": head, "base": base or None, "body": body, "number": number},
+        str(reason or ""),
+    )
+
+
+async def _github_issue(
+    context: ToolContext, resource: Any, action: str, title: str = "", body: str = "", number: Any = None,
+    reason: str = "",
+) -> str:
+    return await _broker(context).call(
+        context, "issue", resource, {"action": action, "title": title, "body": body, "number": number}, str(reason or "")
+    )
+
+
+async def _res_move(context: ToolContext, resource: Any, path: str, dest: str, reason: str = "") -> str:
+    return await _broker(context).call(context, "move", resource, {"path": path, "dest": dest}, str(reason or ""))
+
+
+_RESOURCE = {"type": "integer", "description": "The number in brackets of the connected resource."}
+_REASON = {"type": "string", "description": "Optional: why, in a few words (shown to the person)."}
+_BRANCH = {"type": "string", "description": "GitHub only: the branch (default: the resource's own, else the repository's)."}
+
+
+def integration_tools() -> list[Tool]:
+    """Offered in a conversation that has something connected (a repository, a Drive folder, a folder). Every call
+    is checked against the person's permissions; an action they must approve answers "waiting for permission"
+    at once, and the model carries on."""
+    return [
+        Tool(
+            name="resources",
+            description="List what is connected to this conversation (GitHub, Google Drive, folders) and what you may do.",
+            function=_resources,
+            parameters={},
+        ),
+        Tool(
+            name="res_list",
+            description="List the files and folders at a path of a connected resource (empty path: its top).",
+            function=_res_list,
+            parameters={
+                "resource": _RESOURCE,
+                "path": {"type": "string", "description": "Folder inside the resource."},
+                "branch": _BRANCH,
+            },
+            required=("resource",),
+        ),
+        Tool(
+            name="res_read",
+            description=(
+                f"Read a file of a connected resource, with line numbers ({READ_MAX_LINES} lines at once; read on with "
+                "start_line). Look before you change something."
+            ),
+            function=_res_read,
+            parameters={
+                "resource": _RESOURCE,
+                "path": {"type": "string", "description": "File inside the resource."},
+                "start_line": {"type": "integer"},
+                "end_line": {"type": "integer"},
+                "branch": _BRANCH,
+            },
+            required=("resource", "path"),
+        ),
+        Tool(
+            name="res_search",
+            description="Find words in the files of a connected resource (case ignored): each match with path and line.",
+            function=_res_search,
+            parameters={
+                "resource": _RESOURCE,
+                "query": {"type": "string"},
+                "path": {"type": "string", "description": "Optional: only under this folder."},
+                "regex": {"type": "boolean"},
+            },
+            required=("resource", "query"),
+        ),
+        Tool(
+            name="res_write",
+            description=(
+                "Write a file in a connected resource. mode: create (a new file; refuses an existing one), overwrite "
+                "(replace the whole text) or append. Give the whole text. Replacing a file the person has is a "
+                "destructive action and will need their permission."
+            ),
+            function=_res_write,
+            parameters={
+                "resource": _RESOURCE,
+                "path": {"type": "string"},
+                "content": {"type": "string", "description": "The text."},
+                "mode": {"type": "string", "enum": ["create", "overwrite", "append"]},
+                "reason": _REASON,
+                "branch": _BRANCH,
+                "message": {"type": "string", "description": "GitHub only: the commit message."},
+            },
+            required=("resource", "path", "content"),
+        ),
+        Tool(
+            name="res_delete",
+            description="Delete a file of a connected resource. Destructive: it will need the person's permission.",
+            function=_res_delete,
+            parameters={"resource": _RESOURCE, "path": {"type": "string"}, "reason": _REASON, "branch": _BRANCH},
+            required=("resource", "path"),
+        ),
+        Tool(
+            name="res_move",
+            description="Rename or move a file inside a connected resource. Destructive: it will need permission.",
+            function=_res_move,
+            parameters={
+                "resource": _RESOURCE,
+                "path": {"type": "string", "description": "The file."},
+                "dest": {"type": "string", "description": "Its new path."},
+                "reason": _REASON,
+            },
+            required=("resource", "path", "dest"),
+        ),
+        Tool(
+            name="github_branch",
+            description=(
+                "Branches of a connected GitHub repository: list them, create one (from the default branch unless "
+                "from_branch), or delete one (destructive). Work on a new branch to keep changes out of the default branch."
+            ),
+            function=_github_branch,
+            parameters={
+                "resource": _RESOURCE,
+                "action": {"type": "string", "enum": ["list", "create", "delete"]},
+                "name": {"type": "string"},
+                "from_branch": {"type": "string"},
+                "reason": _REASON,
+            },
+            required=("resource", "action"),
+        ),
+        Tool(
+            name="github_pr",
+            description=(
+                "Pull requests of a connected GitHub repository: list the open ones, open one (head branch into base), "
+                "comment, merge or close (the last two are destructive and need permission)."
+            ),
+            function=_github_pr,
+            parameters={
+                "resource": _RESOURCE,
+                "action": {"type": "string", "enum": ["list", "open", "comment", "merge", "close"]},
+                "title": {"type": "string"},
+                "head": {"type": "string", "description": "The branch with the changes."},
+                "base": {"type": "string", "description": "The branch to merge into (default: the default branch)."},
+                "body": {"type": "string", "description": "Description, or the comment."},
+                "number": {"type": "integer", "description": "For comment, merge, close."},
+                "reason": _REASON,
+            },
+            required=("resource", "action"),
+        ),
+        Tool(
+            name="github_issue",
+            description=(
+                "Issues of a connected GitHub repository: list the open ones, open one, comment, or close one "
+                "(closing is destructive and needs permission)."
+            ),
+            function=_github_issue,
+            parameters={
+                "resource": _RESOURCE,
+                "action": {"type": "string", "enum": ["list", "create", "comment", "close"]},
+                "title": {"type": "string"},
+                "body": {"type": "string"},
+                "number": {"type": "integer", "description": "For comment and close."},
+                "reason": _REASON,
+            },
+            required=("resource", "action"),
+        ),
+    ]
+
+
 def markdown_tools() -> list[Tool]:
     """Offered to everybody: the person's markdown files, which Clara writes and changes later."""
     return [
@@ -872,4 +1114,5 @@ def default_toolbox(web: WebClient | None = None) -> Toolbox:
         ]
         + markdown_tools()
         + project_tools()
+        + integration_tools()
     )

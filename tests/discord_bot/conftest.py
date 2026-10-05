@@ -15,6 +15,18 @@ from clara.discord_bot.remote import RemoteBackend
 
 
 @dataclass(eq=False)
+class FakeSent:
+    """A private message the bot sent: what it says and its buttons, until it is edited."""
+
+    content: str
+    view: object = None
+
+    async def edit(self, content: str | None = None, view: object = None, **options) -> None:
+        self.content = content if content is not None else self.content
+        self.view = view
+
+
+@dataclass(eq=False)
 class FakeUser:
     id: int
     name: str
@@ -22,12 +34,16 @@ class FakeUser:
     bot: bool = False
     global_name: str | None = None
     sent: list[str] = field(default_factory=list)
+    messages: list[FakeSent] = field(default_factory=list)
 
     def __post_init__(self):
         self.display_name = self.display_name or self.name
 
-    async def send(self, text: str) -> None:
+    async def send(self, text: str, view: object = None, **options) -> FakeSent:
         self.sent.append(text)
+        message = FakeSent(text, view)
+        self.messages.append(message)
+        return message
 
 
 class FakeTyping:

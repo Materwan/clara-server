@@ -10,6 +10,7 @@ import discord
 from discord import app_commands
 
 from .accounts import REFRESH_SECONDS, Accounts
+from .approvals import ApprovalButton
 from .backend import ClaraBackend, ClaraError
 from .commands import FrenchTranslator, register_commands
 from .events import EventRelay
@@ -38,6 +39,7 @@ class ClaraBot(discord.Client):
         self._tasks: list[asyncio.Task] = []
 
     async def setup_hook(self) -> None:
+        self.add_dynamic_items(ApprovalButton)  # the buttons of requests for permission, also after a restart
         await self.tree.set_translator(FrenchTranslator())
         try:
             synced = await self.tree.sync()  # one bulk update of the global commands

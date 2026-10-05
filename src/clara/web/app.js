@@ -4,11 +4,13 @@
 import { mountAccount, mountMemory } from "./account.js";
 import { mountAdmin } from "./admin.js";
 import { ApiError, api, events } from "./api.js";
+import { mountApprovalBadge } from "./approvals.js";
 import { mountChat } from "./chat.js";
 import { mountDiscord } from "./discord.js";
 import { mountFiles } from "./files.js";
 import { mountHistory } from "./history.js";
 import { icon, mark } from "./icons.js";
+import { mountIntegrations } from "./integrations.js";
 import { mountProjects } from "./projects.js";
 import { mountTasks } from "./tasks.js";
 import { avatar, clear, h, themeSwitch, toast, toggleRail } from "./ui.js";
@@ -19,6 +21,7 @@ let page = null; // what is mounted: {destroy, newChat?}
 let pageName = "";
 let healthTimer = null;
 let railHistory = null; // the list of conversations on the work pages other than the chat
+let approvalBadge = null; // "waiting for you": requests for permission, in the rail
 let wantNewChat = false;
 
 // ---- signing in ----------------------------------------------------------------------------------------
@@ -131,9 +134,9 @@ events.addEventListener("signed-out", () => { if (user) showLogin("Your session 
 
 // ---- the shell and the pages -----------------------------------------------------------------------------
 
-const PAGES = { chat: ["Chat", "chat"], projects: ["Projects", "folder"], tasks: ["Tasks", "tasks"], files: ["Files", "file"], memory: ["Memory", "memory"], account: ["Account", "user"], discord: ["Discord", "bot"], admin: ["Admin", "admin"] };
+const PAGES = { chat: ["Chat", "chat"], projects: ["Projects", "folder"], tasks: ["Tasks", "tasks"], files: ["Files", "file"], memory: ["Memory", "memory"], account: ["Account", "user"], integrations: ["Integrations", "plug"], discord: ["Discord", "bot"], admin: ["Admin", "admin"] };
 const WORK_PAGES = ["chat", "projects", "tasks", "files"]; // what you do with Clara: the links of the rail
-const SETTINGS_PAGES = ["memory", "account", "discord", "admin"]; // reached by your avatar, they share a bar at the top
+const SETTINGS_PAGES = ["memory", "account", "integrations", "discord", "admin"]; // reached by your avatar, they share a bar at the top
 const ADMIN_PAGES = new Set(["discord", "admin"]);
 
 /** The bar at the top of the settings pages. */
@@ -156,7 +159,8 @@ function shell() {
     pages,
     h("div", { class: "rail-slot", id: "rail-slot" }),
     h("div", { class: "rail-foot" },
-      h("a", { class: "me", href: "#/account", title: "Your settings: memory, account" + (user.is_admin ? ", Discord, administration" : "") },
+      h("div", { class: "approvals-slot", id: "approvals-slot" }),
+      h("a", { class: "me", href: "#/account", title: "Your settings: memory, account, integrations" + (user.is_admin ? ", Discord, administration" : "") },
         avatar(displayName),
         h("div", { class: "who" }, h("strong", {}, displayName), status),
         icon("chevron", { size: 17 }))));
@@ -167,6 +171,7 @@ function shell() {
     h("div", { class: "content" }, body)));
   healthTimer = setInterval(() => health(status), 20000);
   health(status);
+  approvalBadge = mountApprovalBadge(user, rail.querySelector("#approvals-slot"));
   return body;
 }
 
@@ -199,6 +204,8 @@ function stop() {
   page = null;
   railHistory?.destroy();
   railHistory = null;
+  approvalBadge?.destroy();
+  approvalBadge = null;
   pageName = "";
   toggleRail(false);
 }
@@ -241,6 +248,7 @@ function route() {
     : name === "files" ? mountFiles(body, user)
     : name === "memory" ? mountMemory(body, user)
     : name === "account" ? mountAccount(body, user, signOut)
+    : name === "integrations" ? mountIntegrations(body, user)
     : name === "discord" ? mountDiscord(body)
     : mountAdmin(body, user, sub);
   if (SETTINGS_PAGES.includes(name)) body.querySelector(".page-head")?.after(settingsBar(name));

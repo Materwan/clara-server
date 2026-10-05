@@ -49,6 +49,7 @@ class SystemPrompt:
         roster: tuple[Person, ...] = (),
         others: tuple[tuple[Person, list[Fact]], ...] = (),
         project: str = "",
+        integrations: str = "",
     ) -> str:
         """The system prompt. `instructions` come from the client (what it is for, how to use
         its tools); `summary` replaces the older part of a long conversation. Only the date
@@ -86,6 +87,8 @@ class SystemPrompt:
             parts.append(f"## Instructions from {surface}\n{instructions.strip()}\n")
         if project.strip():
             parts.append(f"{project.strip()}\n")
+        if integrations.strip():
+            parts.append(f"{integrations.strip()}\n")
         if summary.strip():
             parts.append(f"## Earlier in this conversation (summary)\n{summary.strip()}\n")
         return "\n".join(parts)

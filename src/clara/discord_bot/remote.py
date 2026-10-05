@@ -131,6 +131,12 @@ class RemoteBackend:
         answered = not done.get("observed") and not done.get("passed")
         return Reply(done.get("reply", "") if answered else "", done.get("conversation", ""), answered)
 
+    # -- requests for permission ---------------------------------------------------------------------- #
+
+    async def decide_approval(self, user_id: int, approval_id: int, approve: bool) -> dict:
+        body = {**self._account(user_id), "approve": approve}
+        return await self._call("POST", f"/v1/approvals/{approval_id}/decide", json=body)
+
     # -- spaces and events ---------------------------------------------------------------------------- #
 
     async def sync_spaces(self, spaces: list[tuple[str, str]]) -> dict:

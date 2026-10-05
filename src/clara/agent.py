@@ -24,7 +24,7 @@ import uuid
 import weakref
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import AsyncIterator, Callable
+from typing import TYPE_CHECKING, AsyncIterator, Callable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .compaction import (
@@ -47,7 +47,10 @@ from .prompt import SystemPrompt
 from .qcm import SURFACES as QCM_SURFACES
 from .reminders import ReminderService
 from .tasks import TaskService
-from .tools import ABOUT_PERSON, MARKDOWN_TOOLS, QCM, Toolbox, ToolContext
+from .tools import ABOUT_PERSON, INTEGRATION_TOOLS, MARKDOWN_TOOLS, QCM, Toolbox, ToolContext
+
+if TYPE_CHECKING:
+    from .integrations.broker import Broker
 
 log = logging.getLogger(__name__)
 
@@ -227,8 +230,10 @@ class Agent:
         limits: UsageLimits | None = None,
         models: ModelCatalog | None = None,
         tasks: TaskService | None = None,
+        integrations: Broker | None = None,
     ):
         self.memory = memory
+        self.integrations = integrations  # what people connected (GitHub, Drive, folders), checked and run by the broker
         self.projects = projects  # the files of the conversations that are part of a project
         self.markdown = markdown  # the markdown files Clara writes for a person (the markdown tools)
         self.limits = limits  # the daily credits of each person (limits.py); None: nobody is limited
@@ -402,6 +407,7 @@ class Agent:
                 person, request.surface, facts, now, request.instructions, state.summary, omitted,
                 self.memory.relation(person.id), request.roster, others,
                 project=project.text if project else "",
+                integrations=self._integrations_context(request, person),
             )
             messages.append({"role": "system", "content": system})
             stored = self.memory.history(request.conversation_id, self.history_turns, state.upto_id)
@@ -418,6 +424,18 @@ class Agent:
         if request.project is None or request.ephemeral or self.projects is None:
             return None
         return self.projects.context(request.project, window or self.window)
+
+    def _integrations_context(self, request: ChatRequest, person: Person) -> str:
+        if self.integrations is None or request.ephemeral or request.mode != "answer":
+            return ""
+        return self.integrations.context(request.conversation_id, request.project, person.id)
+
+    def _integrations_needed(self, request: ChatRequest, person: Person) -> bool:
+        """Does this person have something connected to this conversation (or its project), so that Clara works on
+        it with tools?"""
+        if self.integrations is None or request.ephemeral:
+            return False
+        return bool(self.integrations.attached(request.conversation_id, request.project, person.id))
 
     def _project_tools_needed(self, request: ChatRequest, window: int | None = None) -> bool:
         """Are the files of the request's project too big for the prompt, so that Clara reads them with tools?"""
@@ -548,9 +566,12 @@ class Agent:
             person, self.memory, self.reminders, request.timezone, request.surface, request.user_id, conversation,
             self.notifier, roster=tuple(p for p in request.roster if p.id != person.id),
             projects=self.projects, project_id=request.project, markdown=self.markdown, tasks=self.tasks,
+            integrations=self.integrations,
         )
         client_tools = {schema["function"]["name"] for schema in request.tools}
         hidden = set() if context.roster else {ABOUT_PERSON}
+        if not self._integrations_needed(request, person):
+            hidden |= INTEGRATION_TOOLS
         if not self._project_tools_needed(request, window):
             hidden |= PROJECT_TOOLS
         if request.surface not in QCM_SURFACES:
@@ -577,6 +598,8 @@ class Agent:
                     log.warning("compaction of %s before the turn failed: %s", conversation, error)
                     yield {"type": "warning", "message": f"Could not compact the conversation: {error}"}
                 state = self.memory.state(conversation)  # also after a failure: it may have advanced
+            # requests that ended that this turn's prompt tells the model about: told for good once the turn went through
+            news = self.integrations.news(conversation) if self.integrations and not ephemeral else []
             messages = self._build_messages(request, person, state, window)
             rows: list[TurnRow] = []
             reply_parts: list[str] = []
@@ -713,6 +736,8 @@ class Agent:
                     # What was done stays known: the files a client tool changed are changed for good
                     self._keep_interrupted(request, person, rows, "".join(text_parts) if round_open else "", reason)
 
+            if news and self.integrations is not None:
+                self.integrations.told(news)
             reply = "".join(reply_parts).strip()
             declined = request.mode == "maybe" and passed(reply)
             if declined:  # nothing to add: the message is kept as context, without the model's work
