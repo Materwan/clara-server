@@ -14,6 +14,7 @@
     POST   /v1/reminders                set a reminder: a text and a moment, announced to the person who set it
     GET    /v1/reminders                the reminders a person set that have not fired
     DELETE /v1/reminders/{id}           cancel one
+    GET|POST|PATCH|DELETE /v1/tasks...  a person's to-do list: tasks with their reminders (taskapi.py)
     POST   /v1/notifications            send a notification to a person, now
     GET    /v1/notifications/stream     Server-Sent Events of an account: `reminder`, `notification`, `server`
                                         (also served as /v1/reminders/stream)
@@ -89,6 +90,10 @@ from .ratelimit import FailureLimiter
 from .reminders import ReminderError, ReminderService, describe
 from .settings import Settings, SettingsError
 from .tailscale import Tailscale
+from .taskai import follow as follow_task
+from .taskai import plan as plan_task
+from .taskapi import install as install_tasks
+from .tasks import TaskService
 from .tools import default_toolbox
 from .traffic import TrafficLog, TrafficMiddleware
 from .users import Users
@@ -288,6 +293,7 @@ def create_app(
     providers.traffic = traffic
     notifier = Notifier(memory)
     reminders = ReminderService(memory, notifier=notifier)
+    tasks = TaskService(memory, notifier, max_reminders=settings.task_max_reminders)
     web = WebClient(settings.ollama_api_key) if settings.web_tools and settings.ollama_api_key else None
     projects = Projects(
         memory, settings.project_max_bytes, settings.project_max_files, settings.project_inline_percent
@@ -318,12 +324,16 @@ def create_app(
         markdown=markdown,
         limits=limits,
         models=models,
+        tasks=tasks,
     )
 
     if settings.reminder_ai_timeout:
         ai_timeout = float(settings.reminder_ai_timeout)
         reminders.composer = lambda reminder: compose(agent, reminder, ai_timeout)
-    lifecycle = Lifecycle(agent, reminders)
+        tasks.plan_timeout = min(ai_timeout, tasks.plan_timeout)
+        tasks.planner = lambda task, now: plan_task(agent, task, now, tasks.plan_timeout)
+        tasks.follower = lambda task, now: follow_task(agent, task, now, ai_timeout, tasks.max_reminders)
+    lifecycle = Lifecycle(agent, reminders, tasks=tasks)
     users = Users(memory, settings.session_days)
     users.prune()
     tailscale = tailscale or Tailscale.from_settings(settings)
@@ -343,6 +353,7 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         lifecycle.loop = asyncio.get_running_loop()
         scheduler = asyncio.create_task(reminders.run())
+        task_scheduler = asyncio.create_task(tasks.run())
         publishing = asyncio.create_task(tailscale.start())  # slow if tailscale hangs: not before the server is up
         bot_start = None
         if settings.discord_auto_start:
@@ -363,8 +374,11 @@ def create_app(
                 await publishing
             await tailscale.stop()
             scheduler.cancel()
+            task_scheduler.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await scheduler
+            with contextlib.suppress(asyncio.CancelledError):
+                await task_scheduler
             memory.close()
             if traffic is not None:
                 traffic.close()
@@ -381,6 +395,7 @@ def create_app(
     app.state.memory = memory
     app.state.agent = agent
     app.state.reminders = reminders
+    app.state.tasks = tasks
     app.state.notifier = notifier
     app.state.traffic = traffic
     app.state.lifecycle = lifecycle
@@ -860,6 +875,7 @@ def create_app(
     install_projects(app)
     install_markdown(app)
     install_models(app)
+    install_tasks(app)
     install_web(app)
     return app
 

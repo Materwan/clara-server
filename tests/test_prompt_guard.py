@@ -75,7 +75,7 @@ async def test_a_history_larger_than_the_window_is_compacted_first(memory, tmp_p
     assert "compacted" in [e["type"] for e in events]
     sent = backend.calls[-1][0]
     assert "summary of the early turns" in sent[0]["content"]
-    assert estimate_prompt_tokens(sent, backend.calls[-1][1]) <= 0.95 * 2_000
+    assert estimate_prompt_tokens(sent, backend.calls[-1][1]) <= 0.95 * 2_600
     assert untimed(sent[-1]["content"]).startswith("q5")
 
 
@@ -90,7 +90,7 @@ class FailingSummary(FakeBackend):
 async def test_when_compaction_fails_the_oldest_turns_are_left_out_with_a_warning(memory, tmp_path):
     long = "w" * 1_200
     backend = FailingSummary(*[say(f"a{i}") for i in range(1, 6)])
-    agent = make_agent(memory, tmp_path, backend, context_window=2_000, compact_percent=0)
+    agent = make_agent(memory, tmp_path, backend, context_window=2_600, compact_percent=0)
     for i in range(1, 5):
         await events_of(agent, ask(f"q{i} {long}"))
 
@@ -99,7 +99,7 @@ async def test_when_compaction_fails_the_oldest_turns_are_left_out_with_a_warnin
     warnings = [e["message"] for e in events if e["type"] == "warning"]
     assert any("Could not compact" in w for w in warnings) and any("left out" in w for w in warnings)
     sent = backend.calls[-1][0]
-    assert estimate_prompt_tokens(sent, backend.calls[-1][1]) <= 0.95 * 2_000
+    assert estimate_prompt_tokens(sent, backend.calls[-1][1]) <= 0.95 * 2_600
     users = [untimed(m["content"])[:2] for m in sent if m["role"] == "user"]
     assert users[-1] == "q5" and "q1" not in users  # the oldest went first, the new message stayed
     assert events[-1]["reply"] == "a5"

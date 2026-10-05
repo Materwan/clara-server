@@ -244,6 +244,8 @@ class Settings:
     # Billions of parameters a model of weight 1 has: a bigger one costs proportionally more credits a token
     # (models.py), a smaller one less
     weight_reference_b: float = 8.0
+    # Reminders sent for one task before it is left alone (tasks.py): after that the person decides
+    task_max_reminders: int = 10
 
     @property
     def logs_dir(self) -> Path:
@@ -388,4 +390,5 @@ class Settings:
             github_token=text("GITHUB_TOKEN") or None,
             default_daily_tokens=_token_limit(env, "CLARA_DEFAULT_DAILY_TOKENS"),
             weight_reference_b=_positive_number(env, "CLARA_WEIGHT_REFERENCE_B", 8.0),
+            task_max_reminders=_positive_int(env, "CLARA_TASK_MAX_REMINDERS", 10),
         )

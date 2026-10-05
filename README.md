@@ -153,6 +153,9 @@ All routes except `/health` need `Authorization: Bearer <token>`.
 | `POST /v1/reminders` | `{surface, user_id, user_name?, text, at, repeat?, timezone?, conversation?, targets?}` → `{id, text, due_at, repeat, targets}`; 422 if `at` is past or not ISO 8601 (see *Reminders*); `conversation` (default: the account's own) is where Clara writes the announcement; `targets`: the surfaces it is shown on (default: all of the person's) |
 | `GET /v1/reminders?surface=&user_id=` | the person's reminders that have not fired yet |
 | `DELETE /v1/reminders/{id}?surface=&user_id=` | cancel one of the person's own reminders |
+| `POST /v1/tasks` | `{surface, user_id, user_name?, title, description?, due?, reminders?, timezone?, conversation?, targets?}` → the task: add one to the person's to-do list (see *Tasks*); `due` and `reminders` are ISO 8601 (a time without offset is read in `timezone`); **without `reminders` Clara picks them**; 422 for a past time or a bad field |
+| `GET /v1/tasks?surface=&user_id=&status=` | the person's tasks (`status`: `open` by default, `done` or `all`): each with `reminders_sent`, `next_reminder`, `reminders` (all those to come) and `max_reminders`; `GET /v1/tasks/{id}` one task |
+| `PATCH /v1/tasks/{id}` | `{surface, user_id, title?, description?, due?, reminders?, targets?, status?}`: only what is given changes; `due: null` removes the deadline, `reminders` replaces those to come (`[]`: stop reminding), `status` `done` or `open` closes or reopens it; `DELETE /v1/tasks/{id}?surface=&user_id=` deletes it |
 | `POST /v1/notifications` | `{surface, user_id, user_name?, text, title?, targets?, conversation?}` → `{id, sent_at, targets}`: notify that person now (see *Notifications*); 429 when too many |
 | `GET /v1/settings?surface=&user_id=` | the person's settings: `{notify_after, notify_after_default, notify_after_effective}`, the seconds a task takes before it notifies them when done (see *Notifications*); `notify_after` is `null` while they have not set one |
 | `PATCH /v1/settings` | `{surface, user_id, user_name?, notify_after}`: `notify_after` is 0 (never) to 604800 seconds, or `null` for the server's default; 422 out of range |
@@ -318,8 +321,9 @@ it), and reaches the server over HTTP with a client token (`CLARA_TOKENS=discord
 On Discord, people make an account with `/register` (or `/login` to an existing one) before Clara answers them. She
 answers private messages, and on a server the messages that mention her or reply to her; she reads the other messages
 of signed-in members as context, and may answer them where chime in is allowed. Their slash commands are `/register`,
-`/login`, `/logout`, `/me`, `/remember`, `/forget`, `/reset` and `/help`. **Reminders and notifications** reach them
-as **private messages** only, never in a server's channels.
+`/login`, `/logout`, `/me`, `/remember`, `/forget`, `/tasks` (their to-do list, each task with the reminders sent and the
+next one), `/task` (one in full), `/reset` and `/help`; they add or change tasks by asking Clara. **Reminders, task
+reminders and notifications** reach them as **private messages** only, never in a server's channels.
 
 ### What the server provides
 
@@ -409,6 +413,40 @@ it, and nobody else**: on every client of theirs, or only on the *surfaces* the 
   several occurrences fires once, then waits for its next.
 - **Privacy.** `/forget-person` also erases the person's reminders and what they announced. Only the person
   who set a reminder can list or cancel it.
+
+## Tasks
+
+Each person has a **to-do list**, the same on every surface: a task has a title, a description, an optional
+deadline (`due_at`), a queue of **reminders** still to come (`reminders`, the first being `next_reminder`) and
+the number of reminders already sent (`reminders_sent`). A task is changed by command (`/tasks` and `/task` in
+`clara-chat` and the console, the Tasks page of the web site, the desktop app's *Tasks…* dialog, `/tasks` and
+`/task` on Discord, `/v1/tasks`) or by asking Clara in natural language (her tools `add_task`, `list_tasks`,
+`update_task`, `delete_task`: "add a task: send the invoice by Friday", "what is on my list?", "when will you
+remind me about the taxes?", "I did the taxes"). Only its person can see or change a task.
+
+- **Every task has reminders, and Clara chooses them when you give none.** A task created without a reminder
+  is planned by Clara (a one-shot turn on the model of the surface where it was made, that answers
+  `{"reminders": [...]}`): mornings for a chore, a day and an hour before and at a deadline, and so on. When
+  she cannot (the model is down or too slow, `CLARA_REMINDER_AI_TIMEOUT`, at most 30 s for this one), the rules
+  do: a day before the deadline, an hour before and at it, or tomorrow at 09:00 on the person's clock. Through
+  the model's tool she picks them herself, as part of the conversation.
+- **At each reminder she looks at the task again.** When a reminder comes due, Clara is given the task's title,
+  description, deadline, the number of reminders already sent and those still queued, and answers
+  `{"message": "...", "next": [...]}`: the notification to show, and (optional) the reminders to come
+  **instead** of the queued ones. She may move them closer to a deadline, space them out when the person keeps
+  not doing it, add some, or stop (`[]`). Left out, the queue is kept; when it is empty the rules queue the next
+  one (halfway to the deadline, then the deadline, then each morning once it is past; a task without a deadline
+  waits 2, 4 then 7 days). If the person changed the task while she was writing, theirs wins. These turns keep
+  nothing in the conversation and cost the person credits like any answer.
+- **A task is not nagged for ever**: after `CLARA_TASK_MAX_REMINDERS` reminders (10) the queue is emptied
+  (the last notification says so), and a done task is never reminded. At most 100 open tasks (500 in all) per
+  person, 10 reminders queued per task, 200 characters of title, 2000 of description.
+- **Receiving them** is the event stream of *Notifications*: a task reminder is a `notification` titled
+  `Task: <title>`, with the source `tasks`, for the surfaces the task names (`targets`, empty: all of the
+  person's clients). A missed one arrives when the client is back, like the others.
+- **Done and reopened.** `status: done` drops the queue; reopening has Clara pick new reminders (or takes
+  those given). A task's `timezone` is the person's clock when it was made (an IANA name, or an offset).
+- **Privacy.** `/forget-person` erases the person's tasks; merging two people merges their lists.
 
 ## Notifications
 
@@ -685,6 +723,10 @@ shown, and the user's answers come back as their next message, which Clara then 
   instructions, and its files: add files, a folder, or a GitHub repository (or drop files and folders on the page),
   read a file, remove it, sync or remove a repository. It says whether Clara reads all the files with every message
   or searches them, for the model in use.
+- **Tasks**: your to-do list as a list (to do, done, all) and as a month calendar: each task with its deadline,
+  the reminders sent and the next one; add, edit, mark as done, reopen, delete, read one in full. A task given no
+  reminder gets them chosen by Clara, who also moves the next ones each time one is sent: the page reads the list
+  again every 30 seconds.
 - **Memory**: what Clara remembers about you, to add to or remove from.
 - **Account**: your usage, the model Clara answers you with on each surface (among those an administrator offers, with
   their cost in credits), change your password, see and sign out your devices, link an account that has no password
@@ -697,7 +739,8 @@ shown, and the user's answers come back as their next message, which Clara then 
   *Server* (status, switch the server's own provider and model, stop), *People & memory* (everybody Clara knows, their facts,
   the relationship, linking, erasing a person) and a *Console* box with every server command.
 
-There are no reminders or notifications on the web site, and it runs no tools on your computer.
+Reminders and notifications are not shown on the web site (the desktop app, the terminal, the console and Discord
+show them; the Tasks page lists what is still to come), and it runs no tools on your computer.
 
 It is plain HTML, CSS and JavaScript in `src/clara/web/`, with no build step and nothing loaded from elsewhere. It works on computers and phones (on a phone, the navigation slides in from the menu button), and follows
 the system's light or dark setting; a switch at the bottom of the navigation forces *Light* or *Dark*, remembered in
@@ -858,6 +901,9 @@ src/clara/
   projectapi.py the routes of projects
   tools.py      tools the model can call
   reminders.py  reminders: parsing, repeats, the scheduler
+  tasks.py      the to-do list: tasks, their reminders, the rules, the scheduler (storage: taskstore.py)
+  taskai.py     Clara picks the reminders of a task and decides the next ones at each reminder
+  taskapi.py    the routes of tasks
   users.py      users, password hashes, login tokens (the tables are in memory.py)
   auth.py       who is calling (client token, user token or web cookie) and what they may touch
   webapi.py     login, sign-up, account, administration and PDF routes, and the web site's files
@@ -885,7 +931,7 @@ src/clara/
   modelapi.py   the routes of models
   markdownfiles.py / markdownapi.py  the markdown files Clara writes (tools in tools.py), and their routes
   qcm.py        the QCM form Clara asks (tool `qcm`): limits, checking, the answers message
-  client.py     clara-chat (also shows reminders and notifications, and has /remind and /notify)
+  client.py     clara-chat (also shows reminders and notifications, and has /remind, /notify, /tasks and /task)
   admin.py      clara-admin (remote console)
 config/system_prompt.md   Clara's personality, re-read when edited
 ```

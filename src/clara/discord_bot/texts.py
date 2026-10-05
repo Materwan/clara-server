@@ -94,6 +94,31 @@ TEXTS: dict[str, dict[str, str]] = {
         FRENCH: "Sur un serveur, seuls ceux qui peuvent gérer le serveur effacent la conversation d'un salon.",
         ENGLISH: "On a server, only people who can manage it may clear a channel's conversation.",
     },
+    # -- the to-do list -------------------------------------------------------------------------------
+    "tasks_title": {FRENCH: "Tes tâches", ENGLISH: "Your tasks"},
+    "tasks_done_title": {FRENCH: "Tes tâches terminées", ENGLISH: "Your finished tasks"},
+    "tasks_none": {
+        FRENCH: "Aucune tâche. Demande-moi d'en ajouter une, par exemple : « ajoute une tâche : envoyer la facture ».",
+        ENGLISH: "No task. Ask me to add one, for instance: \"add a task: send the invoice\".",
+    },
+    "tasks_more": {FRENCH: "… et {count} de plus", ENGLISH: "… and {count} more"},
+    "tasks_footer": {
+        FRENCH: "`/task` donne le détail d'une tâche. Dis-moi ce qu'il faut changer.",
+        ENGLISH: "`/task` shows one task in full. Tell me what to change.",
+    },
+    "task_due": {FRENCH: "à faire pour {when}", ENGLISH: "due {when}"},
+    "task_done": {FRENCH: "terminée", ENGLISH: "done"},
+    "task_sent_one": {FRENCH: "1 rappel envoyé", ENGLISH: "1 reminder sent"},
+    "task_sent": {FRENCH: "{count} rappels envoyés", ENGLISH: "{count} reminders sent"},
+    "task_next": {FRENCH: "prochain rappel {when}", ENGLISH: "next reminder {when}"},
+    "task_no_next": {FRENCH: "plus de rappel prévu", ENGLISH: "no reminder to come"},
+    "task_description": {FRENCH: "Description", ENGLISH: "Description"},
+    "task_no_description": {FRENCH: "aucune", ENGLISH: "none"},
+    "task_reminders": {FRENCH: "Rappels à venir", ENGLISH: "Reminders to come"},
+    "no_such_task": {
+        FRENCH: "Je n'ai pas cette tâche (vois `/tasks`).",
+        ENGLISH: "I have no such task (see `/tasks`).",
+    },
     # -- help -----------------------------------------------------------------------------------------
     "help": {
         FRENCH: (
@@ -102,6 +127,8 @@ TEXTS: dict[str, dict[str, str]] = {
             "existant, `/logout` te déconnecte.\n"
             "`/me` montre ce que je sais de toi, `/remember` me fait retenir quelque chose, `/forget` me le fait "
             "oublier, `/reset` efface la conversation du salon (ou de nos messages privés).\n"
+            "`/tasks` montre ta liste de tâches (demande-moi d'ajouter, de changer ou de finir une tâche), `/task` "
+            "le détail de l'une d'elles.\n"
             "Tes rappels arrivent en message privé."
         ),
         ENGLISH: (
@@ -110,6 +137,7 @@ TEXTS: dict[str, dict[str, str]] = {
             "`/logout` signs you out.\n"
             "`/me` shows what I know about you, `/remember` makes me remember something, `/forget` makes me "
             "forget it, `/reset` clears the channel's conversation (or our private one).\n"
+            "`/tasks` shows your to-do list (ask me to add, change or finish a task), `/task` shows one in full.\n"
             "Your reminders arrive as private messages."
         ),
     },

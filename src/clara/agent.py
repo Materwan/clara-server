@@ -46,6 +46,7 @@ from .projects import PROJECT_TOOLS, Projects
 from .prompt import SystemPrompt
 from .qcm import SURFACES as QCM_SURFACES
 from .reminders import ReminderService
+from .tasks import TaskService
 from .tools import ABOUT_PERSON, MARKDOWN_TOOLS, QCM, Toolbox, ToolContext
 
 log = logging.getLogger(__name__)
@@ -225,6 +226,7 @@ class Agent:
         markdown: MarkdownFiles | None = None,
         limits: UsageLimits | None = None,
         models: ModelCatalog | None = None,
+        tasks: TaskService | None = None,
     ):
         self.memory = memory
         self.projects = projects  # the files of the conversations that are part of a project
@@ -232,6 +234,7 @@ class Agent:
         self.limits = limits  # the daily credits of each person (limits.py); None: nobody is limited
         self.models = models  # the model each person chose, and what it costs (models.py); None: one backend
         self.reminders = reminders  # lets the model's tools set reminders
+        self.tasks = tasks  # lets the model's tools keep the person's to-do list
         self.notifier = notifier  # lets the model notify, and the agent say when long work is done
         self.long_turn_seconds = long_turn_seconds  # a turn this long notifies its person when done (0: never)
         self.backend = backend
@@ -544,7 +547,7 @@ class Agent:
         context = ToolContext(
             person, self.memory, self.reminders, request.timezone, request.surface, request.user_id, conversation,
             self.notifier, roster=tuple(p for p in request.roster if p.id != person.id),
-            projects=self.projects, project_id=request.project, markdown=self.markdown,
+            projects=self.projects, project_id=request.project, markdown=self.markdown, tasks=self.tasks,
         )
         client_tools = {schema["function"]["name"] for schema in request.tools}
         hidden = set() if context.roster else {ABOUT_PERSON}

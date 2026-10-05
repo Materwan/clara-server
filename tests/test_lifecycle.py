@@ -240,6 +240,41 @@ async def test_a_reminder_being_announced_is_awaited(memory, tmp_path):
     assert [e.message for e in memory.reminder_events_after(0)] == ["Your dentist is waiting."]
 
 
+async def test_a_task_reminder_being_written_is_awaited_and_none_start_while_stopping(memory, tmp_path):
+    from datetime import timedelta
+
+    from clara.notifications import Notifier
+    from clara.tasks import Followup, TaskService
+
+    agent, reminders, _, _ = make(memory, tmp_path, FakeBackend())
+    tasks = TaskService(memory, Notifier(memory))
+    lifecycle = Lifecycle(agent, reminders, poll=0.01, flush=0.01, tasks=tasks)
+    exits = []
+    lifecycle.on_exit = exits.append
+    person = memory.resolve("cli", "erwan", "Erwan")
+    soon = (tasks._clock() + timedelta(seconds=1)).isoformat()
+    task = await tasks.create(person, "Dentist", reminders=[soon])
+    tasks._clock = lambda: tasks.store.get_any(task.id).next[0] + timedelta(seconds=1)  # it is due
+    release = asyncio.Event()
+
+    async def slow_follower(task, now):
+        await release.wait()
+        return Followup("Your dentist is waiting.", None)
+
+    tasks.follower = slow_follower
+    firing = asyncio.ensure_future(tasks.fire_due())
+    await until(lambda: tasks.firing)
+
+    lifecycle.request_stop()
+    assert tasks.stopping  # nothing new is written from now on
+    await asyncio.sleep(0.1)
+    assert exits == []  # the one being written is awaited
+    release.set()
+    await firing
+    await until(lambda: exits)
+    assert [e.text for e in memory.reminder_events_after(0)] == ["Your dentist is waiting."]
+
+
 # --- over HTTP, with the real server class -------------------------------------------------
 
 

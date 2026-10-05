@@ -864,3 +864,70 @@ label.field .picker .hint.error { color: var(--danger); }
   .qcm { padding: .85rem .8rem; }
   .qcm-foot button { width: 100%; justify-content: center; }
 }
+
+
+/* ---- tasks ------------------------------------------------------------------------------------------ */
+.list.tasks > li { align-items: flex-start; }
+.task .check {
+  width: 1.4rem; height: 1.4rem; padding: 0; border-radius: 50%; border: 2px solid var(--line-strong); background: transparent;
+  color: #fff; flex: none; margin-top: .1rem;
+}
+.task .check:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft); }
+.task.done .check { background: var(--ok); border-color: var(--ok); }
+.task .title { font-family: var(--font); font-size: 1rem; font-weight: 600; }
+.task.done .title { color: var(--muted); text-decoration: line-through; }
+.task .meta { display: flex; flex-wrap: wrap; align-items: center; gap: .2rem .8rem; margin-top: .3rem; }
+.task .next { display: inline-flex; align-items: center; gap: .3rem; }
+.task.done .meta { opacity: .75; }
+.task-form, .task-view { width: min(520px, 100%); }
+dialog:has(.task-form), dialog:has(.task-view) { width: min(560px, calc(100vw - 2rem)); }
+.task-form textarea { width: 100%; resize: vertical; font-size: .95rem; }
+.task-form input[type="datetime-local"] { flex: 1; min-width: 0; }
+.task-form .field { display: flex; flex-direction: column; gap: .4rem; font-size: .88rem; font-weight: 550; color: var(--text-2); }
+.task-form .field > .row { align-items: stretch; }
+.task-form .reminder-rows { display: flex; flex-direction: column; gap: .4rem; }
+.task-form .add-reminder { align-self: flex-start; }
+.task-view dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .55rem 1rem; margin: 1rem 0 0; }
+.task-view dt { color: var(--muted); font-size: .88rem; }
+.task-view dd { margin: 0; overflow-wrap: anywhere; }
+.task-view .task-description { margin: 0; white-space: pre-wrap; color: var(--text); }
+.task-view ul.plain { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .2rem; }
+
+.icon.flip { transform: rotate(180deg); }
+.cal { overflow: hidden; }
+.cal-bar { display: flex; align-items: center; gap: .4rem; padding: .75rem 1rem; border-bottom: 1px solid var(--line); }
+.cal-title { flex: 1; margin: 0; text-align: center; font-family: var(--font-display); font-size: 1.05rem; text-transform: capitalize; }
+.cal-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); }
+.cal-dow { padding: .45rem .3rem; text-align: center; font-size: .78rem; font-weight: 600; color: var(--muted); border-bottom: 1px solid var(--line); }
+.cal-cell {
+  min-height: 5.6rem; padding: .3rem .35rem; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line);
+  display: flex; flex-direction: column; gap: .2rem; cursor: pointer; min-width: 0;
+}
+.cal-cell:nth-child(7n) { border-right: none; }
+.cal-cell:hover { background: var(--hover); }
+.cal-cell.other { background: color-mix(in srgb, var(--panel-2) 55%, transparent); color: var(--muted); }
+.cal-cell.selected { box-shadow: inset 0 0 0 2px var(--accent); }
+.cal-num { font-size: .82rem; font-weight: 600; width: 1.6rem; height: 1.6rem; display: grid; place-items: center; border-radius: 50%; }
+.cal-cell.today .cal-num { background: var(--accent); color: var(--accent-ink); }
+.cal-events { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cal-chip {
+  display: block; padding: .05rem .35rem; border-radius: 6px; font-size: .72rem; line-height: 1.35; overflow: hidden;
+  background: var(--accent-soft); color: var(--accent-text);
+}
+.cal-chip.reminder { background: var(--panel-2); color: var(--text-2); }
+.cal-chip.done { opacity: .6; text-decoration: line-through; }
+.cal-chip .chip-text { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cal-more { font-size: .72rem; color: var(--muted); padding-left: .35rem; }
+.list.agenda > li .glyph.reminder { background: var(--panel-2); color: var(--text-2); }
+
+@media (max-width: 600px) {
+  dialog:has(.task-form), dialog:has(.task-view) { width: 100vw; }
+  .task-view dl { grid-template-columns: minmax(0, 1fr); gap: .1rem; }
+  .task-view dd { margin-bottom: .6rem; }
+  .cal-cell { min-height: 3.4rem; padding: .2rem; align-items: center; }
+  .cal-events { flex-direction: row; flex-wrap: wrap; justify-content: center; gap: 3px; }
+  .cal-chip { width: 7px; height: 7px; padding: 0; border-radius: 50%; background: var(--accent); }
+  .cal-chip.reminder { background: var(--line-strong); }
+  .cal-chip .chip-text { display: none; }
+  .cal-more { padding: 0; font-size: .66rem; }
+}

@@ -113,6 +113,24 @@ class LocalBackend:
             raise ClaraError(error.status_code, str(error.detail)) from None
         return self.state.memory.clear_conversation(conversation)
 
+    # -- the to-do list ------------------------------------------------------------------------------- #
+
+    async def tasks(self, user_id: int, status: str = "open") -> list[dict]:
+        external = self._account(user_id)
+        person = self.state.memory.find_person(SURFACE, external)
+        if person is None:
+            return []
+        service = self.state.tasks
+        return [service.describe(task) for task in service.tasks(person, None if status == "all" else status)]
+
+    async def task(self, user_id: int, task_id: int) -> dict:
+        external = self._account(user_id)
+        person = self.state.memory.find_person(SURFACE, external)
+        found = self.state.tasks.store.get(person.id, task_id) if person else None
+        if found is None:
+            raise ClaraError(404, "No such task of yours")
+        return self.state.tasks.describe(found)
+
     # -- talking -------------------------------------------------------------------------------------- #
 
     async def chat(

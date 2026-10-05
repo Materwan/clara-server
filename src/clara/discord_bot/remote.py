@@ -88,6 +88,15 @@ class RemoteBackend:
         found = await self._call("DELETE", f"/v1/conversations/{quote(conversation, safe=':')}")
         return found.get("deleted_messages", 0)
 
+    # -- the to-do list ------------------------------------------------------------------------------- #
+
+    async def tasks(self, user_id: int, status: str = "open") -> list[dict]:
+        found = await self._call("GET", "/v1/tasks", params={**self._account(user_id), "status": status})
+        return found["tasks"]
+
+    async def task(self, user_id: int, task_id: int) -> dict:
+        return await self._call("GET", f"/v1/tasks/{task_id}", params=self._account(user_id))
+
     # -- talking -------------------------------------------------------------------------------------- #
 
     async def chat(

@@ -169,6 +169,20 @@ async def test_the_local_backend_follows_the_same_rules_as_the_http_api(app):
         await backend.delete_fact(111, stored["id"])
     assert gone.value.status == 404
 
+    assert await backend.tasks(111) == []
+    first = await app.state.tasks.create(
+        app.state.memory.find_person("discord", "111"), "Taxes", "Gather papers", reminders=["2099-01-01T09:00"],
+        origin=("discord", "111", "discord:111"),
+    )
+    other = await app.state.tasks.create(app.state.memory.find_person("discord", "222"), "Not yours", reminders=["2099-01-01T09:00"])
+    assert [t["title"] for t in await backend.tasks(111)] == ["Taxes"]
+    assert (await backend.task(111, first.id))["description"] == "Gather papers"
+    app.state.tasks.complete(app.state.memory.find_person("discord", "111"), first.id)
+    assert await backend.tasks(111) == [] and [t["status"] for t in await backend.tasks(111, "done")] == ["done"]
+    with pytest.raises(ClaraError) as hers:
+        await backend.task(111, other.id)  # somebody else's
+    assert hers.value.status == 404
+
     assert await backend.clear_conversation("discord:channel:10") == 4
     assert await backend.logout(111) is True
     with pytest.raises(ClaraError) as out:

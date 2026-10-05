@@ -106,3 +106,63 @@ async def test_command_descriptions_are_translated_for_french_discords():
     text = app_commands.locale_str("Create your Clara account")
     assert await translator.translate(text, discord.Locale.french, None) == "Créer ton compte Clara"
     assert await translator.translate(text, discord.Locale.german, None) is None
+
+
+# --- the to-do list -------------------------------------------------------------------------------------
+
+
+def a_task(**fields) -> dict:
+    return {
+        "id": 4, "title": "Taxes", "description": "Gather papers", "status": "open", "due_at": "2026-10-07T16:00:00+00:00",
+        "reminders_sent": 2, "next_reminder": "2026-10-05T07:00:00+00:00",
+        "reminders": ["2026-10-05T07:00:00+00:00", "2026-10-06T07:00:00+00:00"], **fields,
+    }
+
+
+def test_a_task_is_shown_with_moments_discord_renders_on_the_readers_clock():
+    from clara.discord_bot.commands import task_text
+
+    line = task_text(ENGLISH, a_task())
+    assert line == "`4` **Taxes** · due <t:1791388800:f> · 2 reminders sent · next reminder <t:1791183600:f>"
+    assert "1 reminder sent" in task_text(ENGLISH, a_task(reminders_sent=1))
+    assert "no reminder to come" in task_text(ENGLISH, a_task(next_reminder=None, reminders=[]))
+    assert "terminée" in task_text(FRENCH, a_task(status="done")) and "prochain rappel" not in task_text(FRENCH, a_task(status="done"))
+    detail = task_text(ENGLISH, a_task(), detail=True)
+    assert "Description: Gather papers" in detail and "Reminders to come: <t:1791183600:f>, <t:1791270000:f>" in detail
+    assert "Description: none" in task_text(ENGLISH, a_task(description=""), detail=True)
+
+
+def test_the_list_of_tasks_is_an_embed_that_says_when_there_are_none_or_too_many():
+    from clara.discord_bot.commands import TASKS_SHOWN, tasks_embed
+
+    assert "No task" in tasks_embed(ENGLISH, [], "open").description
+    embed = tasks_embed(ENGLISH, [a_task(id=n) for n in range(TASKS_SHOWN + 5)], "open")
+    assert embed.title == "Your tasks" and embed.description.endswith("… and 5 more")
+    assert tasks_embed(FRENCH, [a_task()], "done").title == "Tes tâches terminées"
+
+
+def test_the_reminder_of_a_task_reaches_discord_even_on_its_own_conversation():
+    task_reminder = {
+        "type": "notification", "title": "Task: Taxes", "text": "Your taxes are due in two days!",
+        "source": "tasks", "conversation": "discord:channel:1",
+    }
+    assert text_of(task_reminder, ENGLISH) == "🔔 **Task: Taxes**\nYour taxes are due in two days!"
+
+
+async def test_the_remote_backend_reads_the_tasks_of_an_account():
+    def handler(request):
+        assert request.url.params["surface"] == "discord" and request.url.params["user_id"] == "5"
+        if request.url.path == "/v1/tasks":
+            assert request.url.params["status"] == "all"
+            return httpx.Response(200, json={"tasks": [a_task()]})
+        if request.url.path == "/v1/tasks/4":
+            return httpx.Response(200, json=a_task())
+        return httpx.Response(404, json={"detail": "No such task of yours"})
+
+    api = RemoteBackend("http://clara.test", "t", transport=httpx.MockTransport(handler))
+    assert [t["title"] for t in await api.tasks(5, "all")] == ["Taxes"]
+    assert (await api.task(5, 4))["id"] == 4
+    with pytest.raises(ClaraError) as caught:
+        await api.task(5, 9)
+    assert caught.value.status == 404
+    await api.close()

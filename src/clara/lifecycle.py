@@ -18,6 +18,7 @@ from typing import Callable
 
 from .agent import Agent
 from .reminders import ReminderService
+from .tasks import TaskService
 
 log = logging.getLogger(__name__)
 
@@ -27,9 +28,18 @@ FLUSH_SECONDS = 0.5  # clients get "stopped" before the connections are closed
 
 
 class Lifecycle:
-    def __init__(self, agent: Agent, reminders: ReminderService, poll: float = POLL_SECONDS, flush: float = FLUSH_SECONDS):
+    def __init__(
+        self,
+        agent: Agent,
+        reminders: ReminderService,
+        poll: float = POLL_SECONDS,
+        flush: float = FLUSH_SECONDS,
+        tasks: TaskService | None = None,
+    ):
         self.agent = agent
         self.reminders = reminders
+        self.tasks = tasks  # its reminders are written by Clara too: waited for like the others'
+
         self.on_exit: Callable[[bool], None] | None = None  # called once, with "was it forced"
         self.loop: asyncio.AbstractEventLoop | None = None  # set when the server starts: signals come from outside it
         self._poll, self._flush = poll, flush
@@ -56,6 +66,8 @@ class Lifecycle:
         if self._task is None:
             self.agent.accepting = False
             self.reminders.stopping = True
+            if self.tasks is not None:
+                self.tasks.stopping = True
             self.reminders.announce_server("stopping")
             self._force = force
             self._task = asyncio.ensure_future(self._drain())
@@ -81,7 +93,7 @@ class Lifecycle:
             self.loop.call_soon_threadsafe(self.request_stop, force)
 
     def _busy(self) -> bool:
-        return self.agent.busy or self.reminders.firing
+        return self.agent.busy or self.reminders.firing or (self.tasks is not None and self.tasks.firing)
 
     async def _drain(self) -> None:
         started = last_report = time.monotonic()

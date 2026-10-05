@@ -15,6 +15,9 @@
                                             (see notifications.py), each for one person (NULL: everybody)
                                             and some of their surfaces ('': all of them)
     reminder_cursors(client, last_event_id)     how far each listener (client + account) has read
+    tasks(id, person, title, description, due_at, status, reminders_sent, ...)
+    task_reminders(id, task, at)                a person's to-do list, and the reminders still to come of each
+                                                task (see taskstore.py and tasks.py)
     conversations(conversation, person, title, pinned, ...)
                                             the conversations a client can list: who started each, its
                                             title, when it was last written in (from its first turn on)
@@ -222,6 +225,31 @@ CREATE TABLE IF NOT EXISTS model_choices (
     model     TEXT NOT NULL,
     PRIMARY KEY (person_id, surface)
 );
+CREATE TABLE IF NOT EXISTS tasks (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id      INTEGER NOT NULL REFERENCES people (id) ON DELETE CASCADE,
+    title          TEXT NOT NULL,
+    description    TEXT NOT NULL DEFAULT '',
+    due_at         TEXT,  -- the deadline, UTC (NULL: none)
+    status         TEXT NOT NULL DEFAULT 'open',  -- "open" or "done"
+    reminders_sent INTEGER NOT NULL DEFAULT 0,
+    timezone       TEXT NOT NULL DEFAULT '',  -- the person's clock when it was set: IANA name or "+02:00"
+    surface        TEXT NOT NULL DEFAULT '',  -- where it was set: the model of that surface follows it up
+    user_id        TEXT NOT NULL DEFAULT '',
+    conversation   TEXT NOT NULL DEFAULT '',
+    targets        TEXT NOT NULL DEFAULT '',  -- surfaces its reminders are shown on, "|"-separated ('': all)
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL,
+    done_at        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_person ON tasks (person_id, status);
+CREATE TABLE IF NOT EXISTS task_reminders (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL REFERENCES tasks (id) ON DELETE CASCADE,
+    at      TEXT NOT NULL  -- when it fires, UTC
+);
+CREATE INDEX IF NOT EXISTS idx_task_reminders_at ON task_reminders (at);
+CREATE INDEX IF NOT EXISTS idx_task_reminders_task ON task_reminders (task_id);
 CREATE TABLE IF NOT EXISTS markdown_files (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     person_id  INTEGER NOT NULL REFERENCES people (id) ON DELETE CASCADE,
@@ -638,6 +666,7 @@ class Memory:
             self._db.execute("DELETE FROM markdown_files WHERE person_id = ?", (person_id,))
             self._db.execute("DELETE FROM usage WHERE person_id = ?", (person_id,))
             self._db.execute("DELETE FROM model_choices WHERE person_id = ?", (person_id,))
+            self._db.execute("DELETE FROM tasks WHERE person_id = ?", (person_id,))  # their reminders go with them
             self._db.execute("DELETE FROM messages WHERE person_id = ?", (person_id,))
             self._db.execute("DELETE FROM reminders WHERE person_id = ?", (person_id,))
             self._db.execute("DELETE FROM reminder_events WHERE person_id = ?", (person_id,))
@@ -678,6 +707,7 @@ class Memory:
         db.execute("UPDATE reminder_events SET person_id = ? WHERE person_id = ?", (target, source))
         db.execute("UPDATE conversations SET person_id = ? WHERE person_id = ?", (target, source))
         db.execute("UPDATE projects SET person_id = ? WHERE person_id = ?", (target, source))
+        db.execute("UPDATE tasks SET person_id = ? WHERE person_id = ?", (target, source))
         db.execute(
             "INSERT INTO usage (person_id, day, tokens) SELECT ?, day, tokens FROM usage WHERE person_id = ?"
             " ON CONFLICT (person_id, day) DO UPDATE SET tokens = usage.tokens + excluded.tokens",

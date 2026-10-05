@@ -9,7 +9,7 @@ from conftest import FakeBackend, call, say, untimed
 from clara.agent import Agent, ChatRequest, ClientToolTimeout, NothingToCompact
 from clara.llm import LlmChunk
 from clara.prompt import SystemPrompt
-from clara.tools import default_toolbox
+from clara.tools import Toolbox, default_toolbox
 
 READ_FILE = {
     "type": "function",
@@ -22,7 +22,8 @@ READ_FILE = {
 
 
 def make_agent(memory, tmp_path: Path, backend, **options) -> Agent:
-    return Agent(memory, backend, default_toolbox(), SystemPrompt(tmp_path / "none.md"), **options)
+    toolbox = options.pop("toolbox", None) or default_toolbox()
+    return Agent(memory, backend, toolbox, SystemPrompt(tmp_path / "none.md"), **options)
 
 
 def request(**fields) -> ChatRequest:
@@ -242,7 +243,7 @@ async def test_manual_compaction_replaces_older_messages_by_a_summary(memory, tm
 
     before, after = await agent.compact("console:erwan", focus="the questions")
     assert before == pytest.approx(full, abs=0.1)
-    assert after < full / 3  # only the summary and the fixed part (system prompt, tools) are left
+    assert after < full / 2  # only the summary and the fixed part (system prompt, tools: it grows with them) are left
 
     summary_call = backend.calls[2][0]
     assert "the questions" in summary_call[1]["content"] and "Erwan: q1" in summary_call[1]["content"]
@@ -266,7 +267,8 @@ async def test_compacting_an_empty_conversation_or_failing_summary(memory, tmp_p
 
 async def test_automatic_compaction_when_the_context_is_full(memory, tmp_path):
     backend = FakeBackend(say("big answer", prompt_tokens=1700), say("Summary."))
-    agent = make_agent(memory, tmp_path, backend, context_window=2000, compact_percent=80)
+    # no server tools: the windows here are tiny, and what tools weigh would decide whether the prompt fits
+    agent = make_agent(memory, tmp_path, backend, toolbox=Toolbox([]), context_window=2000, compact_percent=80)
 
     events = await drive(agent, request(message="q" * 1200))  # the model says the prompt took 1700 of 2000 tokens
 
@@ -280,7 +282,7 @@ async def test_automatic_compaction_when_the_context_is_full(memory, tmp_path):
 
 async def test_a_failing_automatic_compaction_is_a_warning_not_an_error(memory, tmp_path):
     backend = FakeBackend(say("answer", prompt_tokens=1800), say(""))
-    agent = make_agent(memory, tmp_path, backend, context_window=2000, compact_percent=80)
+    agent = make_agent(memory, tmp_path, backend, toolbox=Toolbox([]), context_window=2000, compact_percent=80)
     events = await drive(agent, request(message="q"))
     assert [e["type"] for e in events][-2:] == ["warning", "done"]
     assert events[-1]["reply"] == "answer"
@@ -325,7 +327,7 @@ async def test_old_tool_outputs_are_kept_within_a_share_of_the_window(memory, tm
 
 async def test_older_outputs_of_a_long_answer_are_left_out_to_fit(memory, tmp_path):
     backend = FakeBackend(*[call("read_file", path=str(i)) for i in range(3)], say("done"))
-    agent = make_agent(memory, tmp_path, backend, context_window=4_000)
+    agent = make_agent(memory, tmp_path, backend, toolbox=Toolbox([]), context_window=4_000)
     events = await drive(agent, request(tools=(READ_FILE,)), lambda n, a: a["path"] * 5_000)  # ~1,400 tokens each
 
     assert events[-1]["reply"] == "done"

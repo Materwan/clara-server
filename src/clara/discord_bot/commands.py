@@ -5,6 +5,7 @@
     /logout
     /me         the account, the relationship, what Clara remembers (with a menu to make her forget something)
     /remember   /forget   /reset   /help
+    /tasks      your to-do list: each task with the reminders sent and the next one;  /task: one in full
 
 Descriptions are in English, and in French for people whose Discord is in French (FrenchTranslator).
 """
@@ -12,6 +13,7 @@ Descriptions are in English, and in French for people whose Discord is in French
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 import discord
@@ -40,6 +42,10 @@ FRENCH_DESCRIPTIONS = {
     "The memory to forget": "Le souvenir à oublier",
     "Clear this conversation (facts are kept)": "Effacer cette conversation (les souvenirs restent)",
     "How to talk with Clara": "Comment parler avec Clara",
+    "Your to-do list": "Ta liste de tâches",
+    "Which ones": "Lesquelles",
+    "One of your tasks in full": "Le détail d'une de tes tâches",
+    "The task": "La tâche",
 }
 
 
@@ -175,6 +181,52 @@ class ForgetMenu(discord.ui.View):
 
 
 # ----------------------------------------------------------------------
+# /tasks, /task
+# ----------------------------------------------------------------------
+TASKS_SHOWN = 20
+
+
+def moment(text: str, style: str = "f") -> str:
+    """A moment as Discord shows it, on the clock of whoever reads it."""
+    return f"<t:{int(datetime.fromisoformat(text).timestamp())}:{style}>"
+
+
+def task_text(lang: str, task: dict, detail: bool = False) -> str:
+    """A task: its number, title, deadline, reminders sent and the next reminder (and, in full, the rest)."""
+    parts = [f"`{task['id']}` **{task['title']}**"]
+    if task["status"] == "done":
+        parts.append(t(lang, "task_done"))
+    if task.get("due_at"):
+        parts.append(t(lang, "task_due", when=moment(task["due_at"])))
+    sent = task["reminders_sent"]
+    parts.append(t(lang, "task_sent_one") if sent == 1 else t(lang, "task_sent", count=sent))
+    if task["status"] == "open":
+        parts.append(
+            t(lang, "task_next", when=moment(task["next_reminder"])) if task["next_reminder"] else t(lang, "task_no_next")
+        )
+    text = " · ".join(parts)
+    if detail:
+        text += f"\n{t(lang, 'task_description')}: {task['description'] or t(lang, 'task_no_description')}"
+        if len(task["reminders"]) > 1:
+            text += f"\n{t(lang, 'task_reminders')}: " + ", ".join(moment(at) for at in task["reminders"])
+    return text
+
+
+def tasks_embed(lang: str, tasks: list[dict], status: str) -> discord.Embed:
+    title = t(lang, "tasks_done_title" if status == "done" else "tasks_title")
+    embed = discord.Embed(title=title, colour=discord.Colour.blurple())
+    if not tasks:
+        embed.description = t(lang, "tasks_none")
+        return embed
+    lines = [task_text(lang, task) for task in tasks[:TASKS_SHOWN]]
+    if len(tasks) > TASKS_SHOWN:
+        lines.append(t(lang, "tasks_more", count=len(tasks) - TASKS_SHOWN))
+    embed.description = "\n".join(lines)
+    embed.set_footer(text=t(lang, "tasks_footer").replace("`", ""))
+    return embed
+
+
+# ----------------------------------------------------------------------
 # The commands
 # ----------------------------------------------------------------------
 def register_commands(tree: app_commands.CommandTree, bot: ClaraBot) -> None:
@@ -252,6 +304,49 @@ def register_commands(tree: app_commands.CommandTree, bot: ClaraBot) -> None:
         wanted = current.lower().strip()
         matching = [f for f in reversed(facts) if wanted in f["text"].lower() or wanted == str(f["id"])]
         return [app_commands.Choice(name=f["text"][:100], value=f["id"]) for f in matching[:25]]
+
+    @tree.command(name="tasks", description=describe("Your to-do list"))
+    @app_commands.describe(which=describe("Which ones"))
+    @app_commands.choices(
+        which=[
+            app_commands.Choice(name="open", value="open"),
+            app_commands.Choice(name="done", value="done"),
+        ]
+    )
+    async def tasks(interaction: discord.Interaction, which: app_commands.Choice[str] | None = None) -> None:
+        lang = lang_of(bot, interaction)
+        status = which.value if which else "open"
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            found = await bot.api.tasks(interaction.user.id, status)
+        except ClaraError as error:
+            await reply(interaction, t(lang, "need_account") if error.not_signed_in else describe_error(lang, error))
+            return
+        await interaction.followup.send(embed=tasks_embed(lang, found, status), ephemeral=True)
+
+    @tree.command(name="task", description=describe("One of your tasks in full"))
+    @app_commands.describe(task=describe("The task"))
+    async def task_command(interaction: discord.Interaction, task: int) -> None:
+        lang = lang_of(bot, interaction)
+        try:
+            found = await bot.api.task(interaction.user.id, task)
+        except ClaraError as error:
+            if error.status == 404:
+                await reply(interaction, t(lang, "no_such_task"))
+            else:
+                await reply(interaction, t(lang, "need_account") if error.not_signed_in else describe_error(lang, error))
+            return
+        await reply(interaction, task_text(lang, found, detail=True))
+
+    @task_command.autocomplete("task")
+    async def task_choices(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[int]]:
+        try:
+            found = await bot.api.tasks(interaction.user.id, "all")
+        except ClaraError:
+            return []
+        wanted = current.lower().strip()
+        matching = [x for x in found if wanted in x["title"].lower() or wanted == str(x["id"])]
+        return [app_commands.Choice(name=f"{x['id']}: {x['title']}"[:100], value=x["id"]) for x in matching[:25]]
 
     @tree.command(name="reset", description=describe("Clear this conversation (facts are kept)"))
     async def reset(interaction: discord.Interaction) -> None:

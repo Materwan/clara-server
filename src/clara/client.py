@@ -39,6 +39,14 @@ HELP = """\
                   @surfaces: only on those, e.g. @app or @app,discord (default: all of yours)
 /reminders        your reminders that have not fired yet
 /unremind <id>    cancel one of them
+/tasks [all|done] your to-do list: each task with the reminders sent and the next one
+/task <id>        one task in full: its description and every reminder to come
+/task add [@surfaces] [due <when>] [remind <when>]... <title> [| <description>]
+                  a task; without `remind`, Clara picks the reminders (she also moves them
+                  after each one). e.g. /task add due tomorrow 18:00 Send the invoice
+/task done|reopen|delete <id>
+/task set <id> title|description|due|remind <value>
+                  due and remind take a <when> (remind: several, comma-separated) or `none`
 /notify [@surfaces] <text>
                   send yourself a notification now (e.g. to try your other clients)
 /notify-after [<seconds> | off | default]
@@ -178,6 +186,44 @@ class ClaraApi:
     def cancel_reminder(self, reminder_id: int) -> None:
         self.http.delete(f"/v1/reminders/{reminder_id}", params=self.identity()).raise_for_status()
 
+    def tasks(self, status: str = "open") -> list[dict]:
+        """This user's tasks (`status`: open, done or all)."""
+        response = self.http.get("/v1/tasks", params={**self.identity(), "status": status})
+        response.raise_for_status()
+        return response.json()["tasks"]
+
+    def task(self, task_id: int) -> dict:
+        response = self.http.get(f"/v1/tasks/{task_id}", params=self.identity())
+        response.raise_for_status()
+        return response.json()
+
+    def add_task(
+        self, title: str, description: str = "", due: datetime | None = None,
+        reminders: list[datetime] | None = None, targets: list[str] | None = None,
+    ) -> dict:
+        """A task for this user; without `reminders` Clara picks them."""
+        response = self.http.post(
+            "/v1/tasks",
+            json={
+                **self.identity(), "user_name": self.name, "title": title, "description": description,
+                "due": due.isoformat(timespec="seconds") if due else None,
+                "reminders": [at.isoformat(timespec="seconds") for at in reminders or []],
+                "targets": targets or [],
+            },
+            timeout=httpx.Timeout(10.0, read=120.0),  # she may be picking the reminders
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def change_task(self, task_id: int, **fields: object) -> dict:
+        """Change a task: `title`, `description`, `due` (None: no deadline), `reminders` (ISO texts), `status`."""
+        response = self.http.patch(f"/v1/tasks/{task_id}", json={**self.identity(), **fields})
+        response.raise_for_status()
+        return response.json()
+
+    def delete_task(self, task_id: int) -> None:
+        self.http.delete(f"/v1/tasks/{task_id}", params=self.identity()).raise_for_status()
+
     def reminder_events(self) -> Iterator[dict]:
         """What the server announces to this user, for as long as the connection holds: `reminder` and
         `notification` events (the ones missed while away first) and `server` events (its state: running,
@@ -215,38 +261,75 @@ def take_targets(argument: str) -> tuple[list[str], str]:
     return [], argument
 
 
+def take_when(words: list[str], now: datetime) -> tuple[datetime, list[str]]:
+    """The moment the words start with (+30m, 09:30, tomorrow 09:30, 2026-10-05 09:30) and the words after it.
+    `now` is the local time, with its offset."""
+    head = words[0].lower() if words else ""
+    relative = re.fullmatch(r"\+(\d+)([mhd])", head)
+    if relative:
+        unit = {"m": "minutes", "h": "hours", "d": "days"}[relative[2]]
+        return now + timedelta(**{unit: int(relative[1])}), words[1:]
+    if head == "tomorrow" and len(words) > 1:
+        hour, minute = _clock(words[1])
+        return (now + timedelta(days=1)).replace(hour=hour, minute=minute, second=0, microsecond=0), words[2:]
+    if re.fullmatch(r"\d{4}-\d\d-\d\d", head) and len(words) > 1:
+        hour, minute = _clock(words[1])
+        try:
+            return datetime.fromisoformat(head).replace(hour=hour, minute=minute).astimezone(), words[2:]
+        except ValueError:
+            raise ValueError(f"Not a date: {head!r}.") from None
+    if ":" in head:
+        hour, minute = _clock(head)
+        due = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        return (due if due > now else due + timedelta(days=1)), words[1:]
+    raise ValueError(f"Cannot read the time {head!r}: use +30m, 09:30, tomorrow 09:30 or 2026-10-05 09:30.")
+
+
 def parse_remind(argument: str, now: datetime) -> tuple[datetime, str, str]:
     """`(when, repeat, text)` from the arguments of /remind. `now` is the local time, with its offset."""
     words = argument.split()
     repeat = words.pop(0).lower() if words and words[0].lower() in REPEATS else ""
     if not words:
         raise ValueError("Usage: /remind [daily|weekly|monthly] <when> <text>   (see /help)")
-    head = words[0].lower()
-    relative = re.fullmatch(r"\+(\d+)([mhd])", head)
-    if relative:
-        unit = {"m": "minutes", "h": "hours", "d": "days"}[relative[2]]
-        due, rest = now + timedelta(**{unit: int(relative[1])}), words[1:]
-    elif head == "tomorrow" and len(words) > 1:
-        hour, minute = _clock(words[1])
-        due = (now + timedelta(days=1)).replace(hour=hour, minute=minute, second=0, microsecond=0)
-        rest = words[2:]
-    elif re.fullmatch(r"\d{4}-\d\d-\d\d", head) and len(words) > 1:
-        hour, minute = _clock(words[1])
-        try:
-            due = datetime.fromisoformat(head).replace(hour=hour, minute=minute).astimezone()
-        except ValueError:
-            raise ValueError(f"Not a date: {head!r}.") from None
-        rest = words[2:]
-    elif ":" in head:
-        hour, minute = _clock(head)
-        due = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        due, rest = (due if due > now else due + timedelta(days=1)), words[1:]
-    else:
-        raise ValueError(f"Cannot read the time {head!r}: use +30m, 09:30, tomorrow 09:30 or 2026-10-05 09:30.")
+    due, rest = take_when(words, now)
     text = " ".join(rest)
     if not text:
         raise ValueError("A reminder needs a text.")
     return due, repeat, text
+
+
+def parse_task(argument: str, now: datetime) -> tuple[str, str, datetime | None, list[datetime]]:
+    """`(title, description, due, reminders)` from the arguments of /task add: `[due <when>] [remind <when>]...
+    <title> [| <description>]`."""
+    words = argument.split()
+    due: datetime | None = None
+    reminders: list[datetime] = []
+    while words and words[0].lower() in ("due", "remind"):
+        keyword = words.pop(0).lower()
+        if not words:
+            raise ValueError(f"Usage: /task add [due <when>] [remind <when>]... <title>   ({keyword} needs a time)")
+        moment, words = take_when(words, now)
+        if keyword == "due":
+            due = moment
+        else:
+            reminders.append(moment)
+    title, _, description = " ".join(words).partition("|")
+    if not title.strip():
+        raise ValueError("A task needs a title.")
+    return title.strip(), description.strip(), due, reminders
+
+
+def parse_when_list(text: str, now: datetime) -> list[datetime]:
+    """The moments of a comma-separated list (`+1h, tomorrow 09:00`); `none` is an empty list."""
+    if text.strip().lower() in ("none", "off", "-"):
+        return []
+    moments = []
+    for part in text.split(","):
+        moment, rest = take_when(part.split(), now)
+        if rest:
+            raise ValueError(f"Unexpected after the time: {' '.join(rest)!r} (separate several times with commas).")
+        moments.append(moment)
+    return moments
 
 
 def local(moment: str) -> str:
@@ -315,6 +398,29 @@ def describe_reminder(reminder: dict) -> str:
     again = f" ({reminder['repeat']})" if reminder["repeat"] else ""
     where = f" @{','.join(reminder['targets'])}" if reminder.get("targets") else ""
     return f"[{reminder['id']}] {local(reminder['due_at'])}{again}{where}  {reminder['text']}"
+
+
+def describe_task(task: dict) -> str:
+    """One line: the number, title, deadline, reminders sent and the next reminder."""
+    parts = [f"[{task['id']}] {task['title']}"]
+    if task["status"] == "done":
+        parts.append("done")
+    if task.get("due_at"):
+        parts.append(f"due {local(task['due_at'])}")
+    sent = task["reminders_sent"]
+    parts.append(f"{sent} reminder{'s' if sent != 1 else ''} sent")
+    if task["status"] == "open":
+        parts.append(f"next reminder {local(task['next_reminder'])}" if task["next_reminder"] else "no reminder to come")
+    return "  ·  ".join(parts)
+
+
+def describe_task_detail(task: dict) -> str:
+    lines = [describe_task(task), f"Description: {task['description'] or '(none)'}"]
+    if len(task["reminders"]) > 1:
+        lines.append("Reminders to come: " + ", ".join(local(at) for at in task["reminders"]))
+    if task["targets"]:
+        lines.append("Shown on: " + ", ".join(task["targets"]))
+    return "\n".join(lines)
 
 
 def format_reminder(event: dict, now: datetime) -> str:
@@ -411,6 +517,58 @@ def chat(api: ClaraApi, message: str) -> None:
     print()
 
 
+def task_command(api: ClaraApi, name: str, argument: str) -> bool:
+    """/tasks and /task: the to-do list. Always True (stay)."""
+    now = datetime.now().astimezone()
+    word, _, rest = argument.partition(" ")
+    word, rest = word.lower(), rest.strip()
+    try:
+        if name == "/tasks":
+            status = word or "open"
+            if status not in ("open", "done", "all"):
+                raise ValueError("Usage: /tasks [all|done]")
+            print("\n".join(describe_task(t) for t in api.tasks(status)) or "(no task)")
+        elif word.isdigit() and not rest:
+            print(describe_task_detail(api.task(int(word))))
+        elif word == "add":
+            targets, rest = take_targets(rest)
+            title, description, due, reminders = parse_task(rest, now)
+            task = api.add_task(title, description, due, reminders, targets)
+            print("Task added.\n" + describe_task_detail(task))
+        elif word in ("done", "reopen", "delete") and rest.isdigit():
+            if word == "delete":
+                api.delete_task(int(rest))
+                print("Deleted.")
+            else:
+                print(describe_task(api.change_task(int(rest), status="done" if word == "done" else "open")))
+        elif word == "set":
+            number, _, rest = rest.partition(" ")
+            field, _, value = rest.strip().partition(" ")
+            field, value = field.lower(), value.strip()
+            if not number.isdigit() or field not in ("title", "description", "due", "remind") or not value:
+                raise ValueError("Usage: /task set <id> title|description|due|remind <value>")
+            if field == "due":
+                moments = parse_when_list(value, now)
+                change: dict = {"due": moments[0].isoformat(timespec="seconds") if moments else None}
+            elif field == "remind":
+                change = {"reminders": [m.isoformat(timespec="seconds") for m in parse_when_list(value, now)]}
+            else:
+                change = {field: value}
+            print(describe_task(api.change_task(int(number), **change)))
+        else:
+            print(HELP)
+    except ValueError as error:
+        print(error)
+    except httpx.HTTPStatusError as error:
+        if error.response.status_code not in (404, 422):
+            raise
+        try:
+            print(error.response.json()["detail"])
+        except (ValueError, KeyError, TypeError):
+            print(error.response.text)
+    return True
+
+
 def command(api: ClaraApi, line: str) -> bool:
     """Run a /command. False means: leave."""
     name, _, argument = line.partition(" ")
@@ -460,6 +618,8 @@ def command(api: ClaraApi, line: str) -> bool:
                 print(error)
                 return True
         print(describe_models(api.models()))
+    elif name in ("/tasks", "/task"):
+        return task_command(api, name, argument)
     elif name == "/reminders":
         print("\n".join(describe_reminder(r) for r in api.reminders()) or "(none)")
     elif name == "/unremind" and argument.isdigit():

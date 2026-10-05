@@ -24,6 +24,8 @@ from .notifications import CLARA, NotificationError, Notifier
 from .projects import READ_MAX_LINES, Projects
 from .qcm import MAX_OPTION, MAX_OPTIONS, MAX_QUESTION, MAX_QUESTIONS, MIN_OPTIONS, TYPES, build_form
 from .reminders import REPEATS, ReminderError, ReminderService
+from .tasks import NO_DUE, TaskError, TaskService, task_detail, task_line
+from .taskstore import DONE, OPEN, STATUSES
 from .web import WebClient, WebError
 
 log = logging.getLogger(__name__)
@@ -69,6 +71,7 @@ class ToolContext:
     project_id: int | None = None
     events: list[dict] = field(default_factory=list)  # for the client: the agent sends them after the tool call
     markdown: MarkdownFiles | None = None  # the person's markdown files, which the markdown tools write
+    tasks: TaskService | None = None  # the person's to-do list, which the task tools change
 
     @property
     def origin(self) -> tuple[str, str, str]:
@@ -261,6 +264,95 @@ def _cancel_reminder(context: ToolContext, reminder_id: Any) -> str:
     except (TypeError, ValueError):
         raise ValueError("reminder_id must be the number shown in brackets.") from None
     return "Cancelled." if context.reminders.cancel(context.person, number) else "No such reminder of yours."
+
+
+def _task_service(context: ToolContext) -> TaskService:
+    if context.tasks is None:
+        raise ValueError("Tasks are not available.")
+    return context.tasks
+
+
+def _texts(value: Any) -> list[str]:
+    """The model may send a list, a single text or a comma-separated one (times have no commas)."""
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    raise ValueError("reminders must be a list of local date-times, like 2026-10-05T09:00.")
+
+
+def _task_number(task_id: Any) -> int:
+    try:
+        return int(task_id)
+    except (TypeError, ValueError):
+        raise ValueError("task_id must be the number shown in brackets.") from None
+
+
+async def _add_task(
+    context: ToolContext, title: str, description: str = "", due: str = "", reminders: Any = None, targets: Any = None
+) -> str:
+    try:
+        task = await _task_service(context).create(
+            context.person, str(title), str(description or ""), str(due) if due else None, _texts(reminders),
+            context.timezone, context.origin, _targets(targets),
+        )
+    except TaskError as error:
+        raise ValueError(str(error)) from None
+    shown = f"\nReminders are shown{_where(context, task.targets)}." if task.targets else ""
+    return f"Task added.\n{task_detail(task)}{shown}"
+
+
+def _list_tasks(context: ToolContext, task_id: Any = None, status: str = OPEN) -> str:
+    tasks = _task_service(context)
+    try:
+        if task_id not in (None, ""):
+            return task_detail(tasks.get(context.person, _task_number(task_id)))
+        found = tasks.tasks(context.person, None if status == "all" else status)
+    except TaskError as error:
+        raise ValueError(str(error)) from None
+    if not found:
+        return "No task." if status == "all" else f"No {status} task."
+    return "\n".join(task_line(task) for task in found)
+
+
+async def _update_task(
+    context: ToolContext,
+    task_id: Any,
+    title: Any = None,
+    description: Any = None,
+    due: Any = NO_DUE,
+    reminders: Any = None,
+    status: Any = None,
+) -> str:
+    tasks = _task_service(context)
+    number = _task_number(task_id)
+    if status not in (None, *STATUSES):
+        raise ValueError("status must be open or done.")
+    try:
+        was_open = tasks.get(context.person, number).status == OPEN
+        times = None if reminders is None else _texts(reminders)
+        if status == DONE and times:
+            raise TaskError("A task that is done is not reminded: reopen it to set reminders.")
+        settling = status is not None and (status == OPEN) != was_open
+        if any(v is not None for v in (title, description, times)) and not (settling and times) or due is not NO_DUE:
+            tasks.update(
+                context.person, number, None if title is None else str(title),
+                None if description is None else str(description), due if due is NO_DUE or not due else str(due),
+                None if settling else times, None, context.timezone,
+            )
+        if settling and status == DONE:
+            tasks.complete(context.person, number)
+        elif settling:
+            await tasks.reopen(context.person, number, times, context.timezone)
+        return f"Task updated.\n{task_detail(tasks.get(context.person, number))}"
+    except TaskError as error:
+        raise ValueError(str(error)) from None
+
+
+def _delete_task(context: ToolContext, task_id: Any) -> str:
+    return "Deleted." if _task_service(context).delete(context.person, _task_number(task_id)) else "No such task of yours."
 
 
 def _adjust_relation(context: ToolContext, change: Any, reason: str = "") -> str:
@@ -640,6 +732,57 @@ def default_toolbox(web: WebClient | None = None) -> Toolbox:
                 function=_cancel_reminder,
                 parameters={"reminder_id": {"type": "integer", "description": "Id of the reminder."}},
                 required=("reminder_id",),
+            ),
+            Tool(
+                name="add_task",
+                description=(
+                    "Add a task to the person's to-do list, with reminders: the times they gave, else sensible ones you "
+                    "choose (a day before and at a deadline, a morning for a chore); tell them when."
+                ),
+                function=_add_task,
+                parameters={
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "due": {"type": "string", "description": "Deadline, local ISO 8601 without offset: 2026-10-05T18:00."},
+                    "reminders": {"type": "array", "items": {"type": "string"}, "description": "Local ISO 8601, no offset."},
+                    "targets": {"type": "array", "items": {"type": "string"}, "description": "Surfaces to remind on; omit: all."},
+                },
+                required=("title",),
+            ),
+            Tool(
+                name="list_tasks",
+                description=(
+                    "The person's tasks with reminders sent and next reminder; with task_id, one in full."
+                ),
+                function=_list_tasks,
+                parameters={
+                    "task_id": {"type": "integer"},
+                    "status": {"type": "string", "enum": [*STATUSES, "all"], "description": "Default: open."},
+                },
+            ),
+            Tool(
+                name="update_task",
+                description=(
+                    "Change a task; only what you give changes. `reminders` replaces those to come ([] stops them), "
+                    "`due` the deadline (empty: none); status done ends the reminders."
+                ),
+                function=_update_task,
+                parameters={
+                    "task_id": {"type": "integer"},
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "due": {"type": "string", "description": "Local ISO 8601, no offset."},
+                    "reminders": {"type": "array", "items": {"type": "string"}, "description": "Local ISO 8601, no offset."},
+                    "status": {"type": "string", "enum": list(STATUSES)},
+                },
+                required=("task_id",),
+            ),
+            Tool(
+                name="delete_task",
+                description="Delete a task for good (to finish one, set its status to done).",
+                function=_delete_task,
+                parameters={"task_id": {"type": "integer"}},
+                required=("task_id",),
             ),
             Tool(
                 name=QCM,

@@ -1,4 +1,4 @@
-// Clara's web site: sign in, then a chat, projects, what Clara remembers, your account, and (for administrators)
+// Clara's web site: sign in, then a chat, your tasks, projects, what Clara remembers, your account, and (for administrators)
 // the administration. Everything talks to the same HTTP API as the other clients, as the surface "web".
 
 import { mountAccount, mountMemory } from "./account.js";
@@ -9,6 +9,7 @@ import { mountDiscord } from "./discord.js";
 import { mountFiles } from "./files.js";
 import { icon, mark } from "./icons.js";
 import { mountProjects } from "./projects.js";
+import { mountTasks } from "./tasks.js";
 import { avatar, clear, h, toast, toggleRail } from "./ui.js";
 
 const app = document.getElementById("app");
@@ -141,7 +142,7 @@ events.addEventListener("signed-out", () => { if (user) showLogin("Your session 
 
 // ---- the shell and the pages -----------------------------------------------------------------------------
 
-const PAGES = { chat: ["Chat", "chat"], projects: ["Projects", "folder"], files: ["Files", "file"], memory: ["Memory", "memory"], account: ["Account", "user"], discord: ["Discord", "bot"], admin: ["Admin", "admin"] };
+const PAGES = { chat: ["Chat", "chat"], tasks: ["Tasks", "tasks"], projects: ["Projects", "folder"], files: ["Files", "file"], memory: ["Memory", "memory"], account: ["Account", "user"], discord: ["Discord", "bot"], admin: ["Admin", "admin"] };
 const ADMIN_PAGES = new Set(["discord", "admin"]);
 
 function shell() {
@@ -230,6 +231,7 @@ function route() {
   const openId = name === "chat" && sub === "open" && arg ? decodeURIComponent(arg) : null;
   if (name === "chat" && sub) history.replaceState(null, "", "#/chat"); // no hashchange: nothing is drawn twice
   page = name === "chat" ? mountChat(body, user, { slot, fresh, project, open: openId })
+    : name === "tasks" ? mountTasks(body, user)
     : name === "projects" ? mountProjects(body, user, sub)
     : name === "files" ? mountFiles(body, user)
     : name === "memory" ? mountMemory(body, user)
