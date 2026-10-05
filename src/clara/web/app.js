@@ -7,6 +7,7 @@ import { ApiError, api, events } from "./api.js";
 import { mountChat } from "./chat.js";
 import { mountDiscord } from "./discord.js";
 import { mountFiles } from "./files.js";
+import { mountHistory } from "./history.js";
 import { icon, mark } from "./icons.js";
 import { mountProjects } from "./projects.js";
 import { mountTasks } from "./tasks.js";
@@ -17,6 +18,7 @@ let user = null; // who is signed in: the answer of /v1/auth/me
 let page = null; // what is mounted: {destroy, newChat?}
 let pageName = "";
 let healthTimer = null;
+let railHistory = null; // the list of conversations on the work pages other than the chat
 let wantNewChat = false;
 
 // ---- signing in ----------------------------------------------------------------------------------------
@@ -195,6 +197,8 @@ function stop() {
   healthTimer = null;
   page?.destroy();
   page = null;
+  railHistory?.destroy();
+  railHistory = null;
   pageName = "";
   toggleRail(false);
 }
@@ -218,8 +222,11 @@ function route() {
   if (!body) return;
   toggleRail(false);
   page?.destroy();
+  railHistory?.destroy();
+  railHistory = null;
   clear(body);
   clear(slot);
+  if (WORK_PAGES.includes(name) && name !== "chat") railHistory = mountHistory(slot, user); // the chat page draws its own
   pageName = name;
   document.title = name === "chat" ? "Clara" : `${PAGES[name][0]} – Clara`;
   const fresh = wantNewChat || (name === "chat" && sub === "new");

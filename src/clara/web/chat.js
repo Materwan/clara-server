@@ -1,15 +1,16 @@
 // The chat page: conversations in the navigation rail, the conversation, documents, the context meter. The
-// conversations of projects are not in the rail (they are on their project's page) unless a search finds them.
+// conversations of projects are grouped under their project's name in the rail.
 
 import { ApiError, api, conversationPath, streamChat } from "./api.js";
 import { DocumentError, MAX_TOTAL_CHARS, compose, readDocument, splitMessage, totalChars } from "./documents.js";
 import { icon, mark, ring } from "./icons.js";
 import { renderMarkdown } from "./markdown.js";
 import { fileCard } from "./files.js";
+import { labelOf, renderGroups } from "./history.js";
 import { chooseModel, costText, loadModels, modelSelect } from "./models.js";
 import { displayAnswers, qcmNode } from "./qcm.js";
 import { chooseProject, listProjects } from "./projects.js";
-import { clear, confirmDialog, h, pageHead, parseDate, popupMenu, promptDialog, randomId, toast, toggleRail } from "./ui.js";
+import { clear, confirmDialog, h, pageHead, popupMenu, promptDialog, randomId, toast, toggleRail } from "./ui.js";
 
 const SURFACE = "web";
 const INSTRUCTIONS =
@@ -136,47 +137,7 @@ export function mountChat(container, user, { slot, fresh = false, project = null
     } catch { /* the chips just show no name */ }
   }
 
-  function groupOf(info) {
-    if (info.pinned) return "Pinned";
-    const date = parseDate(info.updated_at);
-    if (!date) return "Older";
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const days = Math.floor((today - new Date(date.getFullYear(), date.getMonth(), date.getDate())) / 86400000);
-    return days <= 0 ? "Today" : days === 1 ? "Yesterday" : days < 7 ? "Previous 7 days" : "Older";
-  }
-
-  const labelOf = (info) => info.title || (info.preview ? splitMessage(info.preview).text || info.preview : "") || "New chat";
-
-  function renderList() {
-    clear(listBox);
-    if (!state.list.length) {
-      listBox.append(h("p", { class: "empty-note" }, state.query ? "No conversation matches." : "Your conversations will appear here."));
-      return;
-    }
-    // the date groups hold what is pinned and what belongs to no project; each project then has a group of its own
-    const order = ["Pinned", "Today", "Yesterday", "Previous 7 days", "Older"];
-    const groups = new Map(order.map((name) => [name, []]));
-    const byProject = new Map();
-    for (const info of state.list) {
-      if (info.project && !info.pinned) {
-        if (!byProject.has(info.project)) byProject.set(info.project, []);
-        byProject.get(info.project).push(info);
-      } else groups.get(groupOf(info)).push(info);
-    }
-    for (const [name, items] of groups) {
-      if (!items.length) continue;
-      listBox.append(h("div", { class: "group-title" }, name));
-      for (const info of items) listBox.append(convoRow(info));
-    }
-    const newest = (items) => Math.max(...items.map((info) => parseDate(info.updated_at)?.getTime() || 0));
-    for (const [id, items] of [...byProject].sort((a, b) => newest(b[1]) - newest(a[1]))) {
-      items.sort((a, b) => (parseDate(b.updated_at)?.getTime() || 0) - (parseDate(a.updated_at)?.getTime() || 0));
-      listBox.append(h("a", { class: "group-title project-title", href: `#/projects/${id}`, title: "Open the project" },
-        icon("folder", { size: 14 }), h("span", {}, state.projects.get(id) || "Project")));
-      for (const info of items) listBox.append(convoRow(info, true));
-    }
-  }
+  const renderList = () => renderGroups(listBox, state.list, state.projects, convoRow, state.query);
 
   function actionsFor(info) {
     return [
