@@ -146,14 +146,17 @@ events.addEventListener("signed-out", () => { if (user) showLogin("Your session 
 
 // ---- the shell and the pages -----------------------------------------------------------------------------
 
-const PAGES = { chat: ["Chat", "chat"], tasks: ["Tasks", "tasks"], projects: ["Projects", "folder"], files: ["Files", "file"], memory: ["Memory", "memory"], account: ["Account", "user"], discord: ["Discord", "bot"], admin: ["Admin", "admin"] };
+const PAGES = { chat: ["Chat", "chat"], projects: ["Projects", "folder"], tasks: ["Tasks", "tasks"], files: ["Files", "file"], memory: ["Memory", "memory"], account: ["Account", "user"], discord: ["Discord", "bot"], admin: ["Admin", "admin"] };
+const WORK_PAGES = ["chat", "projects", "tasks", "files"]; // what you do with Clara; the rest is set up below, in the rail
 const ADMIN_PAGES = new Set(["discord", "admin"]);
 
 function shell() {
   const status = h("div", { class: "status", title: "Server status" }, h("span", { class: "dot" }), h("span", { class: "text" }, "Checking…"));
-  const pages = h("nav", { class: "pages", "aria-label": "Pages" },
-    Object.entries(PAGES).filter(([id]) => !ADMIN_PAGES.has(id) || user.is_admin).map(([id, [label, glyph]]) =>
-      h("a", { href: `#/${id}`, "data-page": id }, icon(glyph, { size: 19 }), label)));
+  const links = (ids) => ids.filter((id) => !ADMIN_PAGES.has(id) || user.is_admin).map((id) =>
+    h("a", { href: `#/${id}`, "data-page": id }, icon(PAGES[id][1], { size: 19 }), PAGES[id][0]));
+  const pages = h("nav", { class: "pages", "aria-label": "Pages" }, links(WORK_PAGES));
+  const settings = h("nav", { class: "pages settings-nav", "aria-label": "Settings" },
+    links(Object.keys(PAGES).filter((id) => !WORK_PAGES.includes(id))));
   const displayName = user.person?.name || user.name;
   const rail = h("aside", { class: "rail", id: "rail", "aria-label": "Navigation" },
     h("div", { class: "rail-head" },
@@ -162,6 +165,7 @@ function shell() {
     h("button", { class: "primary new-chat", onclick: newChat }, icon("plus", { size: 18 }), "New chat"),
     pages,
     h("div", { class: "rail-slot", id: "rail-slot" }),
+    settings,
     h("div", { class: "rail-foot" },
       themeSwitch(),
       h("div", { class: "me" },

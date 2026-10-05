@@ -71,24 +71,17 @@ export function icon(name, { size = 20, label = "", className = "" } = {}) {
   return svg;
 }
 
-/** Clara's mark: a ring open to the right (the C) and the signal at its centre. It takes the colour of the text around it. */
+/** Clara's mark: her portrait (`clara.png`, a round picture with a violet ring), `size` pixels wide. */
 export function mark(size = 28, className = "") {
-  const svg = document.createElementNS(NS, "svg");
-  svg.setAttribute("viewBox", "0 0 32 32");
-  svg.setAttribute("width", size);
-  svg.setAttribute("height", size);
-  svg.setAttribute("class", ("mark " + className).trim());
-  svg.setAttribute("aria-hidden", "true");
-  const ring = document.createElementNS(NS, "path");
-  ring.setAttribute("d", "M25.2 9.1A11.5 11.5 0 1 0 25.2 22.9");
-  ring.setAttribute("class", "ring-c");
-  const dot = document.createElementNS(NS, "circle");
-  dot.setAttribute("cx", 16);
-  dot.setAttribute("cy", 16);
-  dot.setAttribute("r", 3.6);
-  dot.setAttribute("class", "dot");
-  svg.append(ring, dot);
-  return svg;
+  const picture = document.createElement("img");
+  picture.src = "/clara.png";
+  picture.alt = "";
+  picture.width = size;
+  picture.height = size;
+  picture.decoding = "async";
+  picture.className = ("mark " + className).trim();
+  picture.setAttribute("aria-hidden", "true");
+  return picture;
 }
 
 /** A ring that fills up to `percent` (the context meter). */

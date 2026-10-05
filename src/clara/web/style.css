@@ -1,5 +1,5 @@
 /* Clara's web site. Cyanotype: the page is the print (cool chalk, Prussian-blue ink), the rail is the negative (Prussian
-   blue in both themes), and one persimmon signal marks what is live or what you act on.
+   blue in both themes), and one violet signal (the ring of Clara's portrait) marks what is live or what you act on.
    Themes: the system's choice by default; <html data-theme="light|dark"> forces one (see theme.js). */
 
 /* ---- fonts (served by Clara itself: the page loads nothing from elsewhere) --------------------------- */
@@ -52,11 +52,11 @@
   --primary: #10294a;
   --primary-hover: #1d3f6b;
   --primary-ink: #eceFea;
-  --accent: #e4572e; /* the signal: what is live, what is sent */
-  --accent-hover: #d44a22;
-  --accent-ink: #1b0a04;
-  --accent-text: #b2310f;
-  --accent-soft: #f6dcd2;
+  --accent: #a987f1; /* the signal, the violet of Clara's ring: what is live, what is sent */
+  --accent-hover: #9a74ea;
+  --accent-ink: #1a1033;
+  --accent-text: #5a3bc4;
+  --accent-soft: #e6defa;
   --select: rgba(16, 41, 74, 0.09);
   --ok: #2f6b4b;
   --ok-soft: #dcece3;
@@ -73,7 +73,7 @@
   --rail-bg: #0d2036;
   --rail-text: #e3eae8;
   --rail-muted: #8fa6b8;
-  --rail-signal: #ff7b52;
+  --rail-signal: #b79bf5;
   --rail-ok: #7cc49c;
 
   --font: "Hanken Grotesk", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -108,11 +108,11 @@
     --primary: #e6edea;
     --primary-hover: #ffffff;
     --primary-ink: #0a1a2b;
-    --accent: #ff7b52;
-    --accent-hover: #ff8f6c;
-    --accent-ink: #1b0a04;
-    --accent-text: #ff9a78;
-    --accent-soft: #3b2a29;
+    --accent: #a987f1;
+    --accent-hover: #b99bf5;
+    --accent-ink: #1a1033;
+    --accent-text: #c3a8ff;
+    --accent-soft: #2b2350;
     --select: rgba(230, 237, 234, 0.1);
     --ok: #7cc49c;
     --ok-soft: #173627;
@@ -142,11 +142,11 @@
   --primary: #e6edea;
   --primary-hover: #ffffff;
   --primary-ink: #0a1a2b;
-  --accent: #ff7b52;
-  --accent-hover: #ff8f6c;
-  --accent-ink: #1b0a04;
-  --accent-text: #ff9a78;
-  --accent-soft: #3b2a29;
+  --accent: #a987f1;
+  --accent-hover: #b99bf5;
+  --accent-ink: #1a1033;
+  --accent-text: #c3a8ff;
+  --accent-soft: #2b2350;
   --select: rgba(230, 237, 234, 0.1);
   --ok: #7cc49c;
   --ok-soft: #173627;
@@ -270,7 +270,6 @@ button.sm { padding: .32rem .65rem; font-size: .85rem; border-radius: var(--r-sm
     linear-gradient(90deg, rgba(143, 166, 184, .12) 1px, transparent 1px);
   background-size: 32px 32px;
 }
-.login-art .mark { color: var(--rail-text); }
 .login-art .wordmark { font-family: var(--font-display); font-weight: 600; font-size: 1.6rem; letter-spacing: -0.03em; }
 .login-art .tagline { display: none; }
 .login { width: min(400px, 100%); position: relative; padding: 1.75rem 1.25rem calc(1.75rem + var(--safe-b)); margin: 0 auto; }
@@ -289,10 +288,8 @@ button.sm { padding: .32rem .65rem; font-size: .85rem; border-radius: var(--r-sm
   .login { align-self: center; padding: 3rem 2rem; width: min(420px, 100%); }
 }
 
-/* the mark: a ring open to the right (the C), and the signal at its centre */
-.mark .ring-c { fill: none; stroke: currentColor; stroke-width: 3.6; stroke-linecap: round; }
-.mark .dot { fill: var(--accent); }
-.login-art .mark .dot, .rail .mark .dot { fill: var(--rail-signal); }
+/* the mark: Clara's portrait, a round picture with its own violet ring */
+.mark { display: block; flex: none; border-radius: 50%; object-fit: cover; }
 
 /* ---- the shell: a rail on the left, the page beside it ------------------------------------------------ */
 .shell { height: 100dvh; display: grid; grid-template-columns: var(--rail-w) minmax(0, 1fr); }
@@ -305,7 +302,7 @@ button.sm { padding: .32rem .65rem; font-size: .85rem; border-radius: var(--r-sm
   background: var(--rail-bg); color: var(--rail-text); display: flex; flex-direction: column;
   min-height: 0; padding: .9rem .75rem 0;
 }
-.rail ::selection { background: rgba(255, 123, 82, .35); }
+.rail ::selection { background: rgba(183, 155, 245, .4); }
 .rail-head { display: flex; align-items: center; gap: .5rem; padding: .2rem .4rem 1rem; }
 .brand { display: flex; align-items: center; gap: .6rem; text-decoration: none; color: var(--rail-text); font-family: var(--font-display); font-weight: 600; font-size: 1.35rem; letter-spacing: -0.03em; }
 .brand:hover { text-decoration: none; }
@@ -322,6 +319,9 @@ button.sm { padding: .32rem .65rem; font-size: .85rem; border-radius: var(--r-sm
 .pages a.active { color: var(--text); background: var(--hover); font-weight: 650; }
 .pages a.active::before { content: ""; position: absolute; left: -.75rem; top: .45rem; bottom: .45rem; width: 3px; border-radius: 0 3px 3px 0; background: var(--rail-signal); }
 .pages a.active .icon { color: var(--rail-signal); }
+.settings-nav { margin: .25rem 0 .5rem; padding-top: .6rem; border-top: 1px solid var(--line); }
+.settings-nav a { padding-top: .38rem; padding-bottom: .38rem; font-size: .9rem; }
+.rail-slot:empty { border-top: none; }
 .rail-slot { flex: 1; min-height: 0; display: flex; flex-direction: column; border-top: 1px solid var(--line); margin: 0 -.75rem; padding: .75rem .75rem 0; }
 .rail-foot { border-top: 1px solid var(--line); margin: 0 -.75rem; padding: .7rem .75rem calc(.8rem + var(--safe-b)); display: flex; flex-direction: column; gap: .6rem; }
 .me { display: flex; align-items: center; gap: .65rem; padding: .25rem .3rem; }
@@ -338,7 +338,7 @@ button.sm { padding: .32rem .65rem; font-size: .85rem; border-radius: var(--r-sm
 .dot { width: .5rem; height: .5rem; border-radius: 50%; background: var(--muted); display: inline-block; flex: none; }
 .dot.up { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent); }
 .dot.down { background: var(--danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 25%, transparent); }
-.rail .dot.down { background: var(--rail-signal); box-shadow: 0 0 0 3px rgba(255, 123, 82, .25); }
+.rail .dot.down { background: var(--danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 25%, transparent); }
 
 /* the theme switch: three choices in a row */
 .theme-switch { display: grid; grid-template-columns: repeat(3, 1fr); background: var(--hover); border-radius: var(--r); padding: 3px; gap: 2px; }
@@ -427,10 +427,10 @@ button.sm { padding: .32rem .65rem; font-size: .85rem; border-radius: var(--r-sm
 .msg.user .body { font-size: 1rem; color: var(--text-2); }
 .msg.user .bubble { white-space: pre-wrap; overflow-wrap: anywhere; padding-top: .1rem; }
 .msg.assistant .body { font-size: 1.0625rem; line-height: 1.68; color: var(--text); }
-.msg.assistant.live .speaker .mark .dot { animation: thinking 1.2s ease-in-out infinite; transform-origin: 16px 16px; }
+.msg.assistant.live .speaker .mark { animation: thinking 1.2s ease-in-out infinite; }
 .msg.live { animation: develop .7s ease-out both; }
 @keyframes develop { from { opacity: 0; filter: blur(3px); } to { opacity: 1; filter: none; } }
-@keyframes thinking { 0%, 100% { transform: scale(.7); opacity: .6; } 50% { transform: scale(1.35); opacity: 1; } }
+@keyframes thinking { 0%, 100% { transform: scale(.88); opacity: .65; } 50% { transform: scale(1); opacity: 1; } }
 .msg .failed-note {
   display: flex; gap: .5rem; align-items: flex-start; margin-top: .5rem; padding: .55rem .8rem; border-radius: var(--r-xs);
   background: var(--danger-soft); color: var(--danger); font-size: .92rem;
@@ -455,7 +455,7 @@ button.sm { padding: .32rem .65rem; font-size: .85rem; border-radius: var(--r-sm
 .summary strong { color: var(--text); }
 
 .welcome { margin: auto 0; padding: 10vh 0 2rem calc(var(--gutter) + 1rem); max-width: calc(var(--gutter) + var(--measure) + 1rem); display: flex; flex-direction: column; align-items: flex-start; }
-.welcome .halo { margin: 0 0 1.5rem -.2rem; color: var(--text); }
+.welcome .halo { margin: 0 0 1.5rem; }
 .welcome h1 { font-size: clamp(2.2rem, 5.5vw, 3.6rem); line-height: 1; letter-spacing: -0.045em; margin-bottom: .6rem; }
 .welcome p { color: var(--muted); font-size: 1.1rem; max-width: 36ch; }
 
@@ -553,7 +553,7 @@ button.sm { padding: .32rem .65rem; font-size: .85rem; border-radius: var(--r-sm
 .count { color: var(--muted); font-size: .88rem; font-variant-numeric: tabular-nums; }
 
 .empty-state { text-align: center; padding: 2.5rem 1.5rem; color: var(--muted); }
-.empty-state .mark { margin-bottom: .8rem; color: var(--text-2); }
+.empty-state .mark { margin: 0 auto .8rem; }
 .empty-state strong { display: block; color: var(--text); font-family: var(--font-display); letter-spacing: -0.02em; font-size: 1.1rem; margin-bottom: .25rem; }
 
 /* account */
@@ -622,11 +622,11 @@ table.grid td.end { text-align: right; width: 1%; }
   background: #06111d; color: #dbe5e6; border-radius: var(--r); overflow: hidden; border: 1px solid #1c3249;
 }
 .console-out { padding: 1rem 1.1rem; height: min(52vh, 460px); overflow: auto; white-space: pre-wrap; font-family: var(--font-mono); font-size: .86rem; line-height: 1.55; }
-.console-out .cmd { color: #ff9a78; }
+.console-out .cmd { color: #c3a8ff; }
 .console-out .err { color: #ff8f7c; }
 .console-out .note { color: #8ea4b3; }
 .console form { display: flex; gap: .5rem; padding: .6rem; border-top: 1px solid #1c3249; background: #0a1a2b; align-items: center; }
-.console form .prompt { color: #ff9a78; font-family: var(--font-mono); padding-left: .5rem; }
+.console form .prompt { color: #c3a8ff; font-family: var(--font-mono); padding-left: .5rem; }
 .console input { flex: 1; background: transparent; border: none; color: #e6edea; font-family: var(--font-mono); font-size: .92rem; box-shadow: none; }
 .console input:focus { box-shadow: none; }
 .console button.primary { padding: .45rem .9rem; background: #e6edea; color: #0a1a2b; border-color: transparent; }
