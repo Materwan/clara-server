@@ -10,7 +10,7 @@ const surfaceOrder = (surfaces) => [...surfaces].sort((a, b) => {
   const rank = (name) => (known.includes(name) ? known.indexOf(name) : known.length);
   return rank(a) - rank(b) || a.localeCompare(b);
 });
-import { ago, avatar, clear, confirmDialog, dateTime, h, icon, pageHead, secretDialog, toast, tokenCount, usageBar } from "./ui.js";
+import { ago, avatar, clear, confirmDialog, dateTime, h, icon, pageHead, secretDialog, themeSwitch, toast, tokenCount, usageBar } from "./ui.js";
 
 const who = (user) => ({ surface: "web", user_id: user.name });
 
@@ -120,6 +120,7 @@ export function mountAccount(container, user, onSignOut) {
     clear(page);
     page.append(
       profileCard(me),
+      appearanceCard(),
       usageCard(me),
       modelsCard(me, models),
       notifyCard(me, prefs),
@@ -203,6 +204,13 @@ export function mountAccount(container, user, onSignOut) {
       } },
       h("div", { class: "form-grid" }, h("label", { class: "field" }, "Notify me when a task is done", mode), row),
       h("div", {}, h("button", { class: "primary", type: "submit" }, "Save"))));
+  }
+
+  function appearanceCard() {
+    const switcher = themeSwitch();
+    return h("section", { class: "panel" },
+      h("div", { class: "panel-head" }, h("div", {}, h("h3", {}, "Appearance"), h("p", { class: "muted small" }, "Light, dark, or the system's choice. Remembered in this browser."))),
+      switcher && h("div", { class: "panel-body" }, switcher));
   }
 
   function passwordCard() {

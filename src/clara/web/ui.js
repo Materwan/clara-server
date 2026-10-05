@@ -152,6 +152,24 @@ export function avatar(name, extra = "") {
   return h("span", { class: ("avatar " + extra).trim(), "aria-hidden": "true" }, (name || "?").trim().charAt(0) || "?");
 }
 
+// ---- the theme switch --------------------------------------------------------------------------------------
+
+const THEMES = [["auto", "Auto", "auto"], ["light", "Light", "sun"], ["dark", "Dark", "moon"]];
+
+/** Auto / Light / Dark, remembered in this browser (theme.js); null when theme.js did not load. */
+export function themeSwitch() {
+  const theme = window.claraTheme;
+  if (!theme) return null; // the system's colours apply
+  const box = h("div", { class: "theme-switch", role: "group", "aria-label": "Colour theme" });
+  const draw = () => clear(box).append(...THEMES.map(([id, label, glyph]) =>
+    h("button", { type: "button", "aria-pressed": String(theme.get() === id), title: id === "auto" ? "Follow the system" : `${label} theme`,
+      onclick: () => { theme.set(id); for (const other of document.querySelectorAll(".theme-switch")) other.redraw?.(); } },
+    icon(glyph, { size: 16 }), label)));
+  box.redraw = draw;
+  draw();
+  return box;
+}
+
 // ---- dates -----------------------------------------------------------------------------------------------
 
 export function parseDate(text) {

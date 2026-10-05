@@ -149,19 +149,31 @@ export function mountChat(container, user, { slot, fresh = false, project = null
 
   function renderList() {
     clear(listBox);
-    // the conversations of projects are listed on their project's page; a search finds them here too
-    const shown = state.query ? state.list : state.list.filter((info) => !info.project);
-    if (!shown.length) {
+    if (!state.list.length) {
       listBox.append(h("p", { class: "empty-note" }, state.query ? "No conversation matches." : "Your conversations will appear here."));
       return;
     }
+    // the date groups hold what is pinned and what belongs to no project; each project then has a group of its own
     const order = ["Pinned", "Today", "Yesterday", "Previous 7 days", "Older"];
     const groups = new Map(order.map((name) => [name, []]));
-    for (const info of shown) groups.get(groupOf(info)).push(info);
+    const byProject = new Map();
+    for (const info of state.list) {
+      if (info.project && !info.pinned) {
+        if (!byProject.has(info.project)) byProject.set(info.project, []);
+        byProject.get(info.project).push(info);
+      } else groups.get(groupOf(info)).push(info);
+    }
     for (const [name, items] of groups) {
       if (!items.length) continue;
       listBox.append(h("div", { class: "group-title" }, name));
       for (const info of items) listBox.append(convoRow(info));
+    }
+    const newest = (items) => Math.max(...items.map((info) => parseDate(info.updated_at)?.getTime() || 0));
+    for (const [id, items] of [...byProject].sort((a, b) => newest(b[1]) - newest(a[1]))) {
+      items.sort((a, b) => (parseDate(b.updated_at)?.getTime() || 0) - (parseDate(a.updated_at)?.getTime() || 0));
+      listBox.append(h("a", { class: "group-title project-title", href: `#/projects/${id}`, title: "Open the project" },
+        icon("folder", { size: 14 }), h("span", {}, state.projects.get(id) || "Project")));
+      for (const info of items) listBox.append(convoRow(info, true));
     }
   }
 
@@ -175,7 +187,7 @@ export function mountChat(container, user, { slot, fresh = false, project = null
     ];
   }
 
-  function convoRow(info) {
+  function convoRow(info, inProject = false) {
     const label = labelOf(info);
     const more = h("button", { class: "ghost icon-btn more", "aria-label": `Actions for ${label}`, title: "More",
       onclick: (event) => { event.stopPropagation(); popupMenu(more, actionsFor(info)); } }, icon("more", { size: 18 }));
@@ -185,7 +197,7 @@ export function mountChat(container, user, { slot, fresh = false, project = null
       onclick: () => { open(info.id); toggleRail(false); },
       onkeydown: (event) => { if (event.key === "Enter" && event.target === event.currentTarget) { open(info.id); toggleRail(false); } },
     }, info.pinned && h("span", { class: "pin", title: "Pinned" }, icon("pin", { size: 15 })), h("span", { class: "title", title: label }, label),
-    info.project && h("span", { class: "convo-project", title: `In the project ${state.projects.get(info.project) || ""}` }, icon("folder", { size: 14 })),
+    info.project && !inProject && h("span", { class: "convo-project", title: `In the project ${state.projects.get(info.project) || ""}` }, icon("folder", { size: 14 })),
     more);
   }
 
@@ -343,15 +355,14 @@ export function mountChat(container, user, { slot, fresh = false, project = null
       h("div", { class: "text" }, message.content ? renderMarkdown(message.content) : null),
       h("div", { class: "cards" }, cardsOf(message)),
       message.failed && h("div", { class: "failed-note", role: "alert" }, icon("bolt", { size: 17 }), h("span", {}, message.failed)));
-    return h("div", { class: "msg assistant" + (message.failed ? " failed" : "") },
-      h("div", { class: "speaker" }, mark(16), h("span", {}, "Clara")), body,
-      h("div", { class: "notes", "aria-label": "What Clara used" }, (message.notes || []).map(noteNode)));
+    body.append(h("div", { class: "notes", "aria-label": "What Clara used" }, (message.notes || []).map(noteNode)));
+    return h("div", { class: "msg assistant" + (message.failed ? " failed" : "") }, h("div", { class: "who" }, mark(30)), body);
   }
 
   function messageNode(message) {
     if (message.role === "user") {
       const { text, names } = splitMessage(displayAnswers(message.content));
-      return h("div", { class: "msg user" }, h("div", { class: "speaker" }, h("span", { title: displayName }, displayName)), h("div", { class: "body" },
+      return h("div", { class: "msg user" }, h("div", { class: "body" },
         text && h("div", { class: "bubble" }, text),
         names.length > 0 && h("div", { class: "chips" }, names.map((name) => h("span", { class: "chip" }, icon("file", { size: 15 }), h("span", { class: "name" }, name))))));
     }
@@ -587,6 +598,7 @@ export function mountChat(container, user, { slot, fresh = false, project = null
   loadModelPicker();
   (async () => {
     await Promise.all([loadList(), loadProjects()]);
+    renderList(); // the project groups are named by the projects, which may have come after the list
     if (fresh) return newChat(project);
     if (openId) return open(openId);
     let last = null;

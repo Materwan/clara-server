@@ -10,7 +10,7 @@ import { mountFiles } from "./files.js";
 import { icon, mark } from "./icons.js";
 import { mountProjects } from "./projects.js";
 import { mountTasks } from "./tasks.js";
-import { avatar, clear, h, toast, toggleRail } from "./ui.js";
+import { avatar, clear, h, themeSwitch, toast, toggleRail } from "./ui.js";
 
 const app = document.getElementById("app");
 let user = null; // who is signed in: the answer of /v1/auth/me
@@ -18,23 +18,6 @@ let page = null; // what is mounted: {destroy, newChat?}
 let pageName = "";
 let healthTimer = null;
 let wantNewChat = false;
-
-// ---- the theme switch --------------------------------------------------------------------------------------
-
-const THEMES = [["auto", "Auto", "auto"], ["light", "Light", "sun"], ["dark", "Dark", "moon"]];
-
-function themeSwitch() {
-  const theme = window.claraTheme;
-  if (!theme) return null; // theme.js did not load: the system's colours apply
-  const box = h("div", { class: "theme-switch", role: "group", "aria-label": "Colour theme" });
-  const draw = () => clear(box).append(...THEMES.map(([id, label, glyph]) =>
-    h("button", { type: "button", "aria-pressed": String(theme.get() === id), title: id === "auto" ? "Follow the system" : `${label} theme`,
-      onclick: () => { theme.set(id); for (const other of document.querySelectorAll(".theme-switch")) other.redraw?.(); } },
-    icon(glyph, { size: 16 }), label)));
-  box.redraw = draw;
-  draw();
-  return box;
-}
 
 // ---- signing in ----------------------------------------------------------------------------------------
 
@@ -147,16 +130,21 @@ events.addEventListener("signed-out", () => { if (user) showLogin("Your session 
 // ---- the shell and the pages -----------------------------------------------------------------------------
 
 const PAGES = { chat: ["Chat", "chat"], projects: ["Projects", "folder"], tasks: ["Tasks", "tasks"], files: ["Files", "file"], memory: ["Memory", "memory"], account: ["Account", "user"], discord: ["Discord", "bot"], admin: ["Admin", "admin"] };
-const WORK_PAGES = ["chat", "projects", "tasks", "files"]; // what you do with Clara; the rest is set up below, in the rail
+const WORK_PAGES = ["chat", "projects", "tasks", "files"]; // what you do with Clara: the links of the rail
+const SETTINGS_PAGES = ["memory", "account", "discord", "admin"]; // reached by your avatar, they share a bar at the top
 const ADMIN_PAGES = new Set(["discord", "admin"]);
+
+/** The bar at the top of the settings pages. */
+function settingsBar(current) {
+  return h("nav", { class: "settings-bar", "aria-label": "Settings" },
+    SETTINGS_PAGES.filter((id) => !ADMIN_PAGES.has(id) || user.is_admin).map((id) =>
+      h("a", { href: `#/${id}`, "aria-current": id === current ? "page" : null }, icon(PAGES[id][1], { size: 17 }), PAGES[id][0])));
+}
 
 function shell() {
   const status = h("div", { class: "status", title: "Server status" }, h("span", { class: "dot" }), h("span", { class: "text" }, "Checking…"));
-  const links = (ids) => ids.filter((id) => !ADMIN_PAGES.has(id) || user.is_admin).map((id) =>
-    h("a", { href: `#/${id}`, "data-page": id }, icon(PAGES[id][1], { size: 19 }), PAGES[id][0]));
-  const pages = h("nav", { class: "pages", "aria-label": "Pages" }, links(WORK_PAGES));
-  const settings = h("nav", { class: "pages settings-nav", "aria-label": "Settings" },
-    links(Object.keys(PAGES).filter((id) => !WORK_PAGES.includes(id))));
+  const pages = h("nav", { class: "pages", "aria-label": "Pages" },
+    WORK_PAGES.map((id) => h("a", { href: `#/${id}`, "data-page": id }, icon(PAGES[id][1], { size: 19 }), PAGES[id][0])));
   const displayName = user.person?.name || user.name;
   const rail = h("aside", { class: "rail", id: "rail", "aria-label": "Navigation" },
     h("div", { class: "rail-head" },
@@ -165,13 +153,11 @@ function shell() {
     h("button", { class: "primary new-chat", onclick: newChat }, icon("plus", { size: 18 }), "New chat"),
     pages,
     h("div", { class: "rail-slot", id: "rail-slot" }),
-    settings,
     h("div", { class: "rail-foot" },
-      themeSwitch(),
-      h("div", { class: "me" },
+      h("a", { class: "me", href: "#/account", title: "Your settings: memory, account" + (user.is_admin ? ", Discord, administration" : "") },
         avatar(displayName),
-        h("div", { class: "who" }, h("strong", { title: user.is_admin ? `${user.name}, administrator` : user.name }, displayName), status),
-        h("button", { class: "ghost icon-btn", title: "Sign out", "aria-label": "Sign out", onclick: signOut }, icon("logout", { size: 19 })))));
+        h("div", { class: "who" }, h("strong", {}, displayName), status),
+        icon("chevron", { size: 17 }))));
   const body = h("main", { class: "page", id: "page" });
   clear(app).append(h("div", { class: "shell" },
     rail,
@@ -223,6 +209,10 @@ function route() {
     if (active) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   }
+  const me = document.querySelector(".me");
+  me?.classList.toggle("active", SETTINGS_PAGES.includes(name));
+  if (SETTINGS_PAGES.includes(name)) me?.setAttribute("aria-current", "page");
+  else me?.removeAttribute("aria-current");
   const body = document.getElementById("page");
   const slot = document.getElementById("rail-slot");
   if (!body) return;
@@ -246,6 +236,7 @@ function route() {
     : name === "account" ? mountAccount(body, user, signOut)
     : name === "discord" ? mountDiscord(body)
     : mountAdmin(body, user, sub);
+  if (SETTINGS_PAGES.includes(name)) body.querySelector(".page-head")?.after(settingsBar(name));
 }
 
 window.addEventListener("hashchange", route); // the admin page's own tabs change the address without this event
