@@ -6,6 +6,7 @@ import { mountAdmin } from "./admin.js";
 import { ApiError, api, events } from "./api.js";
 import { mountChat } from "./chat.js";
 import { mountDiscord } from "./discord.js";
+import { mountFiles } from "./files.js";
 import { icon, mark } from "./icons.js";
 import { mountProjects } from "./projects.js";
 import { avatar, clear, h, toast, toggleRail } from "./ui.js";
@@ -140,7 +141,7 @@ events.addEventListener("signed-out", () => { if (user) showLogin("Your session 
 
 // ---- the shell and the pages -----------------------------------------------------------------------------
 
-const PAGES = { chat: ["Chat", "chat"], projects: ["Projects", "folder"], memory: ["Memory", "memory"], account: ["Account", "user"], discord: ["Discord", "bot"], admin: ["Admin", "admin"] };
+const PAGES = { chat: ["Chat", "chat"], projects: ["Projects", "folder"], files: ["Files", "file"], memory: ["Memory", "memory"], account: ["Account", "user"], discord: ["Discord", "bot"], admin: ["Admin", "admin"] };
 const ADMIN_PAGES = new Set(["discord", "admin"]);
 
 function shell() {
@@ -230,6 +231,7 @@ function route() {
   if (name === "chat" && sub) history.replaceState(null, "", "#/chat"); // no hashchange: nothing is drawn twice
   page = name === "chat" ? mountChat(body, user, { slot, fresh, project, open: openId })
     : name === "projects" ? mountProjects(body, user, sub)
+    : name === "files" ? mountFiles(body, user)
     : name === "memory" ? mountMemory(body, user)
     : name === "account" ? mountAccount(body, user, signOut)
     : name === "discord" ? mountDiscord(body)

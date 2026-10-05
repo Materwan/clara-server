@@ -72,7 +72,10 @@ from .discord_bot.local import LocalBackend
 from .discord_bot.service import DiscordService
 from .github import GitHub
 from .lifecycle import Lifecycle
+from .limits import UsageLimitReached, UsageLimits
 from .linking import LinkCodes
+from .markdownapi import install as install_markdown
+from .markdownfiles import MarkdownFiles
 from .memory import ANY_PROJECT, MAX_NOTIFY_AFTER, MAX_TITLE_LENGTH, ConversationInfo, Memory, MergeRefused, Person
 from .notifications import MAX_TARGETS, MAX_TEXT, MAX_TITLE, SURFACE_RE, NotificationError, Notifier
 from .projectapi import install as install_projects
@@ -287,6 +290,8 @@ def create_app(
     projects = Projects(
         memory, settings.project_max_bytes, settings.project_max_files, settings.project_inline_percent
     )
+    markdown = MarkdownFiles(memory)
+    limits = UsageLimits(memory, settings.default_daily_tokens)
     agent = Agent(
         memory,
         providers,
@@ -307,6 +312,8 @@ def create_app(
         notifier=notifier,
         long_turn_seconds=settings.notify_long_turn,
         projects=projects,
+        markdown=markdown,
+        limits=limits,
     )
 
     if settings.reminder_ai_timeout:
@@ -376,10 +383,12 @@ def create_app(
     app.state.providers = providers
     app.state.discord = discord_bot
     app.state.projects = projects
+    app.state.markdown = markdown
+    app.state.limits = limits
     app.state.github = GitHub(settings.github_token)
     app.state.commands = CommandContext(
         settings, memory, agent, providers, time.monotonic(), f"{settings.host}:{settings.port}", lifecycle,
-        notifier, tailscale, users, discord_bot,
+        notifier, tailscale, users, discord_bot, limits,
     )
 
     def known_person(surface: Surface, user_id: ExternalId) -> Person:
@@ -463,6 +472,8 @@ def create_app(
                 final = event
         except PromptTooLarge as error:
             raise HTTPException(413, str(error)) from None
+        except UsageLimitReached as error:
+            raise HTTPException(429, str(error), headers={"Retry-After": str(error.retry_after)}) from None
         except ServerStopping as error:
             raise HTTPException(503, str(error)) from None
         except ModelTimeout as error:
@@ -481,6 +492,8 @@ def create_app(
                 async with contextlib.aclosing(with_keepalive(agent.turn(request, client))) as stream:
                     async for event in stream:
                         yield ": keepalive\n\n" if event is None else sse(event)
+            except UsageLimitReached as error:
+                yield sse({"type": "error", "reason": "usage_limit", "message": str(error)})
             except (ClientToolTimeout, ModelTimeout, PromptTooLarge, ServerStopping) as error:
                 yield sse({"type": "error", "message": str(error)})
             except Exception:
@@ -840,6 +853,7 @@ def create_app(
     install(app)
     install_clients(app)
     install_projects(app)
+    install_markdown(app)
     install_web(app)
     return app
 

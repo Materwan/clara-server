@@ -10,6 +10,7 @@ from typing import Mapping
 
 from dotenv import load_dotenv
 
+from .limits import parse_limit
 from .tailscale import HTTPS_PORTS
 from .tailscale import MODES as TAILSCALE_MODES
 
@@ -99,6 +100,17 @@ def _positive_int(env: Mapping[str, str], key: str, default: int) -> int:
     if value < 1:
         raise SettingsError(f"{key} must be at least 1")
     return value
+
+
+def _token_limit(env: Mapping[str, str], key: str) -> int:
+    """A number of tokens a day (`500000`, `500k`, `2m`); empty, 0 or `off`: no limit."""
+    raw = env.get(key, "").strip()
+    if not raw:
+        return 0
+    try:
+        return parse_limit(raw)
+    except ValueError as error:
+        raise SettingsError(f"{key}: {error}") from None
 
 
 DEFAULT_LOCAL_HOST = "http://localhost:11434"
@@ -213,6 +225,9 @@ class Settings:
     project_max_files: int = 5_000
     project_inline_percent: int = 40
     github_token: str | None = field(default=None, repr=False)
+    # Tokens a day a user may use when an administrator set no limit for them (limits.py); 0: no limit.
+    # Administrators have none. `/limit default` changes it while the server runs.
+    default_daily_tokens: int = 0
 
     @property
     def logs_dir(self) -> Path:
@@ -355,4 +370,5 @@ class Settings:
             project_max_files=_positive_int(env, "CLARA_PROJECT_MAX_FILES", 5_000),
             project_inline_percent=inline_percent,
             github_token=text("GITHUB_TOKEN") or None,
+            default_daily_tokens=_token_limit(env, "CLARA_DEFAULT_DAILY_TOKENS"),
         )

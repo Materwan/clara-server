@@ -2,7 +2,7 @@
 
 import { api } from "./api.js";
 import { mark } from "./icons.js";
-import { ago, avatar, clear, confirmDialog, dateTime, h, icon, pageHead, secretDialog, toast } from "./ui.js";
+import { ago, avatar, clear, confirmDialog, dateTime, h, icon, pageHead, secretDialog, toast, tokenCount, usageBar } from "./ui.js";
 
 const who = (user) => ({ surface: "web", user_id: user.name });
 
@@ -112,6 +112,7 @@ export function mountAccount(container, user, onSignOut) {
     clear(page);
     page.append(
       profileCard(me),
+      usageCard(me),
       notifyCard(me, prefs),
       passwordCard(),
       devicesCard(devices.sessions),
@@ -126,6 +127,20 @@ export function mountAccount(container, user, onSignOut) {
       h("p", { class: "muted small" }, `Signed in as ${me.name}. Clara knows you on these accounts:`),
       h("div", { class: "accounts" }, me.accounts.length ? me.accounts.map((a) => h("span", { class: "badge" }, a)) : h("span", { class: "muted small" }, "none yet"))),
     h("button", { onclick: onSignOut }, icon("logout", { size: 18 }), "Sign out"));
+
+  /** Tokens used today against the daily limit an administrator set (or none). */
+  function usageCard(me) {
+    const usage = me.usage;
+    const note = !usage.limit
+      ? (me.is_admin ? "As an administrator you have no limit." : "You have no daily limit.")
+      : usage.used >= usage.limit
+        ? `You used all of today's tokens. You can talk to Clara again at ${dateTime(usage.resets_at)}, or ask an administrator to raise your limit.`
+        : `${tokenCount(usage.remaining)} tokens left today. The day starts again at ${dateTime(usage.resets_at)}.`;
+    return h("section", { class: "panel panel-body usage-card" },
+      h("h3", {}, "Usage today"),
+      h("div", { class: "usage-big" }, usageBar(usage)),
+      h("p", { class: "muted small" }, note));
+  }
 
   /** How long a task takes before you are notified when it is done: the server's delay, never, or your own. */
   function notifyCard(me, prefs) {

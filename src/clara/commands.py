@@ -17,6 +17,7 @@ from .agent import Agent
 from .clientapi import DISCORD
 from .discord_bot.service import DiscordService
 from .lifecycle import Lifecycle
+from .limits import UsageLimits, parse_limit, show_limit
 from .memory import Memory, Person
 from .notifications import Notifier
 from .prompt import relation_label
@@ -54,6 +55,7 @@ class CommandContext:
     tailscale: Tailscale | None = None  # how the server is published, if it is
     users: Users | None = None  # people who log in with a password
     discord: DiscordService | None = None  # the Discord bot built into the server
+    limits: UsageLimits | None = None  # the daily tokens of each person
 
     def tell_everybody(self, text: str) -> None:
         if self.notifier is not None:
@@ -625,3 +627,57 @@ async def discord_command(ctx: CommandContext, args: str) -> str:
     if action == "restart":
         return await bot.restart()
     raise CommandError("Usage: /discord [status | start | stop | restart]")
+
+
+@registry.command(
+    "limit",
+    "[list | default <tokens|off> | <user> [<tokens|off|default>]]",
+    "Tokens a day each user may use (a day ends at midnight UTC; administrators have no limit): see the usage, "
+    "set the default, or set one user's (tokens: 500000, 500k, 2m; off: no limit; default: follow the default)",
+    lambda ctx: ["list", "default"] + [user.name for user in (ctx.users.list() if ctx.users else [])],
+)
+async def limit_command(ctx: CommandContext, args: str) -> str:
+    limits, users = ctx.limits, ctx.users
+    if limits is None or users is None:
+        raise CommandError("This server has no usage limits.")
+    words = args.split()
+    verb = words[0].lower() if words else "list"
+
+    def quota_of(user):
+        return limits.quota_for_user(user.person_id, user.is_admin and not user.disabled, user.token_limit)
+
+    def row(user) -> list[str]:
+        quota = quota_of(user)
+        if quota.limit is None:
+            own = "admin" if user.is_admin and not user.disabled else "none"
+            return [user.name, own, f"{quota.used:,}", "-", "-"]
+        own = "default" if user.token_limit is None else "own"
+        return [user.name, own, f"{quota.used:,}", f"{quota.limit:,}", f"{quota.remaining:,}"]
+
+    try:
+        if verb == "list" and len(words) <= 1:
+            found = users.list()
+            head = f"Default: {show_limit(limits.default())}. Today's usage, UTC:"
+            if not found:
+                return head + "\n(no user yet)"
+            return head + "\n" + table(["user", "limit", "used", "tokens/day", "left"], [row(user) for user in found])
+        if verb == "default":
+            if len(words) != 2:
+                raise CommandError(f"Default: {show_limit(limits.default())}. Change it: /limit default <tokens|off>")
+            limits.set_default(parse_limit(words[1]))
+            return f"The default is now {show_limit(limits.default())} (for users with no limit of their own)."
+        user = users.get(verb)
+        if user is None:
+            raise CommandError(f"No user called {verb}. Usage: /limit [list | default <tokens|off> | <user> [<tokens|off|default>]]")
+        if len(words) == 1:
+            return table(["user", "limit", "used", "tokens/day", "left"], [row(user)])
+        if len(words) != 2:
+            raise CommandError("Usage: /limit <user> <tokens|off|default>")
+        users.set_token_limit(user.name, None if words[1].lower() == "default" else parse_limit(words[1]))
+        user = users.get(user.name)
+        note = " They are an administrator: they have no limit whatever is set." if user.is_admin else ""
+        if user.token_limit is None:
+            return f"{user.name} follows the default ({show_limit(limits.default())}).{note}"
+        return f"{user.name}: {show_limit(user.token_limit)}.{note}"
+    except (ValueError, UserError) as error:
+        raise CommandError(str(error)) from None

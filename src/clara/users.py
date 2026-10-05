@@ -42,6 +42,7 @@ class User:
     disabled: bool
     created_at: str
     last_login_at: str | None
+    token_limit: int | None = None  # tokens a day: None the server's default, 0 no limit (limits.py)
 
 
 @dataclass(frozen=True)
@@ -125,7 +126,7 @@ class Users:
     def _user(row) -> User:
         return User(
             row["name"], row["person_id"], bool(row["is_admin"]), bool(row["disabled"]), row["created_at"],
-            row["last_login_at"],
+            row["last_login_at"], row["daily_token_limit"],
         )
 
     def get(self, name: str) -> User | None:
@@ -202,6 +203,14 @@ class Users:
             raise UserError("This is the last administrator: make someone else one first.")
         with self._memory.lock, self._memory.database as db:
             db.execute("UPDATE users SET is_admin = ? WHERE name = ?", (int(admin), name))
+
+    def set_token_limit(self, name: str, limit: int | None) -> None:
+        """Tokens this user may use a day: 0 for no limit, None to follow the server's default."""
+        self._must_exist(name)
+        if limit is not None and limit < 0:
+            raise UserError("A limit is a number of tokens (0: no limit).")
+        with self._memory.lock, self._memory.database as db:
+            db.execute("UPDATE users SET daily_token_limit = ? WHERE name = ?", (limit, name))
 
     def set_disabled(self, name: str, disabled: bool) -> None:
         user = self._must_exist(name)

@@ -5,6 +5,7 @@ import { ApiError, api, conversationPath, streamChat } from "./api.js";
 import { DocumentError, MAX_TOTAL_CHARS, compose, readDocument, splitMessage, totalChars } from "./documents.js";
 import { icon, mark, ring } from "./icons.js";
 import { renderMarkdown } from "./markdown.js";
+import { fileCard } from "./files.js";
 import { displayAnswers, qcmNode } from "./qcm.js";
 import { chooseProject, listProjects } from "./projects.js";
 import { clear, confirmDialog, h, pageHead, parseDate, popupMenu, promptDialog, randomId, toast, toggleRail } from "./ui.js";
@@ -286,7 +287,10 @@ export function mountChat(container, user, { slot, fresh = false, project = null
     return true;
   }
 
-  const cardsOf = (message) => (message.qcm || []).map((form) => qcmNode(form, { submit: submitAnswers }));
+  const cardsOf = (message) => [
+    ...(message.qcm || []).map((form) => qcmNode(form, { submit: submitAnswers })),
+    ...(message.files || []).map((file) => fileCard(file, who)),
+  ];
 
   function assistantNode(message) {
     const body = h("div", { class: "body" },
@@ -402,6 +406,12 @@ export function mountChat(container, user, { slot, fresh = false, project = null
           (reply.qcm ||= []).push(form);
           cards.append(qcmNode(form, { submit: submitAnswers }));
           if (!reply.content) clear(body); // nothing written before the form: no dots above it
+          scrollDown();
+        } else if (event.type === "markdown_file") {
+          const file = { ...event.file, action: event.action };
+          (reply.files ||= []).push(file);
+          cards.append(fileCard(file, who));
+          if (!reply.content) clear(body); // nothing written before the file: no dots above it
           scrollDown();
         } else if (event.type === "compacted") toast("Older messages were summarised to make room.");
         else if (event.type === "warning") toast(event.message);

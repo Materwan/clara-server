@@ -4,7 +4,8 @@ import { api } from "./api.js";
 import { discordPicker, signInDiscordDialog } from "./discord.js";
 import { mark } from "./icons.js";
 import {
-  ago, avatar, clear, confirmDialog, dateTime, duration, h, icon, openDialog, pageHead, popupMenu, promptDialog, secretDialog, toast,
+  ago, avatar, clear, confirmDialog, dateTime, duration, h, icon, openDialog, pageHead, parseTokens, popupMenu, promptDialog, secretDialog,
+  toast, tokenCount, usageBar,
 } from "./ui.js";
 
 const TABS = [["users", "Users"], ["server", "Server"], ["people", "People & memory"], ["console", "Console"]];
@@ -43,13 +44,18 @@ async function command(line) {
 function users(box, me) {
   const list = h("div", { class: "panel" });
   const count = h("span", { class: "count" });
+  let defaultLimit = null; // tokens a day for users with no limit of their own (null: none)
+  const defaultButton = h("button", { title: "Tokens a day for users who have no limit of their own", onclick: setDefaultLimit });
+  const drawDefault = () => clear(defaultButton).append(icon("edit", { size: 18 }), defaultLimit ? `Default limit: ${tokenCount(defaultLimit)} a day` : "Default limit: none");
+  drawDefault();
 
   async function load() {
+    try { defaultLimit = (await api.get("/v1/admin/limits")).default; drawDefault(); } catch { /* the list below says what is wrong */ }
     let found;
     try { found = (await api.get("/v1/admin/users")).users; } catch (error) { return fail(error); }
     count.textContent = `${found.length} ${found.length === 1 ? "person" : "people"} can sign in`;
     clear(list).append(h("table", { class: "grid cards" },
-      h("thead", {}, h("tr", {}, ["User", "Role", "Person", "Devices", "Last sign-in", ""].map((t) => h("th", {}, t ? t : h("span", { class: "sr-only" }, "Actions"))))),
+      h("thead", {}, h("tr", {}, ["User", "Role", "Person", "Devices", "Tokens today", "Last sign-in", ""].map((t) => h("th", {}, t ? t : h("span", { class: "sr-only" }, "Actions"))))),
       h("tbody", {}, found.map(row))));
   }
 
@@ -63,6 +69,8 @@ function users(box, me) {
         { label: "Generate a new password", icon: "key", run: () => reset(user, true) },
         { label: "Set a password…", icon: "edit", run: () => reset(user, false) },
         { label: user.is_admin ? "Remove administrator rights" : "Make administrator", icon: "admin", run: () => edit(user, { admin: !user.is_admin }) },
+        { label: "Set the daily token limit…", icon: "edit", run: () => setLimit(user) },
+        user.usage.own_limit !== null && { label: "Use the default token limit", icon: "refresh", run: () => edit(user, { follow_default_limit: true }) },
         { label: user.disabled ? "Enable" : "Disable", icon: "power", run: () => edit(user, { disabled: !user.disabled }) },
         "-",
         !user.disabled && { label: "Sign in a Discord account…", icon: "link", run: async () => { if (await signInDiscordDialog(user.name)) load(); } },
@@ -80,12 +88,46 @@ function users(box, me) {
       h("td", { "data-label": "Person" }, user.person ? `${user.person.name} (#${user.person.id})` : "None"),
       h("td", { class: "num", "data-label": "Devices", title: [...user.surfaces, ...user.signed_in_accounts].join(", ") },
         String(user.sessions + user.signed_in_accounts.length)),
+      h("td", { "data-label": "Tokens today", title: limitNote(user) }, usageBar(user.usage), user.usage.limit && user.usage.own_limit === null && h("span", { class: "muted small" }, " default")),
       h("td", { "data-label": "Last sign-in", title: dateTime(user.last_login_at) }, ago(user.last_login_at)),
       h("td", { class: "end" }, more));
   }
 
   async function edit(user, change) {
     try { await api.patch(`/v1/admin/users/${encodeURIComponent(user.name)}`, change); toast("Saved."); load(); } catch (error) { fail(error); }
+  }
+
+  const limitNote = (user) => user.is_admin ? "Administrators have no limit"
+    : user.usage.own_limit === 0 ? "No limit for this user"
+    : user.usage.own_limit === null ? (user.usage.limit ? `The default: ${tokenCount(user.usage.limit)} tokens a day` : "No limit (the default)")
+    : `${tokenCount(user.usage.own_limit)} tokens a day, set for this user`;
+
+  async function setLimit(user) {
+    const current = user.usage.own_limit === null ? "" : user.usage.own_limit === 0 ? "off" : String(user.usage.own_limit);
+    const value = await promptDialog(`Daily token limit for ${user.name}`, "Tokens a day (500000, 500k, 2m, or off)", current, "Save", {
+      hint: user.is_admin ? "They are an administrator: they have no limit whatever is set here."
+        : "Prompt and answer tokens, counted over a day that ends at midnight UTC. “off” means no limit for this user.",
+    });
+    if (value === null) return;
+    if (!value.trim()) return edit(user, { follow_default_limit: true });
+    const tokens = parseTokens(value);
+    if (tokens === null) return toast("Not a number of tokens: try 500000, 500k, 2m or off.", true);
+    edit(user, { token_limit: tokens });
+  }
+
+  async function setDefaultLimit() {
+    const value = await promptDialog("Default daily token limit", "Tokens a day (500000, 500k, 2m, or off)", defaultLimit ? String(defaultLimit) : "off", "Save", {
+      hint: "For every user who has no limit of their own. Administrators never have one.",
+    });
+    if (value === null) return;
+    const tokens = parseTokens(value);
+    if (tokens === null) return toast("Not a number of tokens: try 500000, 500k, 2m or off.", true);
+    try {
+      defaultLimit = (await api.put("/v1/admin/limits/default", { tokens })).default;
+      toast("Saved.");
+      drawDefault();
+      load();
+    } catch (error) { fail(error); }
   }
 
   async function reset(user, generate) {
@@ -155,7 +197,7 @@ function users(box, me) {
     } catch (error) { fail(error); }
   }
 
-  box.append(h("div", { class: "toolbar" }, h("span", { class: "grow count" }, count), h("button", { class: "primary", onclick: add }, icon("plus", { size: 18 }), "Add user")), list);
+  box.append(h("div", { class: "toolbar" }, h("span", { class: "grow count" }, count), defaultButton, h("button", { class: "primary", onclick: add }, icon("plus", { size: 18 }), "Add user")), list);
   load();
 }
 

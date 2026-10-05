@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import AsyncIterator, Protocol
 
+from ..limits import LIMIT_MARK
+
 
 class ClaraError(Exception):
     """Clara said no, or could not be reached (`status` 0). The statuses are the HTTP API's."""
@@ -22,6 +24,11 @@ class ClaraError(Exception):
     @property
     def not_signed_in(self) -> bool:
         return self.status == 403 and "not signed in" in self.detail
+
+    @property
+    def over_limit(self) -> bool:
+        """The person used all their tokens for today (the detail says when they have some again)."""
+        return self.status == 429 and LIMIT_MARK in self.detail
 
     @property
     def unreachable(self) -> bool:

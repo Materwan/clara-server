@@ -203,6 +203,8 @@ class MessageHandler:
             text = t(lang, "stopping")
         elif error.status == 413:
             text = t(lang, "too_long")
+        elif error.over_limit:
+            text = error.detail
         elif error.status == 429:
             text = t(lang, "busy")
         else:

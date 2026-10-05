@@ -204,6 +204,21 @@ CREATE TABLE IF NOT EXISTS project_files (
     added_at   TEXT NOT NULL,
     UNIQUE (project_id, path)
 );
+CREATE TABLE IF NOT EXISTS usage (
+    person_id INTEGER NOT NULL REFERENCES people (id) ON DELETE CASCADE,
+    day       TEXT NOT NULL,
+    tokens    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (person_id, day)
+);
+CREATE TABLE IF NOT EXISTS markdown_files (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id  INTEGER NOT NULL REFERENCES people (id) ON DELETE CASCADE,
+    name       TEXT NOT NULL COLLATE NOCASE,
+    content    TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (person_id, name)
+);
 """
 
 # Columns added after the first release: databases created before have to get them.
@@ -214,6 +229,9 @@ _ADDED_COLUMNS = {
     },
     "conversations": {
         "project_id": "INTEGER",  # the project it belongs to (projects.py), NULL: none
+    },
+    "users": {
+        "daily_token_limit": "INTEGER",  # tokens a day (limits.py); NULL: the server's default, 0: no limit
     },
     "messages": {
         "prefix": "TEXT NOT NULL DEFAULT ''",
@@ -605,6 +623,8 @@ class Memory:
                 "UPDATE conversations SET person_id = NULL, project_id = NULL WHERE person_id = ?", (person_id,)
             )
             self._db.execute("DELETE FROM projects WHERE person_id = ?", (person_id,))  # their files go with them
+            self._db.execute("DELETE FROM markdown_files WHERE person_id = ?", (person_id,))
+            self._db.execute("DELETE FROM usage WHERE person_id = ?", (person_id,))
             self._db.execute("DELETE FROM messages WHERE person_id = ?", (person_id,))
             self._db.execute("DELETE FROM reminders WHERE person_id = ?", (person_id,))
             self._db.execute("DELETE FROM reminder_events WHERE person_id = ?", (person_id,))
@@ -645,6 +665,20 @@ class Memory:
         db.execute("UPDATE reminder_events SET person_id = ? WHERE person_id = ?", (target, source))
         db.execute("UPDATE conversations SET person_id = ? WHERE person_id = ?", (target, source))
         db.execute("UPDATE projects SET person_id = ? WHERE person_id = ?", (target, source))
+        db.execute(
+            "INSERT INTO usage (person_id, day, tokens) SELECT ?, day, tokens FROM usage WHERE person_id = ?"
+            " ON CONFLICT (person_id, day) DO UPDATE SET tokens = usage.tokens + excluded.tokens",
+            (target, source),
+        )
+        db.execute("DELETE FROM usage WHERE person_id = ?", (source,))
+        for row in db.execute("SELECT id, name FROM markdown_files WHERE person_id = ?", (source,)).fetchall():
+            name, number = row["name"], 1
+            while db.execute(
+                "SELECT 1 FROM markdown_files WHERE person_id = ? AND name = ?", (target, name)
+            ).fetchone():  # a file of the target has this name: the other one keeps its content under a new one
+                number += 1
+                name = f"{row['name'].removesuffix('.md')} ({number}).md"
+            db.execute("UPDATE markdown_files SET person_id = ?, name = ? WHERE id = ?", (target, name, row["id"]))
         db.execute("UPDATE users SET person_id = ? WHERE person_id = ?", (target, source))
         db.execute("DELETE FROM people WHERE id = ?", (source,))
 

@@ -22,7 +22,7 @@ import re
 import time
 import uuid
 import weakref
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import AsyncIterator, Callable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -36,14 +36,16 @@ from .compaction import (
     summary_request,
     transcript_budget,
 )
+from .limits import UsageLimitReached, UsageLimits
 from .llm import LlmBackend, LlmChunk
+from .markdownfiles import MarkdownFiles
 from .memory import ConversationState, Fact, Memory, Person, StoredMessage, TurnRow
 from .notifications import SERVER, SURFACE_RE, NotificationError, Notifier
 from .projects import PROJECT_TOOLS, Projects
 from .prompt import SystemPrompt
 from .qcm import SURFACES as QCM_SURFACES
 from .reminders import ReminderService
-from .tools import ABOUT_PERSON, QCM, Toolbox, ToolContext
+from .tools import ABOUT_PERSON, MARKDOWN_TOOLS, QCM, Toolbox, ToolContext
 
 log = logging.getLogger(__name__)
 
@@ -219,9 +221,13 @@ class Agent:
         notifier: Notifier | None = None,
         long_turn_seconds: float = 0.0,
         projects: Projects | None = None,
+        markdown: MarkdownFiles | None = None,
+        limits: UsageLimits | None = None,
     ):
         self.memory = memory
         self.projects = projects  # the files of the conversations that are part of a project
+        self.markdown = markdown  # the markdown files Clara writes for a person (the markdown tools)
+        self.limits = limits  # the daily tokens of each person (limits.py); None: nobody is limited
         self.reminders = reminders  # lets the model's tools set reminders
         self.notifier = notifier  # lets the model notify, and the agent say when long work is done
         self.long_turn_seconds = long_turn_seconds  # a turn this long notifies its person when done (0: never)
@@ -498,6 +504,13 @@ class Agent:
         person = self.memory.resolve(request.surface, request.user_id, request.user_name)
         conversation = request.conversation_id
         ephemeral = request.ephemeral
+        if self.limits is not None and request.mode != "observe":
+            try:
+                self.limits.check(person.id)
+            except UsageLimitReached:
+                if request.mode != "maybe":
+                    raise
+                request = replace(request, mode="observe")  # Clara was not asked: she just does not chime in
         if request.mode == "observe":
             async for event in self._observe(request, person):
                 yield event
@@ -505,7 +518,7 @@ class Agent:
         context = ToolContext(
             person, self.memory, self.reminders, request.timezone, request.surface, request.user_id, conversation,
             self.notifier, roster=tuple(p for p in request.roster if p.id != person.id),
-            projects=self.projects, project_id=request.project,
+            projects=self.projects, project_id=request.project, markdown=self.markdown,
         )
         client_tools = {schema["function"]["name"] for schema in request.tools}
         hidden = set() if context.roster else {ABOUT_PERSON}
@@ -513,6 +526,8 @@ class Agent:
             hidden |= PROJECT_TOOLS
         if request.surface not in QCM_SURFACES:
             hidden.add(QCM)  # the other clients have no form to show
+        if self.markdown is None:
+            hidden |= MARKDOWN_TOOLS
         server_tools = [] if ephemeral or request.no_tools else self.toolbox.schemas_without(hidden)
         schemas = server_tools + list(request.tools)
         turn_id = uuid.uuid4().hex
@@ -557,21 +572,38 @@ class Agent:
                     # a round that follows one that said something starts a new paragraph
                     separate = bool("".join(reply_parts).strip())
                     # aclosing: if the client goes away at a yield, the model task stops now
-                    async with contextlib.aclosing(self._model(messages, schemas if offer_tools else None)) as model:
-                        async for chunk in model:
-                            round_prompt += chunk.prompt_tokens
-                            round_completion += chunk.completion_tokens
-                            calls.extend(chunk.tool_calls)
-                            if chunk.thinking:  # shown to the client; kept only with tool calls (see below)
-                                thinking_parts.append(chunk.thinking)
-                                yield {"type": "thinking", "text": chunk.thinking}
-                            if chunk.text:
-                                if separate and chunk.text.strip():
-                                    separate = False
-                                    reply_parts.append(ROUND_SEPARATOR)
-                                    yield {"type": "token", "text": ROUND_SEPARATOR}
-                                text_parts.append(chunk.text)
-                                yield {"type": "token", "text": chunk.text}
+                    try:
+                        async with contextlib.aclosing(
+                            self._model(messages, schemas if offer_tools else None)
+                        ) as model:
+                            async for chunk in model:
+                                round_prompt += chunk.prompt_tokens
+                                round_completion += chunk.completion_tokens
+                                calls.extend(chunk.tool_calls)
+                                if chunk.thinking:  # shown to the client; kept only with tool calls (see below)
+                                    thinking_parts.append(chunk.thinking)
+                                    yield {"type": "thinking", "text": chunk.thinking}
+                                if chunk.text:
+                                    if separate and chunk.text.strip():
+                                        separate = False
+                                        reply_parts.append(ROUND_SEPARATOR)
+                                        yield {"type": "token", "text": ROUND_SEPARATOR}
+                                    text_parts.append(chunk.text)
+                                    yield {"type": "token", "text": chunk.text}
+                    except BaseException as error:
+                        # The client left: what the model did is still counted against the person's day (a model
+                        # that failed costs them nothing)
+                        if isinstance(error, (GeneratorExit, asyncio.CancelledError)):
+                            self._count_usage(
+                                person, round_prompt + round_completion, messages,
+                                schemas if offer_tools else None, text_parts,
+                            )
+                        raise
+                    else:
+                        self._count_usage(
+                            person, round_prompt + round_completion, messages,
+                            schemas if offer_tools else None, text_parts,
+                        )
                     prompt_tokens += round_prompt
                     completion_tokens += round_completion
                     text = "".join(text_parts)
@@ -679,7 +711,19 @@ class Agent:
             "model": getattr(self.backend, "model", ""),  # may change between turns (/provider)
             "provider": getattr(self.backend, "active", ""),
             "passed": declined,  # a "maybe" message Clara chose not to answer (reply is "")
+            "quota": self.limits.quota(person.id).describe() if self.limits is not None else None,
         }
+
+    def _count_usage(
+        self, person: Person, reported: int, messages: list[dict], tools: list[dict] | None, text_parts: list[str]
+    ) -> None:
+        if self.limits is None:
+            return
+        tokens = reported or estimate_prompt_tokens(messages, tools) + estimate_tokens("".join(text_parts))
+        try:
+            self.limits.record(person.id, tokens)
+        except Exception:
+            log.exception("could not count %d tokens for person %s", tokens, person.id)
 
     def _keep_interrupted(
         self, request: ChatRequest, person: Person, rows: list[TurnRow], partial: str, reason: str

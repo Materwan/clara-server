@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from .. import clientapi
 from ..agent import ModelTimeout, PromptTooLarge, ServerStopping
 from ..auth import Caller, require_account, require_conversation
+from ..limits import UsageLimitReached
 from .backend import ClaraError, Reply
 
 log = logging.getLogger(__name__)
@@ -150,6 +151,8 @@ class LocalBackend:
                 done = event
         except PromptTooLarge as error:
             raise ClaraError(413, str(error)) from None
+        except UsageLimitReached as error:
+            raise ClaraError(429, str(error)) from None
         except ServerStopping as error:
             raise ClaraError(503, str(error)) from None
         except ModelTimeout as error:

@@ -554,6 +554,53 @@ desktop app both manage them).
 | `POST /v1/projects/{id}/github` | `{repo, ref?}`: `owner/name`, `owner/name@branch` or a github.com address |
 | `POST /v1/projects/{id}/sources/{sid}/sync`, `DELETE /v1/projects/{id}/sources/{sid}` | download it again, remove it and its files |
 
+## Usage limits
+
+Each person has a limit of **tokens a day**: what the model reports for every round of their answers (the prompt it
+was given and what it wrote), added up per person over a calendar day (UTC; it starts again at midnight UTC).
+
+- An **administrator** (a user flagged administrator) has no limit, whatever is set.
+- Another user has the limit an administrator set for them, or the **default** when none is set. A person with no
+  user (a terminal or app using a client token) follows the default.
+- `0` (or `off`) means no limit. Nothing is limited until `CLARA_DEFAULT_DAILY_TOKENS` or an administrator says so.
+- The limit is checked when an answer starts: the answer that crosses it is finished, the next one is refused with
+  `429` (`Retry-After` says when), or an `error` event with `"reason": "usage_limit"` on a stream. A Discord message
+  not addressed to Clara is only kept as context when its author is out of tokens. Compactions and titles are not counted.
+- Every answer's `done` event has a `quota` (`used`, `limit`, `remaining`, `resets_at`; `null` limit: none).
+
+Set it from the console (`/limit`, also in `clara-admin`), the web site (Admin, Users: a column, *Set the daily
+token limit…*, *Default limit*) or the API. Tokens are written `500000`, `500k`, `2m` or `off`.
+
+```
+/limit                       everybody's usage today and limit
+/limit default 2m            the default, for users with no limit of their own
+/limit erwan 500k            erwan's own limit  (off: none, default: follow the default)
+```
+
+| | |
+| --- | --- |
+| `GET /v1/admin/users` | each user has `usage: {used, limit, remaining, resets_at, own_limit, default_limit}` (also in `GET /v1/auth/me`) |
+| `PATCH /v1/admin/users/{name}` | `{token_limit}` (0: none) or `{follow_default_limit: true}` |
+| `GET /v1/admin/limits`, `PUT /v1/admin/limits/default` | `{default}`; `{tokens}` (0: none) |
+
+## Markdown files
+
+Clara can write a markdown file for a person (notes, a summary, a README...) and change it later. The files belong to
+the person, are the same on every surface, and are not put in the prompt: Clara reads one when she needs it. Her tools:
+`create_markdown_file` (a new file; `overwrite` replaces all the text of one that exists), `edit_markdown_file`
+(replace a passage: `old_text` must be in the file once, so only the passage travels, not the whole file; `replace_all`
+for every place), `append_markdown_file`, `read_markdown_file` and `list_markdown_files`. A name has no folder (`notes.md`,
+`.md` is added), a file at most 200,000 characters, a person 200 files.
+
+The web site shows a card in the chat when she makes or changes a file (open, copy, download) and has a **Files** page
+with all of them. The other clients cannot show one: she tells the person to look on the web site. The tools send a
+`markdown_file` event `{action: created|updated|replaced, file: {id, name, size, updated_at}}` after the tool call.
+
+| | |
+| --- | --- |
+| `GET /v1/markdown-files` | `?surface=&user_id=` the person's files, newest first |
+| `GET /v1/markdown-files/{id}`, `DELETE /v1/markdown-files/{id}` | `?surface=&user_id=` a file with its text; delete it |
+
 ## QCM
 
 On the web site and in the desktop app (surfaces `web` and `app`; the tool is not offered on the others), Clara can
@@ -784,6 +831,8 @@ src/clara/
   headless.py   `--headless`: ignore SIGHUP, leave the terminal, log to a rotating file
   selftest.py   `--test`: the checks run before the server starts
   server.py     FastAPI routes, auth, embedded console
+  limits.py     the daily tokens of each person: counting, who has which limit, the refusal
+  markdownfiles.py / markdownapi.py  the markdown files Clara writes (tools in tools.py), and their routes
   qcm.py        the QCM form Clara asks (tool `qcm`): limits, checking, the answers message
   client.py     clara-chat (also shows reminders and notifications, and has /remind and /notify)
   admin.py      clara-admin (remote console)

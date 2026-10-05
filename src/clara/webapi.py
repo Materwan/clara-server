@@ -16,6 +16,8 @@ administration of users and people, reading a PDF, and the web site itself (`web
     PATCH  /v1/admin/users/{name}       {admin?, disabled?, password?, generate_password?}
     DELETE /v1/admin/users/{name}
     POST   /v1/admin/users/{name}/sign-out
+    GET    /v1/admin/limits             {default}: the tokens a day of a user with no limit of their own (null: none)
+    PUT    /v1/admin/limits/default     {tokens}: change it (0: no limit); a user's own is set with PATCH /users/{name}
     GET    /v1/admin/status             provider, model, activity, address
     GET    /v1/admin/models             what the active provider offers
     GET    /v1/admin/people             everybody Clara knows
@@ -39,6 +41,7 @@ from . import ingest
 from .auth import COOKIE, WEB_HEADER, Admin, Client, LoggedIn
 from .clientapi import DISCORD, DISCORD_ID, announce_discord_sign_in
 from .ingest import IngestError
+from .limits import show_limit
 from .memory import MergeRefused
 from .users import User, UserError, generate_password
 
@@ -81,8 +84,14 @@ class NewUserBody(BaseModel):
 class UserPatch(BaseModel):
     admin: bool | None = None
     disabled: bool | None = None
+    token_limit: int | None = Field(default=None, ge=0, le=10**13)  # tokens a day; 0: no limit
+    follow_default_limit: bool = False  # back to the server's default (instead of token_limit)
     password: str | None = Field(default=None, max_length=512)
     generate_password: bool = False
+
+
+class DefaultLimit(BaseModel):
+    tokens: int = Field(ge=0, le=10**13)  # 0: no limit
 
 
 class FactText(BaseModel):
@@ -95,6 +104,8 @@ def describe_user(app: FastAPI, user: User) -> dict:
     person = app.state.memory.person_by_id(user.person_id)
     accounts = users.accounts_signed_in_as(user.name)
     discord_ids = [account.removeprefix(f"{DISCORD}:") for account in accounts if account.startswith(f"{DISCORD}:")]
+    limits = app.state.limits
+    quota = limits.quota_for_user(user.person_id, user.is_admin and not user.disabled, user.token_limit)
     return {
         "name": user.name,
         "is_admin": user.is_admin,
@@ -105,6 +116,9 @@ def describe_user(app: FastAPI, user: User) -> dict:
         "sessions": len(sessions),
         "surfaces": sorted({s.surface for s in sessions}),
         "signed_in_accounts": accounts,  # signed in by a client (Discord)
+        # tokens used today and the limit (null: none; administrators have none); `own_limit` is what an
+        # administrator set for this user (null: the default, 0: no limit)
+        "usage": {**quota.describe(), "own_limit": user.token_limit, "default_limit": limits.default() or None},
         "discord_accounts": [
             {"user_id": user_id, "discord_name": app.state.discord.discord_name(user_id)} for user_id in discord_ids
         ],
@@ -319,6 +333,12 @@ async def admin_edit_user(name: str, body: UserPatch, admin: Admin, request: Req
             users.set_admin(name, body.admin)
         if body.disabled is not None:
             users.set_disabled(name, body.disabled)
+        if body.follow_default_limit and body.token_limit is not None:
+            raise HTTPException(422, "Give token_limit or follow_default_limit, not both")
+        if body.follow_default_limit:
+            users.set_token_limit(name, None)
+        elif body.token_limit is not None:
+            users.set_token_limit(name, body.token_limit)
         password = generate_password() if body.generate_password else body.password
         if password:
             await asyncio.to_thread(users.set_password, name, password)
@@ -346,6 +366,19 @@ async def admin_sign_out(name: str, admin: Admin, request: Request) -> dict:
     if request.app.state.users.get(name) is None:
         raise HTTPException(404, f"No user called {name}")
     return {"signed_out": request.app.state.users.revoke_all(name)}
+
+
+@router.get("/v1/admin/limits")
+async def admin_limits(admin: Admin, request: Request) -> dict:
+    return {"default": request.app.state.limits.default() or None}
+
+
+@router.put("/v1/admin/limits/default")
+async def admin_set_default_limit(body: DefaultLimit, admin: Admin, request: Request) -> dict:
+    limits = request.app.state.limits
+    limits.set_default(body.tokens)
+    log.info("%s set the default limit to %s", admin, show_limit(limits.default()))
+    return {"default": limits.default() or None}
 
 
 @router.get("/v1/admin/status")
