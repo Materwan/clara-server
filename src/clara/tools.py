@@ -488,7 +488,8 @@ def default_toolbox(web: WebClient | None = None) -> Toolbox:
                 description=(
                     "Show the user a QCM (multiple-choice questionnaire) they answer in a form: use it to quiz them, "
                     "to test their knowledge or to collect several answers at once, not for a single question. "
-                    f"At most {MAX_QUESTIONS} questions, one QCM per answer. The turn ends there: their answers "
+                    "Questions, options and explanations may hold LaTeX formulas ($x^2$ inline, $$...$$ alone), which are "
+                    f"typeset. At most {MAX_QUESTIONS} questions, one QCM per answer. The turn ends there: their answers "
                     "arrive in their next message, and you then comment on them."
                 ),
                 function=_qcm,

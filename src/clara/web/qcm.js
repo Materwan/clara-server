@@ -4,6 +4,7 @@
 // is opened again: keep the two in step.
 
 import { icon } from "./icons.js";
+import { inline } from "./markdown.js";
 import { h } from "./ui.js";
 
 const LETTERS = "ABCDEFGHIJ";
@@ -12,6 +13,13 @@ const MARK = /^\[QCM answers [0-9a-f]{8}\] ?([^\n]*)/;
 let counter = 0; // makes the names of the radio groups unique on the page
 
 const byNumber = (a, b) => a - b;
+
+/** A span with the text of a question, an option or an explanation: formulas ($x^2$, \(x^2\), $$...$$) typeset, as in the chat. */
+function rich(tag, props, text) {
+  const node = h(tag, props);
+  inline(text, node);
+  return node;
+}
 const emptyAnswer = (question) => (question.type === "text" ? "" : []);
 
 /** The message the user sends for a form. `answers`: one list of option numbers per choice question, one text per text question. */
@@ -83,7 +91,7 @@ export function qcmNode(form, { submit }) {
     root.classList.toggle("done", done);
     const head = h("header", { class: "qcm-head" },
       h("span", { class: "qcm-kind" }, "QCM"),
-      h("h3", {}, form.title || (total === 1 ? "A question" : `${total} questions`)),
+      rich("h3", {}, form.title || (total === 1 ? "A question" : `${total} questions`)),
       form.title && h("span", { class: "qcm-count" }, `${total} ${total === 1 ? "question" : "questions"}`));
     const questions = form.questions.map((question, index) => questionNode(question, index, shown[index], done));
     root.replaceChildren(head, ...questions, footer(done));
@@ -94,12 +102,12 @@ export function qcmNode(form, { submit }) {
     const right = known && sameOptions(given, question.correct);
     const body = question.type === "text" ? textBox(question, index, given) : question.options.map((_option, at) => optionNode(question, index, at, given, done));
     return h("fieldset", { class: "qcm-question" + (known ? (right ? " right" : " wrong") : ""), disabled: done },
-      h("legend", {}, h("span", { class: "num" }, index + 1), h("span", { class: "q-text" }, question.text)),
+      h("legend", {}, h("span", { class: "num" }, index + 1), rich("span", { class: "q-text" }, question.text)),
       question.type === "multiple" && h("p", { class: "qcm-hint" }, "Select all that apply."),
       h("div", { class: "qcm-options" }, body),
       known && h("p", { class: "qcm-verdict", role: "status" }, icon(right ? "check" : "close", { size: 16 }), right ? "Correct" : "Not quite"),
-      done && question.explanation && h("p", { class: "qcm-explain" }, question.explanation),
-      done && question.type === "text" && question.answer && h("p", { class: "qcm-explain" }, h("strong", {}, "Expected: "), question.answer));
+      done && question.explanation && rich("p", { class: "qcm-explain" }, question.explanation),
+      done && question.type === "text" && question.answer && h("p", { class: "qcm-explain" }, h("strong", {}, "Expected: "), rich("span", {}, question.answer)));
   }
 
   function optionNode(question, index, at, given, done) {
@@ -115,7 +123,7 @@ export function qcmNode(form, { submit }) {
     });
     const state = correct === null ? "" : correct ? (picked ? " right" : " missed") : picked ? " wrong" : "";
     return h("label", { class: "qcm-option" + (picked ? " picked" : "") + state }, input,
-      h("span", { class: "letter" }, LETTERS[at]), h("span", { class: "opt-text" }, question.options[at]),
+      h("span", { class: "letter" }, LETTERS[at]), rich("span", { class: "opt-text" }, question.options[at]),
       state.includes("right") && icon("check", { size: 16 }), state.includes("wrong") && icon("close", { size: 16 }),
       state.includes("missed") && h("span", { class: "qcm-note" }, "correct answer"));
   }

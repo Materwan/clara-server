@@ -560,6 +560,8 @@ shown, and the user's answers come back as their next message, which Clara then 
   choice question has it the client scores the QCM and shows the corrections, with the optional `explanation`
   of each question and the `answer` expected of a text question. Without `correct` it is a questionnaire. Text
   answers are not scored by the client: Clara reads them.
+- **Formulas**: questions, options, explanations and titles may hold LaTeX (`$x^2$`, `$$…$$`, `\(…\)`, `\[…\]`): the web site and the
+  app typeset them (KaTeX), as in the chat.
 - **Event**: the stream carries `{"type": "qcm", "form": {"ref", "title", "graded", "questions": [...]}}` after
   the `tool` event of the call. `ref` identifies the form (a hash of its questions).
 - **Answers**: the client sends `[QCM answers <ref>] <title>`, then for each question `n. <question>` and

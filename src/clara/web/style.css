@@ -738,11 +738,12 @@ dialog .actions { display: flex; justify-content: flex-end; gap: .55rem; margin-
 }
 
 /* formulas (KaTeX): a long one scrolls instead of widening the page */
-.md .math { white-space: normal; }
-.md .math:not(.typeset) { font-family: var(--font-mono, ui-monospace, monospace); font-size: .9em; color: var(--text-2); }
+.md .math, .qcm .math { white-space: normal; }
+.md .math:not(.typeset), .qcm .math:not(.typeset) { font-family: var(--font-mono, ui-monospace, monospace); font-size: .9em; color: var(--text-2); }
 .md .math-block { display: block; margin: .5em 0 .9em; overflow-x: auto; overflow-y: hidden; text-align: center; }
-.md .math-block .katex-display { margin: 0; }
-.md .katex { font-size: 1.08em; }
+.qcm .math-block { display: block; margin: .3em 0; overflow-x: auto; overflow-y: hidden; max-width: 100%; }
+.md .math-block .katex-display, .qcm .math-block .katex-display { margin: 0; }
+.md .katex, .qcm .katex { font-size: 1.08em; }
 
 /* ---- QCM: a form Clara asks (qcm.js) ------------------------------------------------------------------ */
 .msg .cards:not(:empty) { display: flex; flex-direction: column; gap: 1rem; margin-top: .6rem; }
