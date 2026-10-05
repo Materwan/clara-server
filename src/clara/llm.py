@@ -114,6 +114,16 @@ class OllamaBackend:
         response = await self._client.list()
         return sorted(model.model for model in response.models if model.model)
 
+    async def model_sizes(self) -> dict[str, str]:
+        """What the server says of each model's size ("7.2B", "134.52M"): only the models that say it."""
+        response = await self._client.list()
+        sizes = {}
+        for model in response.models:
+            size = getattr(getattr(model, "details", None), "parameter_size", None)
+            if model.model and size:
+                sizes[model.model] = str(size)
+        return sizes
+
     async def verify(self) -> None:
         # Listing models is public on ollama.com, so it proves nothing about the key:
         # /api/me answers 401 to a bad key. Anything else (404...) falls through to the listing.

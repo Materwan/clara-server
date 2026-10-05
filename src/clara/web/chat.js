@@ -6,6 +6,7 @@ import { DocumentError, MAX_TOTAL_CHARS, compose, readDocument, splitMessage, to
 import { icon, mark, ring } from "./icons.js";
 import { renderMarkdown } from "./markdown.js";
 import { fileCard } from "./files.js";
+import { chooseModel, costText, loadModels, modelSelect } from "./models.js";
 import { displayAnswers, qcmNode } from "./qcm.js";
 import { chooseProject, listProjects } from "./projects.js";
 import { clear, confirmDialog, h, pageHead, parseDate, popupMenu, promptDialog, randomId, toast, toggleRail } from "./ui.js";
@@ -61,8 +62,9 @@ export function mountChat(container, user, { slot, fresh = false, project = null
   const attach = h("button", { class: "ghost icon-btn", title: "Attach documents (PDF, code, text)", "aria-label": "Attach documents", onclick: () => picker.click() }, icon("clip"));
   const sendButton = h("button", { class: "send", "aria-label": "Send", title: "Send", onclick: send, disabled: true }, icon("send", { size: 19 }));
   const docInfo = h("span", { class: "grow docinfo" });
+  const modelBox = h("span", { class: "model-box", hidden: true }); // the model picker, when an administrator offers a choice
   const composer = h("div", { class: "composer" },
-    h("div", { class: "composer-inner" }, chips, input, h("div", { class: "composer-bar" }, attach, picker, docInfo, sendButton)),
+    h("div", { class: "composer-inner" }, chips, input, h("div", { class: "composer-bar" }, attach, picker, docInfo, modelBox, sendButton)),
     h("p", { class: "composer-hint" }, "Enter to send, Shift + Enter for a new line. Drop files here to attach them."));
   const root = h("section", { class: "page chat" },
     pageHead(h("div", { class: "grow chat-title" }, title, projectChip), context, compactButton, moreButton, newButton), messagesBox, composer);
@@ -510,7 +512,26 @@ export function mountChat(container, user, { slot, fresh = false, project = null
     sendButton.disabled = !canSend();
   }
 
+  // ---- the model ---------------------------------------------------------------------------------------
+  async function loadModelPicker() {
+    let info;
+    try { info = await loadModels(who); } catch { return; } // no picker: Clara answers with the server's model
+    clear(modelBox);
+    modelBox.hidden = !info.models.length;
+    if (!info.models.length) return;
+    const select = modelSelect(info, info.choices[SURFACE] ?? null, async (ref) => {
+      select.disabled = true;
+      try {
+        const done = await chooseModel(who, SURFACE, ref);
+        toast(`Clara now answers with ${done.current.name} (${costText(done.current.weight)}).`);
+      } catch (error) { toast(error.detail || String(error), true); }
+      loadModelPicker();
+    }, "Model for this site");
+    modelBox.append(select);
+  }
+
   // ---- start -------------------------------------------------------------------------------------------
+  loadModelPicker();
   (async () => {
     await Promise.all([loadList(), loadProjects()]);
     if (fresh) return newChat(project);

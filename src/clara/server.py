@@ -77,6 +77,8 @@ from .linking import LinkCodes
 from .markdownapi import install as install_markdown
 from .markdownfiles import MarkdownFiles
 from .memory import ANY_PROJECT, MAX_NOTIFY_AFTER, MAX_TITLE_LENGTH, ConversationInfo, Memory, MergeRefused, Person
+from .modelapi import install as install_models
+from .models import ModelCatalog
 from .notifications import MAX_TARGETS, MAX_TEXT, MAX_TITLE, SURFACE_RE, NotificationError, Notifier
 from .projectapi import install as install_projects
 from .projects import Projects
@@ -292,6 +294,7 @@ def create_app(
     )
     markdown = MarkdownFiles(memory)
     limits = UsageLimits(memory, settings.default_daily_tokens)
+    models = ModelCatalog(memory, providers, settings.weight_reference_b)
     agent = Agent(
         memory,
         providers,
@@ -314,6 +317,7 @@ def create_app(
         projects=projects,
         markdown=markdown,
         limits=limits,
+        models=models,
     )
 
     if settings.reminder_ai_timeout:
@@ -385,10 +389,11 @@ def create_app(
     app.state.projects = projects
     app.state.markdown = markdown
     app.state.limits = limits
+    app.state.models = models
     app.state.github = GitHub(settings.github_token)
     app.state.commands = CommandContext(
         settings, memory, agent, providers, time.monotonic(), f"{settings.host}:{settings.port}", lifecycle,
-        notifier, tailscale, users, discord_bot, limits,
+        notifier, tailscale, users, discord_bot, limits, models,
     )
 
     def known_person(surface: Surface, user_id: ExternalId) -> Person:
@@ -854,6 +859,7 @@ def create_app(
     install_clients(app)
     install_projects(app)
     install_markdown(app)
+    install_models(app)
     install_web(app)
     return app
 

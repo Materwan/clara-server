@@ -61,7 +61,8 @@ Both consoles run the same commands (the `/` is optional):
 | Command | |
 | --- | --- |
 | `/provider [local\|cloud\|gemini\|deepseek\|mistral]` | show the providers, or switch where the model runs |
-| `/model [name]` | list the active provider's models, or change its model |
+| `/model [name]` | list the active provider's models, or change its model (the server's own, see *Models*) |
+| `/models [list\|refresh\|enable\|disable\|weight\|discord …]` | the models users may choose, what a token of each costs, and Discord's model (see *Models*) |
 | `/status` | provider, model, uptime, running turns, tokens, memory size |
 | `/people` | everybody Clara knows, with accounts and fact counts |
 | `/facts <person> [add <text>\|del <id>]` | read or edit what Clara knows (person = id, `surface:user` or name) |
@@ -554,22 +555,67 @@ desktop app both manage them).
 | `POST /v1/projects/{id}/github` | `{repo, ref?}`: `owner/name`, `owner/name@branch` or a github.com address |
 | `POST /v1/projects/{id}/sources/{sid}/sync`, `DELETE /v1/projects/{id}/sources/{sid}` | download it again, remove it and its files |
 
+## Models
+
+`/provider` and `/model` set the **server's own model**, but every person can be answered by another one, and every
+provider that has its key works at the same time. A model is named `provider:model` (`local:llama3.2`,
+`cloud:gpt-oss:120b`, `gemini:gemini-flash-latest`).
+
+- **The administrators select the models users may choose**: the web site's *Admin, Models* tab lists every model of
+  every provider (with a search, a provider filter, *Select shown* / *Unselect shown*, *Refresh*), or `/models` in the
+  console. Users only ever see the selected ones. Nothing is selected at first: everybody uses the server's model.
+- **Each user chooses per surface**: a model for the web site, another for the desktop app, the terminal
+  (`clara-chat`, `/model`) and the console (`/model`). On the web it is the *Model* card of the *Account* page, and a
+  picker next to the message box of the chat; in the app, *Settings*. A user with no valid choice (or whose choice
+  an administrator took away) gets the server's model.
+- **Discord has one model for everybody**, set by an administrator (*Admin, Models*, or `/models discord <model>`);
+  it need not be one of those users may choose. `/provider` and `/model` stay the default of everything else
+  (users who chose nothing, summaries and titles).
+- **A token costs the weight of the model**, in credits (see *Usage limits*). The weight is 1 for a model of
+  `CLARA_WEIGHT_REFERENCE_B` (default 8) billion parameters, proportional to the size above and below it (120B: 15,
+  1B: 0.125; never below 0.01). The size is what the provider says (Ollama lists it), else what the name says
+  (`gpt-oss:120b`, `mixtral:8x7b`); the Gemini, DeepSeek and Mistral APIs say nothing, so their models weigh 1 until
+  an administrator sets a weight by hand (a weight set by hand beats the size; *Use the size* goes back). Users see
+  each model's cost wherever they choose. Every `done` event says the `model_ref`, its `weight` and the `credits` the
+  turn cost.
+- Each model has the context window of its provider (`CLARA_<ID>_CONTEXT_WINDOW`).
+
+```
+/models                      every model, which ones users may choose (*), sizes and weights
+/models refresh              ask the providers again (what they offer is kept a minute)
+/models enable other-model   a model of the active provider; or cloud:gpt-oss:120b, cloud (a whole provider), all
+/models disable all
+/models weight cloud:gpt-oss:120b 20     credits per token by hand (auto: from the size)
+/models discord cloud:gpt-oss:120b       the model of Discord (default: the server's own)
+```
+
+| | |
+| --- | --- |
+| `GET /v1/models` | `?surface=&user_id=`: `models` the person may choose (`ref`, `name`, `provider_label`, `weight`), the server's `default`, their `choices` by surface, the model `current`ly used on that surface |
+| `PUT /v1/models/choice` | `{surface, user_id, model, for_surface?}`: choose a model for a surface (null: the server's); not for Discord |
+| `GET /v1/admin/catalog` | `?refresh=true`: every model of every usable provider, with `enabled`, `weight`, `size_b`, the model of `discord`, the providers that did not answer (`problems`) |
+| `PATCH /v1/admin/catalog` | `{refs, enabled?, weight?, auto_weight?}` (a weight for one model at a time) |
+| `PUT /v1/admin/catalog/discord` | `{model}` (null: the server's own) |
+
 ## Usage limits
 
-Each person has a limit of **tokens a day**: what the model reports for every round of their answers (the prompt it
-was given and what it wrote), added up per person over a calendar day (UTC; it starts again at midnight UTC).
+Each person has a limit of **credits a day**: what the model reports for every round of their answers (the prompt it
+was given and what it wrote), times the weight of the model that answered (see *Models*: a token of a model of weight
+1 is one credit), added up per person over a calendar day (UTC; it starts again at midnight UTC). The numbers are
+credits wherever the environment variable (`CLARA_DEFAULT_DAILY_TOKENS`) or the database still say tokens.
 
 - An **administrator** (a user flagged administrator) has no limit, whatever is set.
 - Another user has the limit an administrator set for them, or the **default** when none is set. A person with no
   user (a terminal or app using a client token) follows the default.
 - `0` (or `off`) means no limit. Nothing is limited until `CLARA_DEFAULT_DAILY_TOKENS` or an administrator says so.
+  Limits set before credits existed keep their number: it now counts credits (the same, on a model of weight 1).
 - The limit is checked when an answer starts: the answer that crosses it is finished, the next one is refused with
   `429` (`Retry-After` says when), or an `error` event with `"reason": "usage_limit"` on a stream. A Discord message
-  not addressed to Clara is only kept as context when its author is out of tokens. Compactions and titles are not counted.
+  not addressed to Clara is only kept as context when its author is out of credits. Compactions and titles are not counted.
 - Every answer's `done` event has a `quota` (`used`, `limit`, `remaining`, `resets_at`; `null` limit: none).
 
 Set it from the console (`/limit`, also in `clara-admin`), the web site (Admin, Users: a column, *Set the daily
-token limit…*, *Default limit*) or the API. Tokens are written `500000`, `500k`, `2m` or `off`.
+credit limit…*, *Default limit*) or the API. Credits are written `500000`, `500k`, `2m` or `off`.
 
 ```
 /limit                       everybody's usage today and limit
@@ -640,13 +686,15 @@ shown, and the user's answers come back as their next message, which Clara then 
   read a file, remove it, sync or remove a repository. It says whether Clara reads all the files with every message
   or searches them, for the model in use.
 - **Memory**: what Clara remembers about you, to add to or remove from.
-- **Account**: change your password, see and sign out your devices, link an account that has no password (Discord)
-  with a link code.
+- **Account**: your usage, the model Clara answers you with on each surface (among those an administrator offers, with
+  their cost in credits), change your password, see and sign out your devices, link an account that has no password
+  (Discord) with a link code. The chat has a model picker too.
 - **Discord** (administrators): the bot built into the server (its state, Discord account, servers, latency, last
   error; *Start*, *Stop*, *Restart*; the invite link), the Discord servers it is in with where Clara may chime in, and
   the Discord accounts signed in, each with *Sign out*.
 - **Admin** (administrators): *Users* (add, reset a password, make administrator, disable, sign out, remove),
-  *Server* (status, switch provider and model, stop), *People & memory* (everybody Clara knows, their facts,
+  *Models* (select the models users may choose, set what a token of each costs, choose Discord's model),
+  *Server* (status, switch the server's own provider and model, stop), *People & memory* (everybody Clara knows, their facts,
   the relationship, linking, erasing a person) and a *Console* box with every server command.
 
 There are no reminders or notifications on the web site, and it runs no tools on your computer.
@@ -802,7 +850,8 @@ src/clara/
   memory.py     SQLite: people, accounts, facts, history, the list of conversations
   linking.py    single-use codes that prove control of an account before it is linked
   llm.py        LlmBackend interface; Ollama, and the OpenAI-compatible API (Gemini, DeepSeek, Mistral)
-  providers.py  local / cloud / gemini / deepseek / mistral, switchable live, saved in runtime.json
+  providers.py  local / cloud / gemini / deepseek / mistral, switchable live, saved in runtime.json; any model of
+                any of them can run at the same time (models.py)
   projects.py   projects: their files (the tables are in memory.py), what the prompt says of them, their tools
   ingest.py     the text of uploaded files: text, code, PDF, .docx, .zip; what is left out
   github.py     downloads a snapshot of a GitHub repository
@@ -816,7 +865,7 @@ src/clara/
                 relationship and the Discord page for administrators
   discord_bot/  the Discord bot: service.py runs it in the server (local.py: direct calls), standalone.py on its
                 own (remote.py: HTTP); see its __init__.py
-  web/          the web site: index.html, style.css and ES modules (chat, memory, account, admin, markdown...)
+  web/          the web site: index.html, favicon.ico, style.css and ES modules (chat, memory, account, admin, markdown...)
   session.py    for clara-chat / clara-admin: sign in once, keep the token
   tailscale.py  publishes the server with `tailscale serve|funnel`, removes it on exit
   ratelimit.py  refuses an address that sends too many wrong tokens
@@ -831,7 +880,9 @@ src/clara/
   headless.py   `--headless`: ignore SIGHUP, leave the terminal, log to a rotating file
   selftest.py   `--test`: the checks run before the server starts
   server.py     FastAPI routes, auth, embedded console
-  limits.py     the daily tokens of each person: counting, who has which limit, the refusal
+  limits.py     the daily credits of each person: counting, who has which limit, the refusal
+  models.py     the models users may choose, their weights (credits a token), each person's choice, Discord's model
+  modelapi.py   the routes of models
   markdownfiles.py / markdownapi.py  the markdown files Clara writes (tools in tools.py), and their routes
   qcm.py        the QCM form Clara asks (tool `qcm`): limits, checking, the answers message
   client.py     clara-chat (also shows reminders and notifications, and has /remind and /notify)

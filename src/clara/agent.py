@@ -40,6 +40,7 @@ from .limits import UsageLimitReached, UsageLimits
 from .llm import LlmBackend, LlmChunk
 from .markdownfiles import MarkdownFiles
 from .memory import ConversationState, Fact, Memory, Person, StoredMessage, TurnRow
+from .models import Chosen, ModelCatalog
 from .notifications import SERVER, SURFACE_RE, NotificationError, Notifier
 from .projects import PROJECT_TOOLS, Projects
 from .prompt import SystemPrompt
@@ -223,11 +224,13 @@ class Agent:
         projects: Projects | None = None,
         markdown: MarkdownFiles | None = None,
         limits: UsageLimits | None = None,
+        models: ModelCatalog | None = None,
     ):
         self.memory = memory
         self.projects = projects  # the files of the conversations that are part of a project
         self.markdown = markdown  # the markdown files Clara writes for a person (the markdown tools)
-        self.limits = limits  # the daily tokens of each person (limits.py); None: nobody is limited
+        self.limits = limits  # the daily credits of each person (limits.py); None: nobody is limited
+        self.models = models  # the model each person chose, and what it costs (models.py); None: one backend
         self.reminders = reminders  # lets the model's tools set reminders
         self.notifier = notifier  # lets the model notify, and the agent say when long work is done
         self.long_turn_seconds = long_turn_seconds  # a turn this long notifies its person when done (0: never)
@@ -325,10 +328,10 @@ class Agent:
         content = f"{prefix}\n\n{text}" if prefix else text
         return f"{author}: {content}" if author else content
 
-    def _recent_tool_rows(self, stored: list[StoredMessage]) -> set[int]:
+    def _recent_tool_rows(self, stored: list[StoredMessage], window: int | None = None) -> set[int]:
         """The tool outputs replayed in full: the newest, at most RECENT_TOOL_RESULTS_KEPT of them and while
         they fit in TOOL_HISTORY_SHARE of the window (the newest is always kept)."""
-        budget = TOOL_HISTORY_SHARE * self.window
+        budget = TOOL_HISTORY_SHARE * (window or self.window)
         kept: set[int] = set()
         used = 0
         for index in reversed([i for i, message in enumerate(stored) if message.role == "tool"]):
@@ -339,10 +342,12 @@ class Agent:
             used += cost
         return kept
 
-    def _replay(self, stored: list[StoredMessage], person: Person, group: bool = False) -> list[dict]:
+    def _replay(
+        self, stored: list[StoredMessage], person: Person, group: bool = False, window: int | None = None
+    ) -> list[dict]:
         """Past messages as the model wants them. Old tool outputs are cut to save context. Messages of other
         people carry their name; in a group, everybody's do."""
-        recent = self._recent_tool_rows(stored)
+        recent = self._recent_tool_rows(stored, window)
         messages: list[dict] = []
         for index, message in enumerate(stored):
             if message.role == "user":
@@ -374,7 +379,9 @@ class Agent:
         shown.reverse()
         return shown, max(0, self.memory.fact_count(person.id) - len(shown))
 
-    def _build_messages(self, request: ChatRequest, person: Person, state: ConversationState) -> list[dict]:
+    def _build_messages(
+        self, request: ChatRequest, person: Person, state: ConversationState, window: int | None = None
+    ) -> list[dict]:
         messages: list[dict] = []
         now = self._clock(request.timezone)
         if request.ephemeral:
@@ -387,7 +394,7 @@ class Agent:
                 for other in request.focus[:MAX_FOCUS]
                 if other.id != person.id
             )
-            project = self._project(request)
+            project = self._project(request, window)
             system = self.prompt.render(
                 person, request.surface, facts, now, request.instructions, state.summary, omitted,
                 self.memory.relation(person.id), request.roster, others,
@@ -395,7 +402,7 @@ class Agent:
             )
             messages.append({"role": "system", "content": system})
             stored = self.memory.history(request.conversation_id, self.history_turns, state.upto_id)
-            messages.extend(self._replay(stored, person, request.group))
+            messages.extend(self._replay(stored, person, request.group, window))
         content = self._user_content(request.message, request.prefix, person.name if request.group else "")
         if not request.ephemeral:
             # Only here, never stored: replayed history and system prompt stay identical between turns
@@ -404,16 +411,32 @@ class Agent:
         messages.append({"role": "user", "content": content})
         return messages
 
-    def _project(self, request: ChatRequest):
+    def _project(self, request: ChatRequest, window: int | None = None):
         if request.project is None or request.ephemeral or self.projects is None:
             return None
-        return self.projects.context(request.project, self.window)
+        return self.projects.context(request.project, window or self.window)
 
-    def _project_tools_needed(self, request: ChatRequest) -> bool:
+    def _project_tools_needed(self, request: ChatRequest, window: int | None = None) -> bool:
         """Are the files of the request's project too big for the prompt, so that Clara reads them with tools?"""
         if request.project is None or request.ephemeral or self.projects is None:
             return False
-        return not self.projects.inline(request.project, self.window)
+        return not self.projects.inline(request.project, window or self.window)
+
+    # ------------------------------------------------------------------
+    # The model of a turn
+    # ------------------------------------------------------------------
+    def choose(self, surface: str, person_id: int | None) -> Chosen:
+        """The model a person is answered by on a surface, what a token of it costs and its window."""
+        if self.models is None:
+            return Chosen(None)
+        return self.models.choose(surface, person_id)
+
+    def _chosen_for(self, conversation: str) -> Chosen:
+        """The model of a conversation's owner on its surface (the server's own when it has several people)."""
+        if self.models is None:
+            return Chosen(None)
+        people = self.memory.people_in_conversation(conversation)
+        return self.models.choose(conversation.partition(":")[0], people[0] if len(people) == 1 else None)
 
     # ------------------------------------------------------------------
     # A turn
@@ -495,11 +518,14 @@ class Agent:
 
     async def _turn(self, request: ChatRequest, owner: str) -> AsyncIterator[dict]:
         self.validate(request)
+        known = self.memory.find_person(request.surface, request.user_id)
+        chosen = self.choose(request.surface, known.id if known else None)
+        window = chosen.window or self.window
         new_tokens = estimate_tokens(request.message) + estimate_tokens(request.prefix)
-        if new_tokens > MAX_MESSAGE_SHARE * self.window:
+        if new_tokens > MAX_MESSAGE_SHARE * window:
             raise PromptTooLarge(
                 f"This message is too long for the model: about {new_tokens:,} tokens, and at most "
-                f"{int(MAX_MESSAGE_SHARE * self.window):,} fit (the context window is {self.window:,})."
+                f"{int(MAX_MESSAGE_SHARE * window):,} fit (the context window is {window:,})."
             )
         person = self.memory.resolve(request.surface, request.user_id, request.user_name)
         conversation = request.conversation_id
@@ -512,7 +538,7 @@ class Agent:
                     raise
                 request = replace(request, mode="observe")  # Clara was not asked: she just does not chime in
         if request.mode == "observe":
-            async for event in self._observe(request, person):
+            async for event in self._observe(request, person, chosen):
                 yield event
             return
         context = ToolContext(
@@ -522,7 +548,7 @@ class Agent:
         )
         client_tools = {schema["function"]["name"] for schema in request.tools}
         hidden = set() if context.roster else {ABOUT_PERSON}
-        if not self._project_tools_needed(request):
+        if not self._project_tools_needed(request, window):
             hidden |= PROJECT_TOOLS
         if request.surface not in QCM_SURFACES:
             hidden.add(QCM)  # the other clients have no form to show
@@ -541,18 +567,18 @@ class Agent:
                 # them now, and keep half the history so this does not happen at every turn.
                 try:
                     before, after = await self._compact_locked(
-                        conversation, keep_recent_turns=max(1, self.history_turns // 2)
+                        conversation, keep_recent_turns=max(1, self.history_turns // 2), chosen=chosen
                     )
                     yield {"type": "compacted", "before": before, "after": after}
                 except Exception as error:
                     log.warning("compaction of %s before the turn failed: %s", conversation, error)
                     yield {"type": "warning", "message": f"Could not compact the conversation: {error}"}
                 state = self.memory.state(conversation)  # also after a failure: it may have advanced
-            messages = self._build_messages(request, person, state)
+            messages = self._build_messages(request, person, state, window)
             rows: list[TurnRow] = []
             reply_parts: list[str] = []
             tools_used: list[str] = []
-            prompt_tokens = completion_tokens = context_tokens = 0
+            prompt_tokens = completion_tokens = context_tokens = credits = 0
             text_parts: list[str] = []  # what the model wrote in the round in progress
             round_open = False  # that text is not in `rows` yet
             finished = False
@@ -561,7 +587,8 @@ class Agent:
                 for round_number in range(self.max_tool_rounds + 1):
                     offer_tools = round_number < self.max_tool_rounds  # the last round must answer
                     async for event in self._fit(
-                        request, person, messages, schemas if offer_tools else None, compact=round_number == 0
+                        request, person, messages, schemas if offer_tools else None,
+                        compact=round_number == 0, chosen=chosen,
                     ):
                         yield event
                     text_parts = []
@@ -574,7 +601,7 @@ class Agent:
                     # aclosing: if the client goes away at a yield, the model task stops now
                     try:
                         async with contextlib.aclosing(
-                            self._model(messages, schemas if offer_tools else None)
+                            self._model(messages, schemas if offer_tools else None, chosen.ref)
                         ) as model:
                             async for chunk in model:
                                 round_prompt += chunk.prompt_tokens
@@ -594,15 +621,15 @@ class Agent:
                         # The client left: what the model did is still counted against the person's day (a model
                         # that failed costs them nothing)
                         if isinstance(error, (GeneratorExit, asyncio.CancelledError)):
-                            self._count_usage(
+                            credits += self._count_usage(
                                 person, round_prompt + round_completion, messages,
-                                schemas if offer_tools else None, text_parts,
+                                schemas if offer_tools else None, text_parts, chosen.weight,
                             )
                         raise
                     else:
-                        self._count_usage(
+                        credits += self._count_usage(
                             person, round_prompt + round_completion, messages,
-                            schemas if offer_tools else None, text_parts,
+                            schemas if offer_tools else None, text_parts, chosen.weight,
                         )
                     prompt_tokens += round_prompt
                     completion_tokens += round_completion
@@ -691,9 +718,9 @@ class Agent:
             elif not ephemeral and (reply or rows):  # an empty answer would only pollute the history
                 self.memory.add_turn(conversation, person.id, request.message, rows, request.prefix, request.project)
                 self.memory.set_context_tokens(conversation, context_tokens)
-                if self.compact_percent and 100 * context_tokens / self.window >= self.compact_percent:
+                if self.compact_percent and 100 * context_tokens / window >= self.compact_percent:
                     try:
-                        before, after = await self._compact_locked(conversation)
+                        before, after = await self._compact_locked(conversation, chosen=chosen)
                         context_tokens = self.memory.state(conversation).context_tokens
                         yield {"type": "compacted", "before": before, "after": after}
                     except Exception as error:
@@ -707,23 +734,34 @@ class Agent:
             "person": {"id": person.id, "name": person.name},
             "tools": tools_used,
             "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens},
-            "context": self._context_info(context_tokens),
-            "model": getattr(self.backend, "model", ""),  # may change between turns (/provider)
-            "provider": getattr(self.backend, "active", ""),
+            "context": self._context_info(context_tokens, window),
+            **self._model_fields(chosen),  # the model may change between turns (/provider, a person's choice)
+            "credits": credits,  # what this turn cost: its tokens times the weight of the model
             "passed": declined,  # a "maybe" message Clara chose not to answer (reply is "")
             "quota": self.limits.quota(person.id).describe() if self.limits is not None else None,
         }
 
+    def _model_fields(self, chosen: Chosen) -> dict:
+        """What a `done` event says of the model: its name, its provider, and (with a catalogue) its reference
+        `provider:model` and what a token of it costs."""
+        if chosen.ref is None:
+            return {"model": getattr(self.backend, "model", ""), "provider": getattr(self.backend, "active", "")}
+        provider, _, model = chosen.ref.partition(":")
+        return {"model": model, "provider": provider, "model_ref": chosen.ref, "weight": chosen.weight}
+
     def _count_usage(
-        self, person: Person, reported: int, messages: list[dict], tools: list[dict] | None, text_parts: list[str]
-    ) -> None:
+        self, person: Person, reported: int, messages: list[dict], tools: list[dict] | None, text_parts: list[str],
+        weight: float = 1.0,
+    ) -> int:
+        """Count what a round cost the person, in credits; returns them."""
         if self.limits is None:
-            return
+            return 0
         tokens = reported or estimate_prompt_tokens(messages, tools) + estimate_tokens("".join(text_parts))
         try:
-            self.limits.record(person.id, tokens)
+            return self.limits.record(person.id, tokens, weight)
         except Exception:
             log.exception("could not count %d tokens for person %s", tokens, person.id)
+            return 0
 
     def _keep_interrupted(
         self, request: ChatRequest, person: Person, rows: list[TurnRow], partial: str, reason: str
@@ -748,7 +786,7 @@ class Agent:
         except Exception:
             log.exception("could not store the interrupted turn of %s", request.conversation_id)
 
-    async def _observe(self, request: ChatRequest, person: Person) -> AsyncIterator[dict]:
+    async def _observe(self, request: ChatRequest, person: Person, chosen: Chosen) -> AsyncIterator[dict]:
         """A message that was not for Clara: stored in the conversation, so that she knows what was said."""
         conversation = request.conversation_id
         yield {"type": "turn", "id": uuid.uuid4().hex}
@@ -761,22 +799,27 @@ class Agent:
             "person": {"id": person.id, "name": person.name},
             "tools": [],
             "usage": {"prompt_tokens": 0, "completion_tokens": 0},
-            "context": self._context_info(self.memory.state(conversation).context_tokens),
-            "model": getattr(self.backend, "model", ""),
-            "provider": getattr(self.backend, "active", ""),
+            "context": self._context_info(self.memory.state(conversation).context_tokens, chosen.window),
+            **self._model_fields(chosen),
             "observed": True,
         }
 
-    async def _model(self, messages: list[dict], tools: list[dict] | None) -> AsyncIterator[LlmChunk]:
-        """One model round. A task reads the model and holds a slot while it works, and passes
-        the chunks on through a queue: a client that reads slowly (or not at all) cannot keep a
-        slot busy, and a model that hangs times out."""
+    async def _model(
+        self, messages: list[dict], tools: list[dict] | None, ref: str | None = None
+    ) -> AsyncIterator[LlmChunk]:
+        """One model round (of the model `ref`, `provider:model`; by default the backend's own). A task reads
+        the model and holds a slot while it works, and passes the chunks on through a queue: a client that
+        reads slowly (or not at all) cannot keep a slot busy, and a model that hangs times out."""
         queue: asyncio.Queue = asyncio.Queue()
 
         async def produce() -> None:
             try:
                 async with self._llm_slots:
-                    stream = self.backend.stream(messages, tools)
+                    stream = (
+                        self.backend.stream(messages, tools)
+                        if ref is None
+                        else self.backend.stream_ref(ref, messages, tools)
+                    )
                     async for chunk in with_idle_timeout(stream, self.first_token_timeout, self.idle_timeout):
                         queue.put_nowait(chunk)
                 queue.put_nowait(_END)
@@ -798,20 +841,22 @@ class Agent:
                 await producer
 
     async def _fit(
-        self, request: ChatRequest, person: Person, messages: list[dict], schemas: list[dict] | None, compact: bool
+        self, request: ChatRequest, person: Person, messages: list[dict], schemas: list[dict] | None, compact: bool,
+        chosen: Chosen,
     ) -> AsyncIterator[dict]:
         """Make the prompt fit in the window before it is sent, editing `messages` in place:
         summarise the older turns (`compact`, only possible before this turn's own messages exist),
         else leave the oldest replayed turns out; if it still does not fit, PromptTooLarge."""
         conversation = request.conversation_id
-        limit = int(PROMPT_LIMIT * self.window)
+        window = chosen.window or self.window
+        limit = int(PROMPT_LIMIT * window)
         size = estimate_prompt_tokens(messages, schemas)
         if size <= limit:
             return
         if compact and not request.ephemeral:
             for keep in dict.fromkeys((self.keep_recent_turns, 0)):  # the recent turns first, then all
                 try:
-                    before, after = await self._compact_locked(conversation, keep_recent_turns=keep)
+                    before, after = await self._compact_locked(conversation, keep_recent_turns=keep, chosen=chosen)
                 except NothingToCompact:
                     break
                 except Exception as error:
@@ -819,7 +864,7 @@ class Agent:
                     yield {"type": "warning", "message": f"Could not compact the conversation: {error}"}
                     break
                 yield {"type": "compacted", "before": before, "after": after}
-                messages[:] = self._build_messages(request, person, self.memory.state(conversation))
+                messages[:] = self._build_messages(request, person, self.memory.state(conversation), window)
                 size = estimate_prompt_tokens(messages, schemas)
                 if size <= limit:
                     return
@@ -837,7 +882,7 @@ class Agent:
             yield {"type": "warning", "message": "Older tool outputs of this answer were left out to fit the context."}
         if size > limit:
             raise PromptTooLarge(
-                f"The prompt needs about {size:,} tokens but the model's context window is {self.window:,}: "
+                f"The prompt needs about {size:,} tokens but the model's context window is {window:,}: "
                 "a message, a tool result or the instructions are too large."
             )
 
@@ -871,8 +916,8 @@ class Agent:
             self.memory.turns_after(conversation, state.upto_id) > self.history_turns
         )
 
-    def _context_info(self, tokens: int) -> dict:
-        window = self.window
+    def _context_info(self, tokens: int, window: int | None = None) -> dict:
+        window = window or self.window
         return {"tokens": tokens, "window": window, "percent": round(100 * tokens / window, 1)}
 
     # ------------------------------------------------------------------
@@ -885,7 +930,7 @@ class Agent:
             "conversation": conversation,
             "summary": state.summary,
             "messages": len(self.memory.messages_after(conversation, state.upto_id)),
-            **self._context_info(state.context_tokens),
+            **self._context_info(state.context_tokens, self._chosen_for(conversation).window),
         }
 
     async def compact(self, conversation: str, focus: str = "") -> tuple[float, float]:
@@ -899,7 +944,7 @@ class Agent:
         self._compactions += 1
         try:
             async with self._conversation_lock(conversation):
-                return await self._compact_locked(conversation, focus)
+                return await self._compact_locked(conversation, focus, chosen=self._chosen_for(conversation))
         finally:
             self._compactions -= 1
 
@@ -937,9 +982,9 @@ class Agent:
             raise RuntimeError("the model returned an empty title")
         return self.memory.title_if_untitled(conversation, title)
 
-    async def _summarise(self, transcript: str, previous: str, focus: str) -> str:
+    async def _summarise(self, transcript: str, previous: str, focus: str, ref: str | None = None) -> str:
         parts: list[str] = []
-        async with contextlib.aclosing(self._model(summary_request(transcript, previous, focus), None)) as model:
+        async with contextlib.aclosing(self._model(summary_request(transcript, previous, focus), None, ref)) as model:
             async for chunk in model:
                 parts.append(chunk.text)
         summary = "".join(parts).strip()
@@ -958,8 +1003,10 @@ class Agent:
         return rows[:boundary], rows[boundary:]
 
     async def _compact_locked(
-        self, conversation: str, focus: str = "", keep_recent_turns: int | None = None
+        self, conversation: str, focus: str = "", keep_recent_turns: int | None = None, chosen: Chosen | None = None
     ) -> tuple[float, float]:
+        chosen = chosen or Chosen(None)
+        window = chosen.window or self.window
         keep = self.keep_recent_turns if keep_recent_turns is None else keep_recent_turns
         state = self.memory.state(conversation)
         rows = self.memory.messages_after(conversation, state.upto_id)
@@ -970,10 +1017,10 @@ class Agent:
         # Summarise chunk by chunk. Each step is saved, so a failure halfway leaves a coherent
         # conversation (the summary so far, then the messages not yet summarised).
         summary = state.summary
-        for chunk in chunk_messages(old, self._transcript_chars or transcript_budget(self.window)):
+        for chunk in chunk_messages(old, self._transcript_chars or transcript_budget(window)):
             transcript = build_transcript(chunk)
             if transcript:
-                summary = await self._summarise(transcript, summary, focus)
+                summary = await self._summarise(transcript, summary, focus, chosen.ref)
             self.memory.set_summary(conversation, summary, chunk[-1].id, state.context_tokens)
 
         # What remains in the context: the fixed part (system prompt, tools), the summary, and the
@@ -984,7 +1031,6 @@ class Agent:
         self.memory.set_summary(conversation, summary, old[-1].id, after_tokens)
         if self.purge_summarised:
             self.memory.purge_summarised(conversation, old[-1].id)
-        window = self.window
         before, after = 100 * state.context_tokens / window, 100 * after_tokens / window
         self._compaction_done(conversation, before, after)
         return before, after

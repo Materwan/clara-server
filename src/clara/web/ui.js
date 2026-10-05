@@ -190,7 +190,7 @@ export function duration(seconds) {
 
 export const tokenCount = (tokens) => Number(tokens).toLocaleString();
 
-/** What a person typed as a daily limit (`500000`, `500k`, `2m`, `off`) as a whole number of tokens (0: no limit), or null. */
+/** What a person typed as a daily limit (`500000`, `500k`, `2m`, `off`) as a whole number of credits (0: no limit), or null. */
 export function parseTokens(text) {
   const word = text.trim().toLowerCase().replace(/[_,\s]/g, "");
   if (["off", "none", "no", "unlimited", "0"].includes(word)) return 0;
@@ -198,16 +198,16 @@ export function parseTokens(text) {
   if (!found) return null;
   const exact = parseFloat(found[1]) * (found[2] === "m" ? 1e6 : found[2] === "k" ? 1e3 : 1);
   const tokens = Math.round(exact);
-  return Math.abs(exact - tokens) < 1e-6 && tokens >= 1 && tokens <= 1e13 ? tokens : null; // a whole number of tokens
+  return Math.abs(exact - tokens) < 1e-6 && tokens >= 1 && tokens <= 1e13 ? tokens : null; // a whole number of credits
 }
 
-/** Tokens used today against the limit (`usage` as the server describes it): a bar, or just the count when there is none. */
+/** Credits used today against the limit (`usage` as the server describes it): a bar, or just the count when there is none. */
 export function usageBar(usage) {
   if (!usage.limit) return h("span", { class: "usage" }, h("span", {}, tokenCount(usage.used)), h("span", { class: "muted small" }, " no limit"));
   const share = Math.min(1, usage.used / usage.limit);
   const bar = h("span", { class: "usage-bar", "aria-hidden": "true" }, h("span", { class: "fill" }));
   bar.firstChild.style.width = `${Math.round(share * 100)}%`;
-  return h("span", { class: "usage" + (usage.used >= usage.limit ? " over" : share >= 0.8 ? " near" : ""), title: `${Math.round(share * 100)}% of today's tokens` },
+  return h("span", { class: "usage" + (usage.used >= usage.limit ? " over" : share >= 0.8 ? " near" : ""), title: `${Math.round(share * 100)}% of today's credits` },
     h("span", {}, `${tokenCount(usage.used)} / ${tokenCount(usage.limit)}`), bar);
 }
 

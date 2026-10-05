@@ -2,6 +2,14 @@
 
 import { api } from "./api.js";
 import { mark } from "./icons.js";
+import { SURFACE_NAMES, chooseModel, costText, loadModels, modelSelect } from "./models.js";
+
+/** The surfaces in the order people know them: the known ones first, the others by name. */
+const surfaceOrder = (surfaces) => [...surfaces].sort((a, b) => {
+  const known = Object.keys(SURFACE_NAMES);
+  const rank = (name) => (known.includes(name) ? known.indexOf(name) : known.length);
+  return rank(a) - rank(b) || a.localeCompare(b);
+});
 import { ago, avatar, clear, confirmDialog, dateTime, h, icon, pageHead, secretDialog, toast, tokenCount, usageBar } from "./ui.js";
 
 const who = (user) => ({ surface: "web", user_id: user.name });
@@ -102,10 +110,10 @@ export function mountAccount(container, user, onSignOut) {
   container.append(pageHead("Account"), h("div", { class: "scroll" }, page));
 
   async function draw() {
-    let me, devices, prefs;
+    let me, devices, prefs, models;
     try {
       me = await api.get("/v1/auth/me");
-      [devices, prefs] = await Promise.all([api.get("/v1/auth/sessions"), api.get("/v1/settings", who(me))]);
+      [devices, prefs, models] = await Promise.all([api.get("/v1/auth/sessions"), api.get("/v1/settings", who(me)), loadModels(who(me))]);
     } catch (error) {
       return void toast(error.detail, true);
     }
@@ -113,6 +121,7 @@ export function mountAccount(container, user, onSignOut) {
     page.append(
       profileCard(me),
       usageCard(me),
+      modelsCard(me, models),
       notifyCard(me, prefs),
       passwordCard(),
       devicesCard(devices.sessions),
@@ -128,18 +137,42 @@ export function mountAccount(container, user, onSignOut) {
       h("div", { class: "accounts" }, me.accounts.length ? me.accounts.map((a) => h("span", { class: "badge" }, a)) : h("span", { class: "muted small" }, "none yet"))),
     h("button", { onclick: onSignOut }, icon("logout", { size: 18 }), "Sign out"));
 
-  /** Tokens used today against the daily limit an administrator set (or none). */
+  /** Credits used today against the daily limit an administrator set (or none). */
   function usageCard(me) {
     const usage = me.usage;
     const note = !usage.limit
       ? (me.is_admin ? "As an administrator you have no limit." : "You have no daily limit.")
       : usage.used >= usage.limit
-        ? `You used all of today's tokens. You can talk to Clara again at ${dateTime(usage.resets_at)}, or ask an administrator to raise your limit.`
-        : `${tokenCount(usage.remaining)} tokens left today. The day starts again at ${dateTime(usage.resets_at)}.`;
+        ? `You used all of today's credits. You can talk to Clara again at ${dateTime(usage.resets_at)}, or ask an administrator to raise your limit.`
+        : `${tokenCount(usage.remaining)} credits left today. The day starts again at ${dateTime(usage.resets_at)}.`;
     return h("section", { class: "panel panel-body usage-card" },
       h("h3", {}, "Usage today"),
       h("div", { class: "usage-big" }, usageBar(usage)),
       h("p", { class: "muted small" }, note));
+  }
+
+  /** The model Clara answers you with, on each surface: one of those an administrator offers, each at its own cost. */
+  function modelsCard(me, models) {
+    const head = h("div", { class: "panel-head" }, h("div", {}, h("h3", {}, "Model"),
+      h("p", { class: "muted small" }, "Every token Clara reads or writes costs credits: bigger models cost more per token, so a small one lets you talk longer within your daily limit.")));
+    if (!models.models.length) {
+      return h("section", { class: "panel" }, head, h("div", { class: "panel-body" },
+        h("p", { class: "muted small" }, `Clara answers you with ${models.default.name} (${costText(models.default.weight)}). An administrator has not offered other models yet.`)));
+    }
+    const rows = surfaceOrder(models.surfaces).filter((surface) => surface in SURFACE_NAMES || surface in models.choices).map((surface) => {
+      const select = modelSelect(models, models.choices[surface] ?? null, async (ref) => {
+        select.disabled = true;
+        try {
+          await chooseModel(who(me), surface, ref);
+          toast(ref ? `${SURFACE_NAMES[surface] || surface}: ${models.models.find((m) => m.ref === ref).name}.` : `${SURFACE_NAMES[surface] || surface}: the server's model.`);
+        } catch (error) { toast(error.detail, true); }
+        draw();
+      }, `Model on ${SURFACE_NAMES[surface] || surface}`);
+      return h("label", { class: "field" }, SURFACE_NAMES[surface] || surface, select);
+    });
+    return h("section", { class: "panel" }, head, h("div", { class: "panel-body stack" },
+      h("div", { class: "model-grid" }, rows),
+      h("p", { class: "muted small" }, "Discord has one model for everybody, chosen by an administrator.")));
   }
 
   /** How long a task takes before you are notified when it is done: the server's delay, never, or your own. */

@@ -1,13 +1,16 @@
-"""A daily limit of tokens for each person.
+"""A daily limit of credits for each person.
 
 What is counted is what the model reports for every round of an answer (the prompt it was given and what it
-wrote), added up per person and per calendar day (UTC). The day starts again at midnight UTC.
+wrote), multiplied by the weight of the model that answered (models.py: a big model costs more credits per
+token than a small one; a model of weight 1 costs one credit per token), added up per person and per calendar
+day (UTC). The day starts again at midnight UTC.
 
 Who may use how much:
 
 * an administrator (a user flagged administrator) has no limit, whatever is set;
 * another user has the limit an administrator set for them, or the server's default when none is set
-  (`CLARA_DEFAULT_DAILY_TOKENS`, changed at run time with `/limit default`);
+  (`CLARA_DEFAULT_DAILY_TOKENS`, changed at run time with `/limit default`); the numbers are credits, whatever
+  the names of the variable and of the database columns still say;
 * a person with no user (a terminal or an app that signs in with a client token) follows the default;
 * 0 means no limit, wherever it is written.
 
@@ -16,6 +19,7 @@ The limit is checked when an answer starts: the answer that crosses it is finish
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -25,11 +29,11 @@ from .memory import Memory
 
 DEFAULT_OPTION = "usage.default_daily_tokens"
 KEEP_DAYS = 400  # days of usage kept
-LIMIT_MARK = "tokens for today"  # in the text of a refusal: the clients that only have the text look for it
+LIMIT_MARK = "credits for today"  # in the text of a refusal: the clients that only have the text look for it
 
 
 class UsageLimitReached(Exception):
-    """The person used all their tokens for today; the text says when they have some again."""
+    """The person used all their credits for today; the text says when they have some again."""
 
     def __init__(self, message: str, retry_after: int):
         super().__init__(message)
@@ -38,8 +42,8 @@ class UsageLimitReached(Exception):
 
 @dataclass(frozen=True)
 class Quota:
-    used: int  # tokens used today
-    limit: int | None  # tokens a day; None: no limit
+    used: int  # credits used today
+    limit: int | None  # credits a day; None: no limit
     resets_at: str  # when today ends (UTC, ISO 8601)
 
     @property
@@ -73,12 +77,19 @@ def parse_limit(text: str) -> int:
     except InvalidOperation:
         number = Decimal(0)
     if not number.is_finite() or number < 1 or number != number.to_integral_value() or number > 10**13:
-        raise ValueError(f"{text!r} is not a number of tokens (e.g. 500000, 500k, 2m, or off).")
+        raise ValueError(f"{text!r} is not a number of credits (e.g. 500000, 500k, 2m, or off).")
     return int(number)
 
 
 def show_limit(limit: int | None) -> str:
-    return "no limit" if not limit else f"{limit:,} tokens a day"
+    return "no limit" if not limit else f"{limit:,} credits a day"
+
+
+def credits_for(tokens: int, weight: float = 1.0) -> int:
+    """What `tokens` cost on a model of this weight: at least one credit for any use at all."""
+    if tokens <= 0:
+        return 0
+    return max(1, math.ceil(tokens * max(weight, 0.0)))
 
 
 class UsageLimits:
@@ -92,7 +103,7 @@ class UsageLimits:
     # Limits
     # ------------------------------------------------------------------
     def default(self) -> int:
-        """Tokens a day for those with no limit of their own (0: no limit)."""
+        """Credits a day for those with no limit of their own (0: no limit)."""
         stored = self._memory.option(DEFAULT_OPTION)
         try:
             return max(0, int(stored)) if stored is not None else self._initial_default
@@ -101,11 +112,11 @@ class UsageLimits:
 
     def set_default(self, tokens: int) -> None:
         if tokens < 0:
-            raise ValueError("A limit is a number of tokens (0: no limit).")
+            raise ValueError("A limit is a number of credits (0: no limit).")
         self._memory.set_option(DEFAULT_OPTION, str(tokens))
 
     def limit_of(self, person_id: int) -> int | None:
-        """Tokens this person may use a day, None when they have no limit."""
+        """Credits this person may use a day, None when they have no limit."""
         with self._memory.lock:
             rows = self._memory.database.execute(
                 "SELECT is_admin, disabled, daily_token_limit FROM users WHERE person_id = ? ORDER BY name",
@@ -148,21 +159,23 @@ class UsageLimits:
             self.used(person_id), self.limit_for_user(is_admin, own), self._tomorrow().isoformat(timespec="seconds")
         )
 
-    def record(self, person_id: int, tokens: int) -> None:
-        """Count tokens the model used for this person, today."""
-        if tokens <= 0:
-            return
+    def record(self, person_id: int, tokens: int, weight: float = 1.0) -> int:
+        """Count what `tokens` of a model of this `weight` cost this person, today. Returns the credits."""
+        credits = credits_for(tokens, weight)
+        if credits <= 0:
+            return 0
         today = self._today()
         with self._memory.lock, self._memory.database as db:
             db.execute(
                 "INSERT INTO usage (person_id, day, tokens) VALUES (?, ?, ?)"
                 " ON CONFLICT (person_id, day) DO UPDATE SET tokens = usage.tokens + excluded.tokens",
-                (person_id, today, tokens),
+                (person_id, today, credits),
             )
             if self._pruned_on != today:  # once a day is enough
                 oldest = (self._clock() - timedelta(days=KEEP_DAYS)).date().isoformat()
                 db.execute("DELETE FROM usage WHERE day < ?", (oldest,))
                 self._pruned_on = today
+        return credits
 
     def check(self, person_id: int) -> Quota:
         """The person's quota, or UsageLimitReached when they have used it all."""

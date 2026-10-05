@@ -443,6 +443,8 @@ button.sm { padding: .32rem .65rem; font-size: .85rem; border-radius: 8px; }
 .send.stop { background: var(--text); color: var(--bg); opacity: 1; }
 .send.stop:hover:not(:disabled) { background: var(--text-2); }
 .send .icon { stroke-width: 2.2; }
+.composer-bar .model-box { min-width: 0; flex: 0 1 17rem; }
+.composer-bar .model-select { width: 100%; padding: .3rem 1.9rem .3rem .6rem; font-size: .8rem; border-radius: 9px; background-color: transparent; text-overflow: ellipsis; }
 .composer-hint { max-width: var(--column); margin: .45rem auto 0; text-align: center; font-size: .76rem; color: var(--muted); }
 
 /* ---- markdown -------------------------------------------------------------------------------------- */
@@ -545,6 +547,9 @@ table.grid td.end { text-align: right; width: 1%; }
 .kv > div { padding: .9rem 1.3rem; border-bottom: 1px solid var(--line); margin-bottom: -1px; min-width: 0; }
 .kv dt { font-size: .82rem; color: var(--muted); margin-bottom: .15rem; }
 .kv dd { margin: 0; font-weight: 600; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.model-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr)); gap: .9rem; }
+.model-grid select { width: 100%; }
+.nowrap { white-space: nowrap; }
 .model-pick { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .9rem; }
 .model-pick select { width: 100%; }
 

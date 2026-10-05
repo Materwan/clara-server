@@ -3,12 +3,13 @@
 import { api } from "./api.js";
 import { discordPicker, signInDiscordDialog } from "./discord.js";
 import { mark } from "./icons.js";
+import { costText, weightText } from "./models.js";
 import {
   ago, avatar, clear, confirmDialog, dateTime, duration, h, icon, openDialog, pageHead, parseTokens, popupMenu, promptDialog, secretDialog,
   toast, tokenCount, usageBar,
 } from "./ui.js";
 
-const TABS = [["users", "Users"], ["server", "Server"], ["people", "People & memory"], ["console", "Console"]];
+const TABS = [["users", "Users"], ["models", "Models"], ["server", "Server"], ["people", "People & memory"], ["console", "Console"]];
 
 export function mountAdmin(container, me, tab = "users") {
   const body = h("div", {});
@@ -24,7 +25,7 @@ export function mountAdmin(container, me, tab = "users") {
     clear(tabs).append(...TABS.map(([id, label]) =>
       h("button", { role: "tab", "aria-selected": String(id === current), onclick: () => show(id) }, label)));
     clear(body);
-    ({ users, server, people, console: consoleTab })[current](body, me, (interval) => { timer = interval; });
+    ({ users, models, server, people, console: consoleTab })[current](body, me, (interval) => { timer = interval; });
   };
 
   container.append(pageHead("Administration"), h("div", { class: "scroll" }, h("div", { class: "container wide" }, tabs, body)));
@@ -44,8 +45,8 @@ async function command(line) {
 function users(box, me) {
   const list = h("div", { class: "panel" });
   const count = h("span", { class: "count" });
-  let defaultLimit = null; // tokens a day for users with no limit of their own (null: none)
-  const defaultButton = h("button", { title: "Tokens a day for users who have no limit of their own", onclick: setDefaultLimit });
+  let defaultLimit = null; // credits a day for users with no limit of their own (null: none)
+  const defaultButton = h("button", { title: "Credits a day for users who have no limit of their own", onclick: setDefaultLimit });
   const drawDefault = () => clear(defaultButton).append(icon("edit", { size: 18 }), defaultLimit ? `Default limit: ${tokenCount(defaultLimit)} a day` : "Default limit: none");
   drawDefault();
 
@@ -55,7 +56,7 @@ function users(box, me) {
     try { found = (await api.get("/v1/admin/users")).users; } catch (error) { return fail(error); }
     count.textContent = `${found.length} ${found.length === 1 ? "person" : "people"} can sign in`;
     clear(list).append(h("table", { class: "grid cards" },
-      h("thead", {}, h("tr", {}, ["User", "Role", "Person", "Devices", "Tokens today", "Last sign-in", ""].map((t) => h("th", {}, t ? t : h("span", { class: "sr-only" }, "Actions"))))),
+      h("thead", {}, h("tr", {}, ["User", "Role", "Person", "Devices", "Credits today", "Last sign-in", ""].map((t) => h("th", {}, t ? t : h("span", { class: "sr-only" }, "Actions"))))),
       h("tbody", {}, found.map(row))));
   }
 
@@ -69,8 +70,8 @@ function users(box, me) {
         { label: "Generate a new password", icon: "key", run: () => reset(user, true) },
         { label: "Set a password…", icon: "edit", run: () => reset(user, false) },
         { label: user.is_admin ? "Remove administrator rights" : "Make administrator", icon: "admin", run: () => edit(user, { admin: !user.is_admin }) },
-        { label: "Set the daily token limit…", icon: "edit", run: () => setLimit(user) },
-        user.usage.own_limit !== null && { label: "Use the default token limit", icon: "refresh", run: () => edit(user, { follow_default_limit: true }) },
+        { label: "Set the daily credit limit…", icon: "edit", run: () => setLimit(user) },
+        user.usage.own_limit !== null && { label: "Use the default credit limit", icon: "refresh", run: () => edit(user, { follow_default_limit: true }) },
         { label: user.disabled ? "Enable" : "Disable", icon: "power", run: () => edit(user, { disabled: !user.disabled }) },
         "-",
         !user.disabled && { label: "Sign in a Discord account…", icon: "link", run: async () => { if (await signInDiscordDialog(user.name)) load(); } },
@@ -88,7 +89,7 @@ function users(box, me) {
       h("td", { "data-label": "Person" }, user.person ? `${user.person.name} (#${user.person.id})` : "None"),
       h("td", { class: "num", "data-label": "Devices", title: [...user.surfaces, ...user.signed_in_accounts].join(", ") },
         String(user.sessions + user.signed_in_accounts.length)),
-      h("td", { "data-label": "Tokens today", title: limitNote(user) }, usageBar(user.usage), user.usage.limit && user.usage.own_limit === null && h("span", { class: "muted small" }, " default")),
+      h("td", { "data-label": "Credits today", title: limitNote(user) }, usageBar(user.usage), user.usage.limit && user.usage.own_limit === null && h("span", { class: "muted small" }, " default")),
       h("td", { "data-label": "Last sign-in", title: dateTime(user.last_login_at) }, ago(user.last_login_at)),
       h("td", { class: "end" }, more));
   }
@@ -99,29 +100,29 @@ function users(box, me) {
 
   const limitNote = (user) => user.is_admin ? "Administrators have no limit"
     : user.usage.own_limit === 0 ? "No limit for this user"
-    : user.usage.own_limit === null ? (user.usage.limit ? `The default: ${tokenCount(user.usage.limit)} tokens a day` : "No limit (the default)")
-    : `${tokenCount(user.usage.own_limit)} tokens a day, set for this user`;
+    : user.usage.own_limit === null ? (user.usage.limit ? `The default: ${tokenCount(user.usage.limit)} credits a day` : "No limit (the default)")
+    : `${tokenCount(user.usage.own_limit)} credits a day, set for this user`;
 
   async function setLimit(user) {
     const current = user.usage.own_limit === null ? "" : user.usage.own_limit === 0 ? "off" : String(user.usage.own_limit);
-    const value = await promptDialog(`Daily token limit for ${user.name}`, "Tokens a day (500000, 500k, 2m, or off)", current, "Save", {
+    const value = await promptDialog(`Daily credit limit for ${user.name}`, "Credits a day (500000, 500k, 2m, or off)", current, "Save", {
       hint: user.is_admin ? "They are an administrator: they have no limit whatever is set here."
-        : "Prompt and answer tokens, counted over a day that ends at midnight UTC. “off” means no limit for this user.",
+        : "Prompt and answer tokens times the weight of the model that answered (see the Models tab), counted over a day that ends at midnight UTC. “off” means no limit for this user.",
     });
     if (value === null) return;
     if (!value.trim()) return edit(user, { follow_default_limit: true });
     const tokens = parseTokens(value);
-    if (tokens === null) return toast("Not a number of tokens: try 500000, 500k, 2m or off.", true);
+    if (tokens === null) return toast("Not a number of credits: try 500000, 500k, 2m or off.", true);
     edit(user, { token_limit: tokens });
   }
 
   async function setDefaultLimit() {
-    const value = await promptDialog("Default daily token limit", "Tokens a day (500000, 500k, 2m, or off)", defaultLimit ? String(defaultLimit) : "off", "Save", {
+    const value = await promptDialog("Default daily credit limit", "Credits a day (500000, 500k, 2m, or off)", defaultLimit ? String(defaultLimit) : "off", "Save", {
       hint: "For every user who has no limit of their own. Administrators never have one.",
     });
     if (value === null) return;
     const tokens = parseTokens(value);
-    if (tokens === null) return toast("Not a number of tokens: try 500000, 500k, 2m or off.", true);
+    if (tokens === null) return toast("Not a number of credits: try 500000, 500k, 2m or off.", true);
     try {
       defaultLimit = (await api.put("/v1/admin/limits/default", { tokens })).default;
       toast("Saved.");
@@ -201,6 +202,114 @@ function users(box, me) {
   load();
 }
 
+// ---- models ------------------------------------------------------------------------------------------------
+
+/** Every model of every provider: select the ones users may choose, set what a token of each costs, choose Discord's. */
+function models(box) {
+  const state = { data: null, query: "", provider: "" };
+  const head = h("div", {});
+  const problems = h("div", {});
+  const list = h("div", { class: "panel" });
+  const count = h("span", { class: "count grow nowrap" });
+  const search = h("input", { type: "search", placeholder: "Search models", "aria-label": "Search models" });
+  const providerFilter = h("select", { "aria-label": "Provider" });
+  const refresh = h("button", { title: "Ask every provider what it offers now", onclick: () => load(true) }, icon("refresh", { size: 18 }), "Refresh");
+  const selectShown = h("button", { onclick: () => bulk(true) }, "Select shown");
+  const unselectShown = h("button", { onclick: () => bulk(false) }, "Unselect shown");
+
+  const shown = () => {
+    const needle = state.query.toLowerCase();
+    return state.data.models.filter((m) => (!state.provider || m.provider === state.provider) && (!needle || m.ref.toLowerCase().includes(needle) || m.provider_label.toLowerCase().includes(needle)));
+  };
+  const sizeText = (m) => (m.size_b ? `${Number(m.size_b.toFixed(2))}B` : "unknown");
+
+  async function load(force = false) {
+    refresh.disabled = true;
+    try { state.data = await api.get("/v1/admin/catalog", force ? { refresh: "true" } : {}); } catch (error) { refresh.disabled = false; return fail(error); }
+    refresh.disabled = false;
+    drawAll();
+  }
+
+  async function change(body) {
+    try { state.data = await api.patch("/v1/admin/catalog", body); drawAll(); } catch (error) { fail(error); drawAll(); }
+  }
+
+  const bulk = (enabled) => {
+    const refs = shown().map((m) => m.ref);
+    if (refs.length) change({ refs, enabled });
+  };
+
+  function drawHead() {
+    const { data } = state;
+    const defaultModel = data.models.find((m) => m.ref === data.default);
+    const discord = h("select", { "aria-label": "Model of Discord", onchange: async () => {
+      try {
+        await api.put("/v1/admin/catalog/discord", { model: discord.value || null });
+        state.data.discord = discord.value || null;
+        toast(discord.value ? "Discord now answers with that model." : "Discord follows the server's model.");
+      } catch (error) { fail(error); }
+      drawAll();
+    } }, h("option", { value: "" }, `Server default: ${data.default}`),
+      data.models.map((m) => h("option", { value: m.ref }, `${m.ref}, ${costText(m.weight)}`)));
+    discord.value = data.discord && data.models.some((m) => m.ref === data.discord) ? data.discord : "";
+    clear(head).append(h("section", { class: "panel" },
+      h("div", { class: "panel-head" }, h("div", {}, h("h3", {}, "Models for users"),
+        h("p", { class: "muted small" }, `Users see only the models selected below, each with its cost. A token (read or written) costs the model's weight in credits: 1 for a model of ${data.reference_b}B parameters, more for a bigger one. The size comes from the provider when it says it (Ollama), else from the name; set the weight by hand when neither tells.`))),
+      h("div", { class: "panel-body stack" },
+        h("div", { class: "model-pick" },
+          h("label", { class: "field" }, "Server default (for users who chose none)", h("input", { type: "text", readOnly: true, value: `${data.default}${defaultModel ? `, ${costText(defaultModel.weight)}` : ""}` }),
+            h("span", { class: "hint" }, "Changed on the Server tab.")),
+          h("label", { class: "field" }, "Discord", discord, h("span", { class: "hint" }, "One model for everybody on Discord. It does not have to be selected below."))))));
+    clear(problems).append(...Object.entries(data.problems).map(([id, why]) => h("p", { class: "notice warn small" }, `${data.providers.find((p) => p.id === id)?.label || id} did not answer: ${why}`)));
+    const chosen = providerFilter.value;
+    clear(providerFilter).append(h("option", { value: "" }, "All providers"),
+      ...data.providers.filter((p) => p.usable).map((p) => h("option", { value: p.id }, p.label)));
+    providerFilter.value = data.providers.some((p) => p.id === chosen && p.usable) ? chosen : "";
+    state.provider = providerFilter.value;
+  }
+
+  function drawList() {
+    const rows = shown();
+    const selected = state.data.models.filter((m) => m.enabled).length;
+    count.textContent = `${selected} of ${state.data.models.length} selected${rows.length !== state.data.models.length ? `, ${rows.length} shown` : ""}`;
+    clear(list);
+    if (!rows.length) return void list.append(h("div", { class: "empty-state" }, state.data.models.length ? "No model matches." : "No provider offers a model."));
+    list.append(h("table", { class: "grid cards" },
+      h("thead", {}, h("tr", {}, ["Users may choose", "Model", "Provider", "Size", "Credits per token"].map((t) => h("th", {}, t)))),
+      h("tbody", {}, rows.map(row))));
+  }
+
+  function row(m) {
+    const box = h("input", { type: "checkbox", checked: m.enabled, "aria-label": `Users may choose ${m.name}`, onchange: () => change({ refs: [m.ref], enabled: box.checked }) });
+    const weight = h("input", { type: "number", min: 0.01, max: 1000, step: "any", value: weightText(m.weight), "aria-label": `Credits per token of ${m.name}`, style: "width: 6.5rem" });
+    weight.addEventListener("change", () => {
+      const value = Number(weight.value);
+      if (!(value >= 0.01 && value <= 1000)) { toast("A weight is between 0.01 and 1000 credits per token.", true); return drawList(); }
+      change({ refs: [m.ref], weight: value });
+    });
+    return h("tr", {},
+      h("td", { "data-label": "Users may choose" }, box),
+      h("td", {}, h("strong", {}, m.name), " ", !m.listed && h("span", { class: "badge off", title: "The provider does not offer it now" }, "not offered"), m.ref === state.data.default && h("span", { class: "badge ok" }, "server default")),
+      h("td", { "data-label": "Provider" }, m.provider_label),
+      h("td", { class: "num", "data-label": "Size" }, sizeText(m)),
+      h("td", { "data-label": "Credits per token" }, h("div", { class: "row wrap" }, weight,
+        m.auto_weight ? h("span", { class: "muted small" }, m.size_b ? "from its size" : "size unknown")
+          : [h("span", { class: "badge" }, "set by hand"), h("button", { class: "ghost sm", onclick: () => change({ refs: [m.ref], auto_weight: true }) }, "Use the size")])));
+  }
+
+  function drawAll() { drawHead(); drawList(); }
+
+  let timer = null;
+  search.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => { state.query = search.value.trim(); if (state.data) drawList(); }, 150); });
+  providerFilter.addEventListener("change", () => { state.provider = providerFilter.value; if (state.data) drawList(); });
+
+  box.append(head, problems,
+    h("div", { class: "toolbar" }, h("div", { class: "search-field" }, icon("search", { size: 17 }), search), providerFilter),
+    h("div", { class: "toolbar" }, count, selectShown, unselectShown, refresh),
+    list);
+  load();
+}
+
 // ---- server -----------------------------------------------------------------------------------------------
 
 function server(box, me, setTimer) {
@@ -245,7 +354,7 @@ function server(box, me, setTimer) {
       names.map((name) => h("option", { value: name, selected: name === status.model }, name)));
     clear(controls).append(
       h("div", { class: "panel-head" }, h("div", {}, h("h3", {}, "Language model"),
-        h("p", { class: "muted small" }, "Changes apply to every client at once, without a restart, and everybody is told."))),
+        h("p", { class: "muted small" }, "The server's own model: used by everybody who chose none, and for summaries and titles. Changes apply at once, without a restart, and everybody is told. Users and Discord can use others (Models tab)."))),
       h("div", { class: "panel-body stack" },
         h("div", { class: "model-pick" }, h("label", { class: "field" }, "Provider", provider), h("label", { class: "field" }, "Model", model)),
         models.error && h("p", { class: "error small" }, models.error)));

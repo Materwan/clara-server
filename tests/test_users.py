@@ -480,3 +480,14 @@ def test_the_web_site_is_served_with_strict_headers_and_does_not_hide_the_api(ht
     assert http.get("/health").json()["status"] == "ok"
     assert http.get("/app.js").status_code == 200 and http.get("/nope.txt").status_code == 404
     assert http.get("/v1/auth/me").status_code == 401
+
+
+def test_the_web_site_uses_the_icon_of_clara_as_its_favicon(http):
+    from pathlib import Path
+
+    import clara
+
+    icon = http.get("/favicon.ico")
+    assert icon.status_code == 200 and icon.content[:4] == bytes([0, 0, 1, 0])  # an .ico file
+    assert 'href="/favicon.ico"' in http.get("/").text
+    assert icon.content == (Path(clara.__file__).parent / "web" / "favicon.ico").read_bytes()

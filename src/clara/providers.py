@@ -58,6 +58,18 @@ class ProviderConfig:
 
 BackendFactory = Callable[[ProviderConfig, str], LlmBackend]
 
+
+def make_ref(provider: str, model: str) -> str:
+    """How a model is named across providers: `local:llama3.2`, `cloud:gpt-oss:120b` (the model keeps its own colons)."""
+    return f"{provider}:{model}"
+
+
+def split_ref(ref: str) -> tuple[str, str]:
+    provider, separator, model = ref.strip().partition(":")
+    if not separator or not provider or not model.strip():
+        raise ProviderError(f"{ref!r} is not a model: write it provider:model, e.g. cloud:gpt-oss:120b.")
+    return provider, model.strip()
+
 _ALIASES = {
     "local": "local",
     "localhost": "local",
@@ -152,6 +164,7 @@ class ProviderManager:
         self.active = default
         self._load_state()
         self._backend = self._factory(self.config, self.model)
+        self._others: dict[str, LlmBackend] = {}  # the models somebody chose that are not the server's own
 
     @classmethod
     def from_settings(
@@ -251,10 +264,75 @@ class ProviderManager:
             return stream
         return self.traffic.model_stream(stream, self.peer, self.config.host, self.model, messages, tools)
 
-    def _logged(self, operation: str, call: Awaitable[T]) -> Awaitable[T]:
+    # ------------------------------------------------------------------
+    # Any model of any provider, at the same time (what each person chose)
+    # ------------------------------------------------------------------
+    @property
+    def default_ref(self) -> str:
+        return make_ref(self.active, self.model)
+
+    def usable_ref(self, ref: str) -> bool:
+        """Is the provider of this model there (known, and its key set)?"""
+        try:
+            config = self.configs.get(split_ref(ref)[0])
+        except ProviderError:
+            return False
+        return config is not None and config.usable
+
+    def window_of(self, ref: str) -> int:
+        """The context window of the provider of this model."""
+        config = self.configs.get(split_ref(ref)[0])
+        return config.context_window if config is not None else self.context_window
+
+    def _backend_for(self, ref: str) -> LlmBackend:
+        if ref == self.default_ref:
+            return self._backend
+        provider, model = split_ref(ref)
+        config = self.configs.get(provider)
+        if config is None:
+            raise ProviderError(f"Unknown provider {provider!r}. Choose: {', '.join(self.configs)}.")
+        if not config.usable:
+            raise ProviderError(f"{config.label} needs {config.key_name} in the server environment.")
+        if ref not in self._others:
+            self._others[ref] = self._factory(config, model)
+        return self._others[ref]
+
+    def stream_ref(self, ref: str, messages: list[dict], tools: list[dict] | None) -> AsyncIterator[LlmChunk]:
+        """`stream`, for the model `ref` instead of the server's own."""
+        backend = self._backend_for(ref)
+        stream = backend.stream(messages, tools)
+        if self.traffic is None:
+            return stream
+        provider, model = split_ref(ref)
+        config = self.configs[provider]
+        return self.traffic.model_stream(stream, self._peer_of(config), config.host, model, messages, tools)
+
+    async def list_models_of(self, provider: str) -> list[str]:
+        """What one provider offers (not only the active one)."""
+        config = self.configs[provider]
+        backend = self._backend_for(make_ref(provider, self._models[provider]))
+        return await asyncio.wait_for(
+            self._logged("list_models", backend.list_models(), config), CHECK_TIMEOUT
+        )
+
+    async def sizes_of(self, provider: str) -> dict[str, str]:
+        """The sizes ("7.2B") a provider says of its models, for those that say it (Ollama's)."""
+        config = self.configs[provider]
+        backend = self._backend_for(make_ref(provider, self._models[provider]))
+        sizes = getattr(backend, "model_sizes", None)
+        if sizes is None:
+            return {}
+        return await asyncio.wait_for(self._logged("model_sizes", sizes(), config), CHECK_TIMEOUT)
+
+    @staticmethod
+    def _peer_of(config: ProviderConfig) -> str:
+        return f"ollama:{config.id}" if config.flavor is None else config.id
+
+    def _logged(self, operation: str, call: Awaitable[T], config: ProviderConfig | None = None) -> Awaitable[T]:
         if self.traffic is None:
             return call
-        return self.traffic.model_call(operation, self.peer, self.config.host, call)
+        config = config or self.config
+        return self.traffic.model_call(operation, self._peer_of(config), config.host, call)
 
     async def list_models(self) -> list[str]:
         return await asyncio.wait_for(self._logged("list_models", self._backend.list_models()), CHECK_TIMEOUT)

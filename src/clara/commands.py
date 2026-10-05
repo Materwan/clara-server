@@ -19,9 +19,10 @@ from .discord_bot.service import DiscordService
 from .lifecycle import Lifecycle
 from .limits import UsageLimits, parse_limit, show_limit
 from .memory import Memory, Person
+from .models import ModelCatalog, show_weight
 from .notifications import Notifier
 from .prompt import relation_label
-from .providers import ProviderError, ProviderManager
+from .providers import ProviderError, ProviderManager, make_ref
 from .settings import Settings
 from .tailscale import Tailscale
 from .users import UserError, Users, generate_password
@@ -55,7 +56,8 @@ class CommandContext:
     tailscale: Tailscale | None = None  # how the server is published, if it is
     users: Users | None = None  # people who log in with a password
     discord: DiscordService | None = None  # the Discord bot built into the server
-    limits: UsageLimits | None = None  # the daily tokens of each person
+    limits: UsageLimits | None = None  # the daily credits of each person
+    models: ModelCatalog | None = None  # the models users may choose, and what they cost
 
     def tell_everybody(self, text: str) -> None:
         if self.notifier is not None:
@@ -283,6 +285,84 @@ async def model_command(ctx: CommandContext, args: str) -> str:
     ctx.tell_everybody(f"Clara now uses the model {args} ({providers.config.label}).")
     note ="" if available is not None else f"\n! Not checked, provider unreachable: {unreachable}"
     return f"{providers.config.id} now uses {args}.{note}"
+
+
+MODELS_USAGE = (
+    "Usage: /models [list | refresh | enable <model|provider|all> | disable <model|provider|all> | "
+    "weight <model> <credits|auto> | discord [<model>|default]]"
+)
+
+
+def model_ref(ctx: CommandContext, text: str) -> str:
+    """`provider:model`; a bare model name (`gpt-oss:120b`) is one of the provider the server runs on."""
+    first = text.partition(":")[0]
+    if first in ctx.providers.configs and ":" in text:
+        return text
+    return make_ref(ctx.providers.active, text)
+
+
+@registry.command(
+    "models",
+    "[list | refresh | enable <model|provider|all> | disable <model|provider|all> | weight <model> <credits|auto> | "
+    "discord [<model>|default]]",
+    "The models of every provider: which ones users may choose (they only see those), what a token of each costs "
+    "in credits (from its size, or set by hand), and the model Discord answers with",
+    lambda ctx: ["list", "refresh", "enable", "disable", "weight", "discord"],
+)
+async def models_command(ctx: CommandContext, args: str) -> str:
+    catalog = ctx.models
+    if catalog is None:
+        raise CommandError("This server has no model catalogue.")
+    words = args.split()
+    verb = words[0].lower() if words else "list"
+    try:
+        if verb in ("list", "refresh") and len(words) <= 1:
+            found = await catalog.listing(force=verb == "refresh")
+            rows = [
+                [
+                    "*" if info.enabled else "",
+                    info.ref,
+                    f"{info.size_b:g}B" if info.size_b else "?",
+                    show_weight(info.weight) + ("" if info.override is None else " (set)"),
+                    "" if info.listed else "not offered now",
+                ]
+                for info in found
+            ]
+            head = [
+                f"Server default: {ctx.providers.default_ref}. Discord: {catalog.discord_model() or 'the server default'}.",
+                "A * is a model users may choose; the weight is the credits a token costs.",
+            ]
+            head += [f"! {provider}: {why}" for provider, why in catalog.problems.items()]
+            return "\n".join(head) + "\n" + (table(["", "model", "size", "weight", ""], rows) if rows else "(no model)")
+        if verb in ("enable", "disable") and len(words) == 2:
+            target = words[1]
+            found = await catalog.listing()
+            if target.lower() == "all":
+                refs = [info.ref for info in found]
+            elif target.lower() in ctx.providers.configs:
+                refs = [info.ref for info in found if info.provider == target.lower()]
+            else:
+                refs = [model_ref(ctx, target)]
+            if not refs:
+                raise CommandError("No such model.")
+            catalog.set_enabled(refs, verb == "enable")
+            return f"{len(refs)} model(s) {'now' if verb == 'enable' else 'no longer'} selectable by users."
+        if verb == "weight" and len(words) == 3:
+            ref = model_ref(ctx, words[1])
+            auto = words[2].lower() == "auto"
+            try:
+                weight = None if auto else float(words[2])
+            except ValueError:
+                raise CommandError("A weight is a number of credits per token (0.25, 1, 15...), or auto.") from None
+            catalog.set_weight(ref, weight)
+            return f"{ref} now costs {show_weight(catalog.weight(ref))} credit(s) a token" + (" (from its size)." if auto else ".")
+        if verb == "discord" and len(words) <= 2:
+            if len(words) == 2:
+                catalog.set_discord_model(None if words[1].lower() in ("default", "off", "none") else model_ref(ctx, words[1]))
+            return f"Discord answers with {catalog.discord_model() or 'the server default (' + ctx.providers.default_ref + ')'}."
+    except ProviderError as error:
+        raise CommandError(str(error)) from None
+    raise CommandError(MODELS_USAGE)
 
 
 @registry.command("people", "", "Everybody Clara knows, with their accounts")
@@ -631,9 +711,10 @@ async def discord_command(ctx: CommandContext, args: str) -> str:
 
 @registry.command(
     "limit",
-    "[list | default <tokens|off> | <user> [<tokens|off|default>]]",
-    "Tokens a day each user may use (a day ends at midnight UTC; administrators have no limit): see the usage, "
-    "set the default, or set one user's (tokens: 500000, 500k, 2m; off: no limit; default: follow the default)",
+    "[list | default <credits|off> | <user> [<credits|off|default>]]",
+    "Credits a day each user may use (a token costs the weight of the model, see /models; a day ends at midnight "
+    "UTC; administrators have no limit): see the usage, set the default, or set one user's (credits: 500000, "
+    "500k, 2m; off: no limit; default: follow the default)",
     lambda ctx: ["list", "default"] + [user.name for user in (ctx.users.list() if ctx.users else [])],
 )
 async def limit_command(ctx: CommandContext, args: str) -> str:
@@ -660,19 +741,19 @@ async def limit_command(ctx: CommandContext, args: str) -> str:
             head = f"Default: {show_limit(limits.default())}. Today's usage, UTC:"
             if not found:
                 return head + "\n(no user yet)"
-            return head + "\n" + table(["user", "limit", "used", "tokens/day", "left"], [row(user) for user in found])
+            return head + "\n" + table(["user", "limit", "used", "credits/day", "left"], [row(user) for user in found])
         if verb == "default":
             if len(words) != 2:
-                raise CommandError(f"Default: {show_limit(limits.default())}. Change it: /limit default <tokens|off>")
+                raise CommandError(f"Default: {show_limit(limits.default())}. Change it: /limit default <credits|off>")
             limits.set_default(parse_limit(words[1]))
             return f"The default is now {show_limit(limits.default())} (for users with no limit of their own)."
         user = users.get(verb)
         if user is None:
-            raise CommandError(f"No user called {verb}. Usage: /limit [list | default <tokens|off> | <user> [<tokens|off|default>]]")
+            raise CommandError(f"No user called {verb}. Usage: /limit [list | default <credits|off> | <user> [<credits|off|default>]]")
         if len(words) == 1:
-            return table(["user", "limit", "used", "tokens/day", "left"], [row(user)])
+            return table(["user", "limit", "used", "credits/day", "left"], [row(user)])
         if len(words) != 2:
-            raise CommandError("Usage: /limit <user> <tokens|off|default>")
+            raise CommandError("Usage: /limit <user> <credits|off|default>")
         users.set_token_limit(user.name, None if words[1].lower() == "default" else parse_limit(words[1]))
         user = users.get(user.name)
         note = " They are an administrator: they have no limit whatever is set." if user.is_admin else ""

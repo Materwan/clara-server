@@ -210,6 +210,18 @@ CREATE TABLE IF NOT EXISTS usage (
     tokens    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (person_id, day)
 );
+CREATE TABLE IF NOT EXISTS models (
+    ref     TEXT PRIMARY KEY,  -- "provider:model", as models.py names it
+    enabled INTEGER NOT NULL DEFAULT 0,  -- may users choose it?
+    weight  REAL,  -- credits per token an administrator set (NULL: worked out from the size)
+    size_b  REAL  -- billions of parameters, as the provider last said (NULL: unknown)
+);
+CREATE TABLE IF NOT EXISTS model_choices (
+    person_id INTEGER NOT NULL REFERENCES people (id) ON DELETE CASCADE,
+    surface   TEXT NOT NULL,
+    model     TEXT NOT NULL,
+    PRIMARY KEY (person_id, surface)
+);
 CREATE TABLE IF NOT EXISTS markdown_files (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     person_id  INTEGER NOT NULL REFERENCES people (id) ON DELETE CASCADE,
@@ -625,6 +637,7 @@ class Memory:
             self._db.execute("DELETE FROM projects WHERE person_id = ?", (person_id,))  # their files go with them
             self._db.execute("DELETE FROM markdown_files WHERE person_id = ?", (person_id,))
             self._db.execute("DELETE FROM usage WHERE person_id = ?", (person_id,))
+            self._db.execute("DELETE FROM model_choices WHERE person_id = ?", (person_id,))
             self._db.execute("DELETE FROM messages WHERE person_id = ?", (person_id,))
             self._db.execute("DELETE FROM reminders WHERE person_id = ?", (person_id,))
             self._db.execute("DELETE FROM reminder_events WHERE person_id = ?", (person_id,))
@@ -671,6 +684,12 @@ class Memory:
             (target, source),
         )
         db.execute("DELETE FROM usage WHERE person_id = ?", (source,))
+        db.execute(  # the target's own choices win
+            "INSERT OR IGNORE INTO model_choices (person_id, surface, model)"
+            " SELECT ?, surface, model FROM model_choices WHERE person_id = ?",
+            (target, source),
+        )
+        db.execute("DELETE FROM model_choices WHERE person_id = ?", (source,))
         for row in db.execute("SELECT id, name FROM markdown_files WHERE person_id = ?", (source,)).fetchall():
             name, number = row["name"], 1
             while db.execute(

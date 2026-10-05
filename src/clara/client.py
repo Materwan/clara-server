@@ -44,6 +44,9 @@ HELP = """\
 /notify-after [<seconds> | off | default]
                   how long a task takes before you are notified when it is done
                   (no argument: show it; off: never; default: the server's)
+/model [<number> | <name> | default]
+                  the model Clara answers you with here: no argument lists the ones an
+                  administrator offers, with what a token of each costs in credits
 /new              start a fresh conversation thread (facts are kept)
 /quit             leave"""
 
@@ -154,6 +157,19 @@ class ClaraApi:
         response.raise_for_status()
         return response.json()
 
+    def models(self) -> dict:
+        """The models this user may choose (`models`), the server's own (`default`), what they chose (`choices`)
+        and the model in use here (`current`)."""
+        response = self.http.get("/v1/models", params=self.identity())
+        response.raise_for_status()
+        return response.json()
+
+    def choose_model(self, ref: str | None) -> dict:
+        """Choose a model for this surface (None: the server's own)."""
+        response = self.http.put("/v1/models/choice", json={**self.identity(), "model": ref})
+        response.raise_for_status()
+        return response.json()
+
     def reminders(self) -> list[dict]:
         response = self.http.get("/v1/reminders", params=self.identity())
         response.raise_for_status()
@@ -257,6 +273,42 @@ def describe_notify_after(settings: dict) -> str:
     if own is None:
         return f"You are notified {words(default)} when a task is done (the server's default)."
     return f"You are notified {words(own)} when a task is done (the server's default: {words(default)})."
+
+
+def cost(model: dict) -> str:
+    weight = f"{model['weight']:.3f}".rstrip("0").rstrip(".")
+    return f"{weight} {'credit' if model['weight'] == 1 else 'credits'} per token"
+
+
+def describe_models(info: dict) -> str:
+    """What `/model` shows: the model in use, then every model that may be chosen, numbered."""
+    current = info["current"]
+    lines = [f"Clara answers you here with {current['name']} ({current['provider_label']}), {cost(current)}."]
+    if not info["models"]:
+        return lines[0] + "\n" + "An administrator has not offered other models."
+    default = info["default"]
+    lines.append(f"  0. default: {default['name']} ({default['provider_label']}), {cost(default)}")
+    for number, model in enumerate(info["models"], 1):
+        mark = "*" if model["ref"] == current["ref"] else " "
+        lines.append(f"{mark} {number}. {model['name']} ({model['provider_label']}), {cost(model)}")
+    lines.append("Choose one with /model <number> or /model <name>; /model default goes back to the server's own.")
+    return "\n".join(lines)
+
+
+def pick_model(info: dict, argument: str) -> str | None:
+    """The model `argument` names (a number of the list, a name or `provider:name`): its reference, or None for
+    the server's own. ValueError when it is not one of those offered."""
+    word = argument.strip()
+    if word.lower() in ("default", "0", "server"):
+        return None
+    models = info["models"]
+    if word.isdigit() and 1 <= int(word) <= len(models):
+        return models[int(word) - 1]["ref"]
+    found = [m for m in models if word.lower() in (m["ref"].lower(), m["name"].lower())]
+    if len(found) != 1:
+        several = " (several have that name: write provider:name)" if found else ""
+        raise ValueError(f"{word!r} is not one of the models offered{several}.")
+    return found[0]["ref"]
 
 
 def describe_reminder(reminder: dict) -> str:
@@ -400,6 +452,14 @@ def command(api: ClaraApi, line: str) -> bool:
                 print(error)
                 return True
         print(describe_notify_after(api.settings()))
+    elif name == "/model":
+        if argument:
+            try:
+                api.choose_model(pick_model(api.models(), argument))
+            except ValueError as error:
+                print(error)
+                return True
+        print(describe_models(api.models()))
     elif name == "/reminders":
         print("\n".join(describe_reminder(r) for r in api.reminders()) or "(none)")
     elif name == "/unremind" and argument.isdigit():

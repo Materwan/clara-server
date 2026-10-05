@@ -1,4 +1,4 @@
-"""Daily token limits: who has one, how tokens are counted, what happens at the limit, how an administrator sets it."""
+"""Daily credit limits: who has one, how credits are counted, what happens at the limit, how an administrator sets it."""
 
 import time
 from datetime import datetime, timedelta, timezone
@@ -325,8 +325,8 @@ async def test_the_console_command_shows_and_sets_the_limits(settings, memory, t
         return (await registry.execute(line, ctx)).output
 
     assert "Default: no limit" in await command("/limit")
-    assert "now 2,000,000 tokens a day" in await command("/limit default 2m")
-    assert "erwan: 500,000 tokens a day" in await command("/limit erwan 500k")
+    assert "now 2,000,000 credits a day" in await command("/limit default 2m")
+    assert "erwan: 500,000 credits a day" in await command("/limit erwan 500k")
     assert limits.limit_of(erwan.person_id) == 500_000
     shown = await command("/limit")
     assert "own" in shown and "admin" in shown and "500,000" in shown

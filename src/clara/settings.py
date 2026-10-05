@@ -135,6 +135,19 @@ class ApiProvider:
     api_key: str | None = field(default=None, repr=False)
 
 
+def _positive_number(env: Mapping[str, str], key: str, default: float) -> float:
+    raw = env.get(key, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise SettingsError(f"{key} must be a number, got {raw!r}") from None
+    if not 0 < value < 1e6:
+        raise SettingsError(f"{key} must be greater than 0")
+    return value
+
+
 def _flag(env: Mapping[str, str], key: str, default: bool = False) -> bool:
     raw = env.get(key, "").strip().lower()
     if not raw:
@@ -228,6 +241,9 @@ class Settings:
     # Tokens a day a user may use when an administrator set no limit for them (limits.py); 0: no limit.
     # Administrators have none. `/limit default` changes it while the server runs.
     default_daily_tokens: int = 0
+    # Billions of parameters a model of weight 1 has: a bigger one costs proportionally more credits a token
+    # (models.py), a smaller one less
+    weight_reference_b: float = 8.0
 
     @property
     def logs_dir(self) -> Path:
@@ -371,4 +387,5 @@ class Settings:
             project_inline_percent=inline_percent,
             github_token=text("GITHUB_TOKEN") or None,
             default_daily_tokens=_token_limit(env, "CLARA_DEFAULT_DAILY_TOKENS"),
+            weight_reference_b=_positive_number(env, "CLARA_WEIGHT_REFERENCE_B", 8.0),
         )
