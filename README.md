@@ -335,6 +335,12 @@ password, and sends them once.
 - `login` signs the account in as an existing user; wrong passwords are limited per account
   (`CLARA_AUTH_MAX_FAILURES`). The account joins the user's person; an account that was another user's before is
   only *moved*, nobody is merged.
+- An administrator can also sign an account in, with no password: `/user link <name> <discord:id>`, `/user add <name>
+  discord:<id>`, or on the web site (the Discord page, or a user's menu and *Add user* under Administration, with a
+  search among the people in the bot's servers). The account replaces whoever it was signed in as and is *moved* if
+  it was another user's; otherwise its memories are **merged** into the user's, even when both have some. A new user
+  made this way starts as the person Clara already knows from the account. The built-in bot knows at once; a bot that
+  runs apart reads the signed-in accounts again within 5 minutes.
 - The account stays signed in until `logout`, or until the user is signed out everywhere (`/user logout`, a new
   password), disabled or removed. `/user list` shows the accounts signed in for each user.
 
@@ -477,7 +483,8 @@ surface, with no link codes.
 
 | | |
 | --- | --- |
-| `/user add <name> [admin]` | makes the user and **a password, shown once** (it never passes through the traffic log) |
+| `/user add <name> [admin] [discord:<id>]` | makes the user and **a password, shown once** (it never passes through the traffic log); with a Discord account, signs it in as them |
+| `/user link <name> <discord:id \| member>`, `/user unlink <name> <discord:id>` | signs a Discord account in as the user with no password (`1234`, `discord:1234`, `<@1234>`, or a name the running bot sees), or out |
 | `/user passwd <name>` | a new password; the user is signed out everywhere |
 | `/user admin <name> on\|off`, `/user disable <name>`, `/user enable <name>`, `/user remove <name>` | roles and access. The last administrator cannot be demoted, disabled or removed |
 | `/user logout <name>` | signs a user out of all their devices |

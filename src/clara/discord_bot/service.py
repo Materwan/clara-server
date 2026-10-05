@@ -138,6 +138,29 @@ class DiscordService:
         if self.running and user_id.isdigit():
             self._bot.accounts.signed_out(int(user_id))
 
+    def signed_in(self, user_id: str, user: str) -> None:
+        """An administrator signed the account in: the running bot answers it now, not after its next refresh."""
+        if self.running and user_id.isdigit():
+            self._bot.accounts.signed_in_as(int(user_id), user)
+
+    def members(self, query: str = "", limit: int = 20) -> list[dict]:
+        """The people (not bots) in the servers of the running bot whose name contains `query`, or whose id
+        starts with it, ignoring case: `[{user_id, name, display_name}]`."""
+        bot = self._bot if self.running else None
+        if bot is None or not bot.is_ready():
+            return []
+        query = query.strip().lower().removeprefix("@")
+        found: dict[int, dict] = {}
+        for guild in bot.guilds:
+            for member in guild.members:
+                if member.bot or member.id in found:
+                    continue
+                names = (member.name, member.display_name, getattr(member, "global_name", None) or "")
+                if query and not str(member.id).startswith(query) and not any(query in n.lower() for n in names):
+                    continue
+                found[member.id] = {"user_id": str(member.id), "name": member.name, "display_name": member.display_name}
+        return sorted(found.values(), key=lambda m: (m["display_name"].lower(), m["user_id"]))[:limit]
+
     # -- start and stop ------------------------------------------------------------------------------- #
 
     async def start(self, wait: float = CONNECT_TIMEOUT) -> str:

@@ -1,6 +1,7 @@
 // Administration (for users flagged administrator): users, the server, what Clara knows about people, a console.
 
 import { api } from "./api.js";
+import { discordPicker, signInDiscordDialog } from "./discord.js";
 import { mark } from "./icons.js";
 import {
   ago, avatar, clear, confirmDialog, dateTime, duration, h, icon, openDialog, pageHead, popupMenu, promptDialog, secretDialog, toast,
@@ -52,6 +53,8 @@ function users(box, me) {
       h("tbody", {}, found.map(row))));
   }
 
+  const discordLabel = (account) => account.discord_name || `Discord id ${account.user_id}`;
+
   function row(user) {
     const more = h("button", { class: "ghost icon-btn", "aria-label": `Actions for ${user.name}`, title: "Actions" }, icon("more"));
     more.onclick = (event) => {
@@ -61,13 +64,18 @@ function users(box, me) {
         { label: "Set a password…", icon: "edit", run: () => reset(user, false) },
         { label: user.is_admin ? "Remove administrator rights" : "Make administrator", icon: "admin", run: () => edit(user, { admin: !user.is_admin }) },
         { label: user.disabled ? "Enable" : "Disable", icon: "power", run: () => edit(user, { disabled: !user.disabled }) },
+        "-",
+        !user.disabled && { label: "Sign in a Discord account…", icon: "link", run: async () => { if (await signInDiscordDialog(user.name)) load(); } },
+        ...user.discord_accounts.map((account) => ({ label: `Sign out of Discord: ${discordLabel(account)}`, icon: "logout", run: () => signOutDiscord(user, account) })),
         { label: "Sign out everywhere", icon: "logout", run: () => signOut(user) },
         "-",
         { label: "Remove user", icon: "trash", danger: true, run: () => remove(user) },
       ]);
     };
+    const discord = user.discord_accounts.length > 0 && h("div", { class: "muted small", title: user.discord_accounts.map((a) => `discord:${a.user_id}`).join(", ") },
+      "Discord: ", user.discord_accounts.map(discordLabel).join(", "));
     return h("tr", {},
-      h("td", {}, h("div", { class: "user-cell" }, avatar(user.name), h("div", {}, h("strong", {}, user.name), user.name === me.name && h("span", { class: "muted" }, " (you)")))),
+      h("td", {}, h("div", { class: "user-cell" }, avatar(user.name), h("div", {}, h("strong", {}, user.name), user.name === me.name && h("span", { class: "muted" }, " (you)"), discord))),
       h("td", {}, user.disabled ? h("span", { class: "badge off" }, "Disabled") : user.is_admin ? h("span", { class: "badge admin" }, "Administrator") : h("span", { class: "badge" }, "User")),
       h("td", { "data-label": "Person" }, user.person ? `${user.person.name} (#${user.person.id})` : "None"),
       h("td", { class: "num", "data-label": "Devices", title: [...user.surfaces, ...user.signed_in_accounts].join(", ") },
@@ -106,6 +114,11 @@ function users(box, me) {
     } catch (error) { fail(error); }
   }
 
+  async function signOutDiscord(user, account) {
+    if (!await confirmDialog("Sign out of Discord", `Sign ${discordLabel(account)} out of ${user.name}? Clara stops answering them on Discord until they sign in again.`, "Sign out", true)) return;
+    try { await api.delete(`/v1/admin/discord/accounts/${encodeURIComponent(account.user_id)}`); toast("Signed out."); load(); } catch (error) { fail(error); }
+  }
+
   async function remove(user) {
     if (!await confirmDialog("Remove user", `${user.name} will no longer be able to sign in. Their memories and conversations are kept (erase them under People & memory).`, "Remove", true)) return;
     try { await api.delete(`/v1/admin/users/${encodeURIComponent(user.name)}`); toast("User removed."); load(); } catch (error) { fail(error); }
@@ -113,22 +126,31 @@ function users(box, me) {
 
   async function add() {
     const result = await openDialog((close) => {
-      const name = h("input", { type: "text", autocomplete: "off", autocapitalize: "none", required: true, pattern: "[a-zA-Z0-9][a-zA-Z0-9_.\\-]{0,31}", autofocus: true });
+      let named = false; // the name was typed: a Discord account chosen afterwards does not replace it
+      const name = h("input", { type: "text", autocomplete: "off", autocapitalize: "none", required: true, pattern: "[a-zA-Z0-9][a-zA-Z0-9_.\\-]{0,31}", autofocus: true, oninput: () => { named = name.value !== ""; } });
       const password = h("input", { type: "text", autocomplete: "off", placeholder: "Leave empty to generate one" });
       const admin = h("input", { type: "checkbox" });
-      return h("form", { onsubmit: (event) => { event.preventDefault(); close({ name: name.value, password: password.value, admin: admin.checked }); } },
+      const discord = discordPicker({ browse: false, onPick: (member) => {
+        if (!named && member.name) name.value = member.name.toLowerCase().replace(/[^a-z0-9_.-]/g, "").replace(/^[^a-z0-9]+/, "").slice(0, 32);
+      } });
+      return h("form", { onsubmit: (event) => {
+        event.preventDefault();
+        if (discord.pending) return discord.complain("Pick someone in the list, paste a Discord user id, or clear the field.");
+        close({ name: name.value, password: password.value, admin: admin.checked, discord_id: discord.value || null });
+      } },
         h("h3", {}, "Add a user"),
         h("div", { class: "stack" },
           h("label", { class: "field" }, "User name", name, h("span", { class: "hint" }, "Letters, digits, dots, dashes and underscores")),
           h("label", { class: "field" }, "Password", password, h("span", { class: "hint" }, "10 characters or more")),
-          h("label", { class: "check" }, admin, "Administrator")),
-        h("p", { class: "muted small" }, "If Clara already knows an account with this name (cli:name, app:name…), the user takes it over with its memories."),
+          h("label", { class: "check" }, admin, "Administrator"),
+          h("label", { class: "field" }, "Discord account (optional)", discord.node)),
+        h("p", { class: "muted small" }, "With a Discord account, Clara answers them there right away (no /login) and the user starts with what she already knows from it. Otherwise, if Clara knows an account with this name (cli:name, app:name…), the user takes it over with its memories."),
         h("div", { class: "actions" }, h("button", { type: "button", onclick: () => close(null) }, "Cancel"), h("button", { class: "primary", type: "submit" }, "Add user")));
     });
     if (!result) return;
     try {
-      const done = await api.post("/v1/admin/users", { name: result.name, password: result.password || null, admin: result.admin });
-      await secretDialog(`${done.user.name} was added`, "Give them this password; they can change it on the Account page.", done.password);
+      const done = await api.post("/v1/admin/users", { ...result, password: result.password || null });
+      await secretDialog(`${done.user.name} was added`, `Give them this password${result.discord_id ? " (for the web site and the app; on Discord they are already signed in)" : ""}; they can change it on the Account page.`, done.password);
       load();
     } catch (error) { fail(error); }
   }

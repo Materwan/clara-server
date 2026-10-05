@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable
 
 from .agent import Agent
+from .clientapi import DISCORD
 from .discord_bot.service import DiscordService
 from .lifecycle import Lifecycle
 from .memory import Memory, Person
@@ -372,13 +373,36 @@ async def link_command(ctx: CommandContext, args: str) -> str:
     return f"{target.name} now has: {accounts}"
 
 
-USER_ACTIONS = ["list", "add", "passwd", "admin", "disable", "enable", "remove", "logout"]
+USER_ACTIONS = ["list", "add", "passwd", "admin", "disable", "enable", "remove", "logout", "link", "unlink"]
+DISCORD_REFERENCE = re.compile(r"^(?:discord:|<@!?)?([0-9]{1,20})>?$")
+
+
+def discord_account(ctx: CommandContext, text: str) -> str:
+    """The Discord id in `1234`, `discord:1234`, `<@1234>`, or the name of a member the running bot sees."""
+    found = DISCORD_REFERENCE.match(text.strip())
+    if found:
+        return found.group(1)
+    name = text.strip().removeprefix("@").lower()
+    members = ctx.discord.members(name, limit=1000) if ctx.discord is not None else []
+    exact = [m for m in members if name in (m["name"].lower(), m["display_name"].lower())]
+    if len(exact) == 1:
+        return exact[0]["user_id"]
+    if not members:
+        running = ctx.discord is not None and ctx.discord.state == "running"
+        raise CommandError(
+            f"No Discord member called {text.strip()!r}." if running
+            else "Give the Discord id (e.g. discord:1234): the bot is not running, it cannot look names up."
+        )
+    choices = ", ".join(f"{m['display_name']} ({m['name']}, discord:{m['user_id']})" for m in (exact or members)[:10])
+    raise CommandError(f"Which one? {choices}")
 
 
 @registry.command(
     "user",
-    "[list | add <name> [admin] | passwd <name> | admin <name> on|off | disable|enable|remove|logout <name>]",
-    "People who log in with a password: add one (a password is made and shown once), reset it, sign out",
+    "[list | add <name> [admin] [discord:<id>] | passwd <name> | admin <name> on|off | disable|enable|remove|logout <name>"
+    " | link|unlink <name> <discord:id | member>]",
+    "People who log in with a password: add one (a password is made and shown once), reset it, sign out,"
+    " sign a Discord account in as them",
     lambda ctx: USER_ACTIONS,
 )
 async def user_command(ctx: CommandContext, args: str) -> CommandResult | str:
@@ -412,17 +436,50 @@ async def user_command(ctx: CommandContext, args: str) -> CommandResult | str:
         if verb == "add":
             name = named()
             flags = [word.lower() for word in words[1:]]
-            if any(flag != "admin" for flag in flags):
-                raise CommandError("Usage: /user add <name> [admin]")
+            discord = [flag for flag in flags if flag != "admin"]
+            if len(discord) > 1 or (discord and not DISCORD_REFERENCE.match(discord[0])):
+                raise CommandError("Usage: /user add <name> [admin] [discord:<id>]")
             password = generate_password()
-            user = users.create(name, password, admin="admin" in flags)
+            if discord:
+                discord_id = discord_account(ctx, discord[0])
+                user = users.create_with_account(name, password, "admin" in flags, DISCORD, discord_id, "console")
+                if ctx.discord is not None:
+                    ctx.discord.signed_in(discord_id, user.name)
+            else:
+                user = users.create(name, password, admin="admin" in flags)
             person = ctx.memory.person_by_id(user.person_id)
             return CommandResult(
-                f"Created {user.name}{' (administrator)' if user.is_admin else ''}, the person {person.name} (id {person.id}).\n"
+                f"Created {user.name}{' (administrator)' if user.is_admin else ''}, the person {person.name} (id {person.id})"
+                + (f", signed in on discord:{discord_id}" if discord else "") + ".\n"
                 f"Password: {password}\n"
                 "Shown once. They can change it on the web site (Account), or you can reset it: /user passwd " + user.name,
                 sensitive=True,
             )
+
+        if verb in ("link", "unlink"):
+            name = named()
+            if len(words) < 2:
+                raise CommandError(f"Usage: /user {verb} <name> <discord:id | member name>")
+            user = users.get(name)
+            if user is None:
+                raise CommandError(f"No user called {name}.")
+            discord_id = discord_account(ctx, " ".join(words[1:]))
+            if verb == "unlink":
+                if f"{DISCORD}:{discord_id}" not in users.accounts_signed_in_as(user.name):
+                    raise CommandError(f"discord:{discord_id} is not signed in as {user.name}.")
+                users.sign_out_account(DISCORD, discord_id)
+                if ctx.discord is not None:
+                    ctx.discord.signed_out(discord_id)
+                return f"discord:{discord_id} is signed out of {user.name}: Clara no longer answers them."
+            if user.disabled:
+                raise CommandError(f"{user.name} is disabled: /user enable {user.name} first.")
+            previous = users.account_user(DISCORD, discord_id)
+            users.attach_account(user, DISCORD, discord_id, "console")
+            if ctx.discord is not None:
+                ctx.discord.signed_in(discord_id, user.name)
+            log.info("signed discord:%s in as %s from the console", discord_id, user.name)
+            was = f" (instead of {previous.name})" if previous is not None and previous.name != user.name else ""
+            return f"discord:{discord_id} is signed in as {user.name}{was}: Clara answers them now."
 
         if verb == "passwd":
             name = named()

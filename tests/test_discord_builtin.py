@@ -36,9 +36,31 @@ class FakeUser:
 class FakeAccounts:
     def __init__(self):
         self.forgotten = []
+        self.known = {}
 
     def signed_out(self, user_id):
         self.forgotten.append(user_id)
+        self.known.pop(user_id, None)
+
+    def signed_in_as(self, user_id, user):
+        self.known[user_id] = user
+
+
+class FakeMember:
+    def __init__(self, user_id, name, display_name, bot=False):
+        self.id, self.name, self.display_name, self.bot = user_id, name, display_name, bot
+        self.global_name = None
+
+
+class FakeGuild:
+    def __init__(self, *members):
+        self.members = list(members)
+
+
+MEMBERS = [
+    FakeGuild(FakeMember(111, "erwan_d", "Erwan"), FakeMember(222, "bobby", "Bob"), FakeMember(123, "clara", "Clara", bot=True)),
+    FakeGuild(FakeMember(222, "bobby", "Bobby B"), FakeMember(333, "alice.w", "Alice")),
+]
 
 
 class FakeDiscord:
@@ -50,7 +72,7 @@ class FakeDiscord:
         self.api = api
         self.ready = self.closed = False
         self.user = FakeUser(123, "Clara#0001")
-        self.guilds = ["a", "b"]
+        self.guilds = MEMBERS
         self.latency = 0.042
         self.accounts = FakeAccounts()
         self._stop = asyncio.Event()
@@ -262,3 +284,110 @@ def test_the_discord_page_routes(app):
         assert client.delete("/v1/admin/discord/accounts/111", headers=ADMIN).status_code == 404
         assert client.post("/v1/admin/discord/explode", headers=ADMIN).status_code == 404
         assert client.post("/v1/admin/discord/stop", headers=ADMIN).json()["bot"]["state"] == "stopped"
+
+
+# --- an administrator signs a Discord account in --------------------------------------------------------
+
+
+def test_the_members_of_the_bots_servers_can_be_searched(app):
+    with TestClient(app) as client:
+        stopped = client.get("/v1/admin/discord/members", headers=ADMIN).json()
+        assert stopped == {"running": False, "members": []}
+        client.post("/v1/admin/discord/start", headers=ADMIN)
+        app.state.users.sign_in_account(app.state.users.create("bob", PASSWORD), "discord", "222")
+        everybody = client.get("/v1/admin/discord/members", headers=ADMIN).json()
+        assert everybody["running"]
+        assert [(m["display_name"], m["user"]) for m in everybody["members"]] == [("Alice", None), ("Bob", "bob"), ("Erwan", None)]
+        assert [m["user_id"] for m in client.get("/v1/admin/discord/members?q=BOB", headers=ADMIN).json()["members"]] == ["222"]
+        assert [m["name"] for m in client.get("/v1/admin/discord/members?q=33", headers=ADMIN).json()["members"]] == ["alice.w"]
+        assert client.get("/v1/admin/discord/members?q=clara", headers=ADMIN).json()["members"] == []  # bots are left out
+        assert client.get("/v1/admin/discord/members", headers={"Authorization": "Bearer secret-discord"}).status_code == 401
+
+
+def test_an_administrator_signs_a_discord_account_in_without_a_password(app):
+    users, memory = app.state.users, app.state.memory
+    with TestClient(app) as client:
+        client.post("/v1/admin/discord/start", headers=ADMIN)
+        bot = FakeDiscord.made[-1]
+        erwan = users.create("erwan", PASSWORD)
+        stranger = memory.resolve("discord", "111", "Erwan D")  # talked before signing in was required
+        memory.add_fact(stranger.id, "Likes chess")
+        memory.add_fact(users.person_of(erwan).id, "Lives in Paris")
+
+        done = client.post("/v1/admin/discord/accounts", json={"user_id": "111", "user": "Erwan"}, headers=ADMIN)
+        assert done.json() == {"user_id": "111", "user": "erwan", "person": "erwan", "discord_name": "erwan_d"}
+        assert users.account_user("discord", "111").name == "erwan" and bot.accounts.known == {111: "erwan"}
+        person = users.person_of(erwan)
+        assert memory.find_person("discord", "111") == person and memory.person_by_id(stranger.id) is None  # merged
+        assert {f.text for f in memory.facts(person.id)} == {"Likes chess", "Lives in Paris"}
+        assert users.get("erwan").last_login_at is None  # erwan did not sign in: an administrator did
+
+        # signed in as somebody else: the account moves, bob keeps his memories
+        bob = users.create("bob", PASSWORD)
+        assert client.post("/v1/admin/discord/accounts", json={"user_id": 111, "user": "bob"}, headers=ADMIN).status_code == 200
+        assert users.account_user("discord", "111").name == "bob" and bot.accounts.known == {111: "bob"}
+        assert memory.find_person("discord", "111") == users.person_of(bob)
+        assert [f.text for f in memory.facts(person.id)] != [] and memory.person_by_id(person.id) is not None
+
+        listed = {u["name"]: u for u in client.get("/v1/admin/users", headers=ADMIN).json()["users"]}
+        assert listed["bob"]["discord_accounts"] == [{"user_id": "111", "discord_name": "erwan_d"}]
+        assert listed["erwan"]["discord_accounts"] == []
+
+        assert client.post("/v1/admin/discord/accounts", json={"user_id": "111", "user": "nobody"}, headers=ADMIN).status_code == 404
+        assert client.post("/v1/admin/discord/accounts", json={"user_id": "abc", "user": "bob"}, headers=ADMIN).status_code == 422
+        users.set_disabled("bob", True)
+        refused = client.post("/v1/admin/discord/accounts", json={"user_id": "222", "user": "bob"}, headers=ADMIN)
+        assert refused.status_code == 422 and "disabled" in refused.json()["detail"]
+        assert client.post("/v1/admin/discord/accounts", json={"user_id": "222", "user": "erwan"},
+                           headers={"Authorization": "Bearer secret-discord"}).status_code == 401
+
+
+def test_a_user_is_made_with_a_discord_account(app):
+    users, memory = app.state.users, app.state.memory
+    with TestClient(app) as client:
+        client.post("/v1/admin/discord/start", headers=ADMIN)
+        known = memory.resolve("discord", "333", "Alice")
+        memory.add_fact(known.id, "Has a cat")
+        made = client.post("/v1/admin/users", json={"name": "alice", "discord_id": "333"}, headers=ADMIN).json()
+        assert made["password"] and made["user"]["person"] == {"id": known.id, "name": "Alice"}  # the account's person
+        assert made["user"]["discord_accounts"] == [{"user_id": "333", "discord_name": None}]
+        assert users.account_user("discord", "333").name == "alice" and FakeDiscord.made[-1].accounts.known == {333: "alice"}
+
+        # an account that is another user's: the new user is a new person, the account moves to them
+        other = client.post("/v1/admin/users", json={"name": "alice2", "discord_id": "333"}, headers=ADMIN).json()
+        assert other["user"]["person"]["id"] != known.id and users.account_user("discord", "333").name == "alice2"
+        assert [f.text for f in memory.facts(known.id)] == ["Has a cat"]
+
+        assert client.post("/v1/admin/users", json={"name": "x", "discord_id": "<@1>"}, headers=ADMIN).status_code == 422
+        taken = client.post("/v1/admin/users", json={"name": "alice", "discord_id": "444"}, headers=ADMIN)
+        assert taken.status_code == 422 and users.account_user("discord", "444") is None
+
+
+async def test_the_console_signs_discord_accounts_in(app):
+    ctx = app.state.commands
+    users = app.state.users
+    await registry.execute("/discord start", ctx)
+    users.create("erwan", PASSWORD)
+
+    linked = (await registry.execute("/user link erwan <@111>", ctx)).output
+    assert "discord:111 is signed in as erwan" in linked and users.account_user("discord", "111").name == "erwan"
+    assert FakeDiscord.made[-1].accounts.known == {111: "erwan"}
+    users.create("bob", PASSWORD)
+    assert "(instead of erwan)" in (await registry.execute("/user link bob discord:111", ctx)).output
+    assert "is signed in as bob" in (await registry.execute("/user link bob alice", ctx)).output  # a member's name
+    assert users.account_user("discord", "333").name == "bob"
+    assert "Which one?" in (await registry.execute("/user link bob e", ctx)).output
+    assert "No Discord member" in (await registry.execute("/user link bob zed", ctx)).output
+    assert "No user called" in (await registry.execute("/user link nobody 111", ctx)).output
+
+    assert "not signed in as erwan" in (await registry.execute("/user unlink erwan 111", ctx)).output
+    assert "signed out of bob" in (await registry.execute("/user unlink bob 111", ctx)).output
+    assert users.account_user("discord", "111") is None and 111 in FakeDiscord.made[-1].accounts.forgotten
+
+    made = await registry.execute("/user add carol discord:222", ctx)
+    assert made.sensitive and "signed in on discord:222" in made.output and users.account_user("discord", "222").name == "carol"
+    assert "Usage" in (await registry.execute("/user add dave bobby", ctx)).output  # names are for /user link
+
+    await registry.execute("/discord stop", ctx)
+    assert "the bot is not running" in (await registry.execute("/user link bob alice", ctx)).output
+    assert "discord:333" in (await registry.execute("/user list", ctx)).output

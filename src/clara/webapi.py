@@ -12,7 +12,7 @@ administration of users and people, reading a PDF, and the web site itself (`web
     POST   /v1/documents/extract        the text of a PDF (body: the bytes)
 
     GET    /v1/admin/users              (administrators; also with an admin token)
-    POST   /v1/admin/users              {name, password?, admin?} -> the password, shown once
+    POST   /v1/admin/users              {name, password?, admin?, discord_id?} -> the password, shown once
     PATCH  /v1/admin/users/{name}       {admin?, disabled?, password?, generate_password?}
     DELETE /v1/admin/users/{name}
     POST   /v1/admin/users/{name}/sign-out
@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field
 
 from . import ingest
 from .auth import COOKIE, WEB_HEADER, Admin, Client, LoggedIn
+from .clientapi import DISCORD, DISCORD_ID, announce_discord_sign_in
 from .ingest import IngestError
 from .memory import MergeRefused
 from .users import User, UserError, generate_password
@@ -74,6 +75,7 @@ class NewUserBody(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     password: str | None = Field(default=None, max_length=512)  # none: Clara makes one
     admin: bool = False
+    discord_id: str | None = Field(default=None, pattern=DISCORD_ID)  # signed in as the new user at once
 
 
 class UserPatch(BaseModel):
@@ -91,6 +93,8 @@ def describe_user(app: FastAPI, user: User) -> dict:
     users = app.state.users
     sessions = users.sessions_of(user.name)
     person = app.state.memory.person_by_id(user.person_id)
+    accounts = users.accounts_signed_in_as(user.name)
+    discord_ids = [account.removeprefix(f"{DISCORD}:") for account in accounts if account.startswith(f"{DISCORD}:")]
     return {
         "name": user.name,
         "is_admin": user.is_admin,
@@ -100,7 +104,10 @@ def describe_user(app: FastAPI, user: User) -> dict:
         "person": {"id": person.id, "name": person.name} if person else None,
         "sessions": len(sessions),
         "surfaces": sorted({s.surface for s in sessions}),
-        "signed_in_accounts": users.accounts_signed_in_as(user.name),  # signed in by a client (Discord)
+        "signed_in_accounts": accounts,  # signed in by a client (Discord)
+        "discord_accounts": [
+            {"user_id": user_id, "discord_name": app.state.discord.discord_name(user_id)} for user_id in discord_ids
+        ],
     }
 
 
@@ -286,12 +293,18 @@ async def admin_users(admin: Admin, request: Request) -> dict:
 @router.post("/v1/admin/users", status_code=201)
 async def admin_add_user(body: NewUserBody, admin: Admin, request: Request) -> dict:
     password = body.password or generate_password()
+    users = request.app.state.users
     try:
-        user = await asyncio.to_thread(request.app.state.users.create, body.name, password, body.admin)
+        if body.discord_id:
+            user = await asyncio.to_thread(users.create_with_account, body.name, password, body.admin, DISCORD, body.discord_id)
+        else:
+            user = await asyncio.to_thread(users.create, body.name, password, body.admin)
     except UserError as error:
         raise HTTPException(422, str(error)) from None
     secret(request)
     log.info("%s created the user %s", admin, user.name)
+    if body.discord_id:
+        announce_discord_sign_in(request, user, body.discord_id, admin)
     return {"user": describe_user(request.app, user), "password": password}
 
 

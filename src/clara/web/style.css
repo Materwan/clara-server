@@ -662,6 +662,21 @@ dialog p { color: var(--text-2); }
 dialog .stack { margin: 1rem 0 .4rem; }
 dialog label.field input { width: 100%; }
 dialog .actions { display: flex; justify-content: flex-end; gap: .55rem; margin-top: 1.3rem; }
+dialog label.field select { width: 100%; }
+
+/* choosing a Discord account */
+.picker { display: flex; flex-direction: column; gap: .35rem; }
+.picker .hint:empty { display: none; }
+label.field .picker .hint.error { color: var(--danger); }
+.pick-list { display: flex; flex-direction: column; max-height: 13.5rem; overflow-y: auto; }
+.pick-list:empty { display: none; }
+.pick-list .pick {
+  display: flex; align-items: center; gap: .6rem; width: 100%; justify-content: flex-start; text-align: left;
+  border: none; background: none; padding: .4rem .5rem; border-radius: 8px; font-weight: 400;
+}
+.pick-list .pick:hover, .pick-list .pick:focus-visible { background: var(--hover); }
+.pick-list .pick .avatar { width: 26px; height: 26px; font-size: .75rem; }
+.pick-list .pick .grow { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @keyframes rise { from { opacity: 0; transform: translateY(10px); } }
 
 #toasts {

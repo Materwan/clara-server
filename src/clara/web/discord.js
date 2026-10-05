@@ -3,7 +3,7 @@
 
 import { api } from "./api.js";
 import { mark } from "./icons.js";
-import { clear, confirmDialog, duration, h, icon, pageHead, toast } from "./ui.js";
+import { avatar, clear, confirmDialog, duration, h, icon, openDialog, pageHead, toast } from "./ui.js";
 
 const STATES = {
   running: ["Running", "ok"],
@@ -114,9 +114,10 @@ export function mountDiscord(container) {
 
   function drawAccounts(accounts) {
     const head = h("div", { class: "panel-head" }, h("div", { class: "grow" }, h("h3", {}, "Signed-in accounts"),
-      h("p", { class: "muted small" }, "Discord accounts that may talk to Clara, and the Clara user each one is signed in as.")));
+      h("p", { class: "muted small" }, "Discord accounts that may talk to Clara, and the Clara user each one is signed in as.")),
+      h("button", { onclick: async () => { if (await signInDiscordDialog()) load(); } }, icon("link", { size: 18 }), "Sign in an account"));
     if (!accounts.length) {
-      clear(accountsPanel).append(head, h("div", { class: "empty-state" }, mark(36), h("strong", {}, "Nobody yet"), "People sign in on Discord with /register or /login."));
+      clear(accountsPanel).append(head, h("div", { class: "empty-state" }, mark(36), h("strong", {}, "Nobody yet"), "People sign in on Discord with /register or /login, or you sign them in here."));
       return;
     }
     clear(accountsPanel).append(head, h("table", { class: "grid cards" },
@@ -134,4 +135,121 @@ export function mountDiscord(container) {
   load();
   const timer = setInterval(() => { if (!busy) load(); }, 5000);
   return { destroy() { clearInterval(timer); } };
+}
+
+// ---- picking a Discord account (the Discord page and the Users page) -------------------------------------------
+
+const DISCORD_ID = /^(?:discord:|<@!?)?(\d{1,20})>?$/;
+
+/** A search among the people in the running bot's servers; a pasted Discord id is taken as it is (the bot may be
+ * stopped, or not share a server with them). `onPick(member)` is told each choice: `{user_id, name?, display_name?, user?}`
+ * (`user`: the Clara user the account is signed in as now). With `browse` off, nobody is listed before a name is typed. */
+export function discordPicker({ onPick = () => {}, browse = true } = {}) {
+  let chosen = null;
+  let timer = null;
+  let asked = 0;
+  const input = h("input", { type: "search", autocomplete: "off", autocapitalize: "none", spellcheck: false, placeholder: "Name, or Discord user id", "aria-label": "Discord account" });
+  const status = h("span", { class: "hint", "aria-live": "polite" });
+  const list = h("div", { class: "pick-list", role: "group", "aria-label": "People in the bot's servers" });
+
+  const label = (member) => member.display_name ? `${member.display_name} (@${member.name})` : `Discord id ${member.user_id}`;
+
+  function choose(member) {
+    chosen = member;
+    input.value = member.display_name || member.user_id;
+    clear(list);
+    status.className = "hint";
+    status.textContent = `${label(member)}${member.display_name ? `, id ${member.user_id}` : ""}${member.user ? ` · signed in as ${member.user} now` : ""}`;
+    onPick(member);
+  }
+
+  async function search() {
+    const text = input.value.trim();
+    const id = text.match(DISCORD_ID);
+    chosen = null;
+    const ticket = ++asked;
+    if (!text && !browse) {
+      clear(list);
+      status.className = "hint";
+      status.textContent = "Search the bot's servers by name, or paste a Discord user id.";
+      return;
+    }
+    let found;
+    try { found = await api.get(`/v1/admin/discord/members?q=${encodeURIComponent(id ? id[1] : text)}`); } catch (error) {
+      status.textContent = error.detail || String(error);
+      return;
+    }
+    if (ticket !== asked) return; // an older answer, after a newer question
+    clear(list);
+    status.className = "hint";
+    const exact = id && found.members.find((member) => member.user_id === id[1]);
+    if (id) return choose(exact || { user_id: id[1] });
+    if (!found.running) status.textContent = "The bot is not running: paste their Discord user id (Discord settings → Advanced → Developer Mode, then right-click them → Copy User ID).";
+    else if (!found.members.length) status.textContent = text ? "Nobody by that name in the bot's servers. A Discord user id works too." : "Nobody in the bot's servers yet. A Discord user id works too.";
+    else status.textContent = "";
+    list.append(...found.members.map((member) => h("button", { type: "button", class: "pick", onclick: () => choose(member) },
+      avatar(member.display_name),
+      h("span", { class: "grow" }, h("strong", {}, member.display_name), h("span", { class: "muted small" }, ` @${member.name}`)),
+      member.user && h("span", { class: "badge", title: "Signed in as" }, member.user))));
+  }
+
+  input.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(search, 200); });
+  input.addEventListener("keydown", (event) => { // Enter picks the only match instead of sending the form
+    if (event.key !== "Enter" || chosen) return;
+    event.preventDefault();
+    const options = list.querySelectorAll("button");
+    if (options.length === 1) options[0].click();
+  });
+  search();
+
+  return {
+    node: h("div", { class: "picker" }, input, status, list),
+    get value() { return chosen ? chosen.user_id : ""; },
+    get chosen() { return chosen; },
+    /** Text typed but nobody chosen: the form must not go on as if the field were empty. */
+    get pending() { return !chosen && input.value.trim() !== ""; },
+    complain(text) {
+      status.className = "hint error";
+      status.textContent = text;
+      input.focus();
+    },
+  };
+}
+
+/** Sign a Discord account in as a Clara user, with no password; `user` given, or chosen in the dialog. True when done. */
+export async function signInDiscordDialog(user = null) {
+  let users = [];
+  if (!user) {
+    try { users = (await api.get("/v1/admin/users")).users.filter((u) => !u.disabled); } catch (error) { fail(error); return false; }
+    if (!users.length) { toast("Add a user first (Administration → Users).", true); return false; }
+  }
+  const result = await openDialog((close) => {
+    const warning = h("p", { class: "notice warn small", hidden: true });
+    const target = () => user || select.value;
+    const explain = () => {
+      const now = picker.chosen && picker.chosen.user;
+      warning.hidden = !now || now === target();
+      warning.textContent = now ? `This account is signed in as ${now} now: it will be ${target()}'s instead (${now} keeps their memories).` : "";
+    };
+    const picker = discordPicker({ onPick: explain });
+    const select = !user && h("select", { onchange: explain }, users.map((u) => h("option", { value: u.name }, u.person ? `${u.name} (${u.person.name})` : u.name)));
+    return h("form", { onsubmit: (event) => {
+      event.preventDefault();
+      if (!picker.value) return picker.complain(picker.pending ? "Pick someone in the list, or paste a Discord user id." : "Choose the Discord account.");
+      close({ user_id: picker.value, user: target(), who: picker.chosen.display_name || `Discord id ${picker.value}` });
+    } },
+      h("h3", {}, user ? `Sign in a Discord account as ${user}` : "Sign in a Discord account"),
+      h("div", { class: "stack" },
+        h("label", { class: "field" }, "Discord account", picker.node),
+        select && h("label", { class: "field" }, "Clara user", select),
+        warning),
+      h("p", { class: "muted small" }, "No password is asked: Clara answers them on Discord right away. What she already knows from this Discord account joins the user's memories."),
+      h("div", { class: "actions" }, h("button", { type: "button", onclick: () => close(null) }, "Cancel"), h("button", { class: "primary", type: "submit" }, "Sign in")));
+  });
+  if (!result) return false;
+  try {
+    await api.post("/v1/admin/discord/accounts", { user_id: result.user_id, user: result.user });
+    toast(`${result.who} can talk to Clara as ${result.user}.`);
+    return true;
+  } catch (error) { fail(error); return false; }
 }

@@ -19,6 +19,8 @@ the web site, the desktop app or the terminal.
     PATCH  /v1/admin/spaces/{id}        {chime: true | false | null}
     PATCH  /v1/admin/people/{id}        {relation: 0-100 | null}
     GET    /v1/admin/discord            the built-in Discord bot, its servers, the Discord accounts signed in
+    GET    /v1/admin/discord/members    ?q=  people in the bot's servers (to pick one to sign in)
+    POST   /v1/admin/discord/accounts   {user_id, user}: sign a Discord account in as a user, no password
     POST   /v1/admin/discord/{action}   start | stop | restart
     DELETE /v1/admin/discord/accounts/{id}  sign a Discord account out
 """
@@ -87,6 +89,19 @@ class PersonPatch(BaseModel):
     relation: int | None = Field(ge=0, le=100)  # null: no relationship
 
 
+DISCORD_ID = r"^[0-9]{1,20}$"
+
+
+class DiscordLink(BaseModel):
+    user_id: str = Field(pattern=DISCORD_ID)
+    user: str = Field(min_length=1, max_length=64)
+
+    @field_validator("user_id", mode="before")
+    @classmethod
+    def _ids_may_be_numbers(cls, value):
+        return str(value) if isinstance(value, int) and not isinstance(value, bool) else value
+
+
 def describe_space(space: Space, default: bool) -> dict:
     return {
         "id": space.id, "surface": space.surface, "name": space.name, "chime": space.chime,
@@ -107,7 +122,7 @@ def _login_surface(request: Request, client: str, body: _Account) -> None:
 
 
 def _owned_by_a_user(request: Request, person: Person) -> bool:
-    return any(user.person_id == person.id for user in request.app.state.users.list())
+    return request.app.state.users.owns_person(person.id)
 
 
 def _attach(request: Request, surface: str, external_id: str, user: User) -> None:
@@ -298,19 +313,55 @@ async def admin_discord(admin: Admin, request: Request) -> dict:
     bot = state.discord
     memory = state.memory
     default = memory.chime_default()
-    accounts = []
-    for external_id, user in sorted(state.users.signed_in_accounts(DISCORD).items(), key=lambda item: item[1].name):
-        person = memory.find_person(DISCORD, external_id)
-        accounts.append({
-            "user_id": external_id, "user": user.name, "person": person.name if person else None,
-            "discord_name": bot.discord_name(external_id),
-        })
+    accounts = [
+        describe_discord_account(request, external_id, user)
+        for external_id, user in sorted(state.users.signed_in_accounts(DISCORD).items(), key=lambda item: item[1].name)
+    ]
     return {
         "bot": bot.status(),
         "default_chime": default,
         "spaces": [describe_space(space, default) for space in memory.spaces(DISCORD)],
         "accounts": accounts,
     }
+
+
+def describe_discord_account(request: Request, user_id: str, user: User) -> dict:
+    person = request.app.state.memory.find_person(DISCORD, user_id)
+    return {
+        "user_id": user_id, "user": user.name, "person": person.name if person else None,
+        "discord_name": request.app.state.discord.discord_name(user_id),
+    }
+
+
+def announce_discord_sign_in(request: Request, user: User, user_id: str, admin: str) -> None:
+    """An administrator signed a Discord account in as `user`: the running bot answers it at once."""
+    request.app.state.discord.signed_in(user_id, user.name)
+    log.info("admin %s signed discord:%s in as %s", admin, user_id, user.name)
+
+
+@router.get("/v1/admin/discord/members")
+async def admin_discord_members(admin: Admin, request: Request, q: str = "") -> dict:
+    """People in the servers of the running bot (`running: false` when it is not), with the user each one is
+    signed in as."""
+    state = request.app.state
+    signed_in = {external_id: user.name for external_id, user in state.users.signed_in_accounts(DISCORD).items()}
+    members = [{**member, "user": signed_in.get(member["user_id"])} for member in state.discord.members(q[:100])]
+    return {"running": state.discord.state == "running", "members": members}
+
+
+@router.post("/v1/admin/discord/accounts")
+async def admin_discord_sign_in(body: DiscordLink, admin: Admin, request: Request) -> dict:
+    """Sign a Discord account in as a user (it replaces whoever it was signed in as). Its memories are merged
+    into the user's, unless they are another user's: then the account only moves."""
+    users = request.app.state.users
+    user = users.get(body.user)
+    if user is None:
+        raise HTTPException(404, f"No user called {body.user}")
+    if user.disabled:
+        raise HTTPException(422, f"{user.name} is disabled: enable them first")
+    users.attach_account(user, DISCORD, body.user_id)
+    announce_discord_sign_in(request, user, body.user_id, admin)
+    return describe_discord_account(request, body.user_id, user)
 
 
 @router.post("/v1/admin/discord/{action}")

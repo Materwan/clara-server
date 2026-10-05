@@ -308,7 +308,7 @@ class Users:
     # A client that speaks for many people (the Discord bot) has no token per person: it sends their
     # password once, and from then on the account (`discord:1234`) is *signed in* as that user until it
     # signs out, the user is signed out everywhere, disabled or removed.
-    def sign_in_account(self, user: User, surface: str, external_id: str, client: str = "") -> None:
+    def sign_in_account(self, user: User, surface: str, external_id: str, client: str = "", touch: bool = True) -> None:
         with self._memory.lock, self._memory.database as db:
             db.execute(
                 "INSERT INTO account_logins (surface, external_id, user, client, created_at) VALUES (?, ?, ?, ?, ?)"
@@ -316,7 +316,38 @@ class Users:
                 " created_at = excluded.created_at",
                 (surface, external_id, user.name, client, _stamp(self._clock())),
             )
-            db.execute("UPDATE users SET last_login_at = ? WHERE name = ?", (_stamp(self._clock()), user.name))
+            if touch:
+                db.execute("UPDATE users SET last_login_at = ? WHERE name = ?", (_stamp(self._clock()), user.name))
+
+    def owns_person(self, person_id: int) -> bool:
+        """Is this person some user's?"""
+        with self._memory.lock:
+            return self._memory.database.execute(
+                "SELECT 1 FROM users WHERE person_id = ?", (person_id,)
+            ).fetchone() is not None
+
+    def attach_account(self, user: User, surface: str, external_id: str, client: str = "admin") -> None:
+        """An administrator signs the account in as `user`, with no password. It belongs to the user's person
+        from then on: an account that was another user's is only moved (that user keeps their memories), the
+        person of any other account is merged into the user's, even when both have memories."""
+        target = self.person_of(user)
+        current = self._memory.find_person(surface, external_id)
+        if current is not None and current.id != target.id and self.owns_person(current.id):
+            self._memory.move_account(surface, external_id, target)
+        else:
+            self._memory.link_account(surface, external_id, target, force=True)
+        self.sign_in_account(user, surface, external_id, client, touch=False)
+
+    def create_with_account(
+        self, name: str, password: str, admin: bool, surface: str, external_id: str, client: str = "admin"
+    ) -> User:
+        """A new user, signed in on the account by an administrator. They are the person Clara already knows
+        from the account (with its memories), unless that person is another user's."""
+        current = self._memory.find_person(surface, external_id)
+        person = current if current is not None and not self.owns_person(current.id) else None
+        user = self.create(name, password, admin, person)
+        self.attach_account(user, surface, external_id, client)
+        return user
 
     def sign_out_account(self, surface: str, external_id: str) -> bool:
         with self._memory.lock, self._memory.database as db:
