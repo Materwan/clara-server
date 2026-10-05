@@ -744,7 +744,7 @@ show them; the Tasks page lists what is still to come), and it runs no tools on 
 
 It is plain HTML, CSS and JavaScript in `src/clara/web/`, with no build step and nothing loaded from elsewhere. It works on computers and phones (on a phone, the navigation slides in from the menu button), and follows
 the system's light or dark setting; a switch at the bottom of the navigation forces *Light* or *Dark*, remembered in
-that browser. Its two fonts (Figtree and Bricolage Grotesque, SIL Open Font License) are served from `web/fonts/`. The
+that browser. Its two fonts (Hanken Grotesk and Epilogue, SIL Open Font License) are served from `web/fonts/`. The
 browser keeps your sign-in in an HttpOnly cookie (out of reach of scripts) and the server only honours it when the
 request has the header `X-Clara-Web: 1`, which a page of another site cannot add. Everything it shows is built from
 text nodes; the page's Content-Security-Policy allows only its own files.

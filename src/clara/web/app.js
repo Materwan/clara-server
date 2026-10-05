@@ -38,14 +38,18 @@ function themeSwitch() {
 
 // ---- signing in ----------------------------------------------------------------------------------------
 
+/** The sign-in screens: the mark and name on the left (above the form on a phone), the form on the right. */
+function authFrame(...main) {
+  clear(app).append(h("div", { class: "login-wrap" },
+    h("aside", { class: "login-art" },
+      mark(36),
+      h("span", { class: "wordmark" }, "Clara"),
+      h("p", { class: "tagline" }, "Your conversations, and what she remembers about you.")),
+    h("main", { class: "login" }, ...main)));
+}
+
 function authPage(title, lede, form, foot) {
-  clear(app).append(h("div", { class: "login-wrap" }, h("main", { class: "login" },
-    h("div", { class: "halo" }, mark(60)),
-    h("h1", {}, title),
-    h("p", { class: "lede" }, lede),
-    form,
-    foot,
-    themeSwitch())));
+  authFrame(h("h1", {}, title), h("p", { class: "lede" }, lede), form, foot, themeSwitch());
 }
 
 /** Whether this server lets people make their own account; a server that cannot say is taken as closed. */
@@ -253,11 +257,10 @@ async function boot() {
     user = await api.get("/v1/auth/me", undefined, { quiet401: true });
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) return showLogin();
-    clear(app).append(h("div", { class: "login-wrap" }, h("main", { class: "login" },
-      h("div", { class: "halo" }, mark(60)),
+    authFrame(
       h("h1", {}, "Clara can't be reached"),
       h("p", { class: "lede" }, error.detail || String(error)),
-      h("div", { class: "row", }, h("button", { class: "primary grow", onclick: boot }, "Try again")))));
+      h("div", { class: "row" }, h("button", { class: "primary grow", onclick: boot }, "Try again")));
     return;
   }
   stop();

@@ -71,7 +71,7 @@ export function icon(name, { size = 20, label = "", className = "" } = {}) {
   return svg;
 }
 
-/** Clara's mark: a small sun of honey with a highlight. */
+/** Clara's mark: a ring open to the right (the C) and the signal at its centre. It takes the colour of the text around it. */
 export function mark(size = 28, className = "") {
   const svg = document.createElementNS(NS, "svg");
   svg.setAttribute("viewBox", "0 0 32 32");
@@ -79,15 +79,15 @@ export function mark(size = 28, className = "") {
   svg.setAttribute("height", size);
   svg.setAttribute("class", ("mark " + className).trim());
   svg.setAttribute("aria-hidden", "true");
-  const circle = (cx, cy, r, cls) => {
-    const node = document.createElementNS(NS, "circle");
-    node.setAttribute("cx", cx);
-    node.setAttribute("cy", cy);
-    node.setAttribute("r", r);
-    node.setAttribute("class", cls);
-    return node;
-  };
-  svg.append(circle(16, 16, 13, "disc"), circle(16, 16, 13, "rim"), circle(11.5, 11.5, 4, "gleam"));
+  const ring = document.createElementNS(NS, "path");
+  ring.setAttribute("d", "M25.2 9.1A11.5 11.5 0 1 0 25.2 22.9");
+  ring.setAttribute("class", "ring-c");
+  const dot = document.createElementNS(NS, "circle");
+  dot.setAttribute("cx", 16);
+  dot.setAttribute("cy", 16);
+  dot.setAttribute("r", 3.6);
+  dot.setAttribute("class", "dot");
+  svg.append(ring, dot);
   return svg;
 }
 

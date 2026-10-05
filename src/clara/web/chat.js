@@ -20,6 +20,47 @@ const INSTRUCTIONS =
   "collect several answers at once, call the qcm tool: the page shows it as a form (radio buttons, check boxes " +
   "or a text box) and their answers come back in their next message.";
 
+// What Clara used to answer, written in the margin of her reply: [icon, what she did, the argument that says what about].
+// Only the turns made in this tab have them: the server does not keep tool calls with the messages.
+const TOOL_NOTES = {
+  remember: ["memory", "Remembered", "fact"],
+  forget: ["memory", "Forgot a fact"],
+  recall_facts: ["memory", "Looked in memory for", "query"],
+  about_person: ["users", "Read what she knows about", "name"],
+  web_search: ["globe", "Searched the web for", "query"],
+  web_fetch: ["globe", "Read a page", "url"],
+  remind: ["bell", "Set a reminder", "text"],
+  list_reminders: ["bell", "Checked your reminders"],
+  cancel_reminder: ["bell", "Cancelled a reminder"],
+  notify: ["bell", "Notified you", "text"],
+  add_task: ["tasks", "Added a task", "title"],
+  list_tasks: ["tasks", "Read your tasks"],
+  update_task: ["tasks", "Updated a task", "title"],
+  delete_task: ["tasks", "Deleted a task"],
+  create_markdown_file: ["file", "Wrote", "name"],
+  edit_markdown_file: ["file", "Edited", "name"],
+  append_markdown_file: ["file", "Added to", "name"],
+  read_markdown_file: ["file", "Read", "name"],
+  list_markdown_files: ["file", "Listed your files"],
+  list_project_files: ["folder", "Listed the project's files"],
+  read_project_file: ["folder", "Read", "path"],
+  search_project: ["folder", "Searched the project for", "query"],
+};
+const SILENT_TOOLS = new Set(["qcm", "adjust_relation"]); // the form is its own card; the relationship is not shown here
+
+/** The margin note for a `tool` event of the stream, or null for a tool that leaves none. */
+function toolNote(event) {
+  const name = String(event.name || "");
+  if (!name || SILENT_TOOLS.has(name)) return null;
+  const [glyph, label, key] = TOOL_NOTES[name] || ["bolt", name.replaceAll("_", " ")];
+  let args = event.arguments;
+  if (typeof args === "string") {
+    try { args = JSON.parse(args); } catch { args = {}; }
+  }
+  const raw = key && args && typeof args[key] === "string" ? args[key].trim() : "";
+  return { glyph, label, detail: raw.length > 80 ? raw.slice(0, 79) + "…" : raw };
+}
+
 function greeting() {
   const hour = new Date().getHours();
   return hour < 5 ? "Hello" : hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
@@ -63,9 +104,9 @@ export function mountChat(container, user, { slot, fresh = false, project = null
   const sendButton = h("button", { class: "send", "aria-label": "Send", title: "Send", onclick: send, disabled: true }, icon("send", { size: 19 }));
   const docInfo = h("span", { class: "grow docinfo" });
   const modelBox = h("span", { class: "model-box", hidden: true }); // the model picker, when an administrator offers a choice
-  const composer = h("div", { class: "composer" },
+  const composer = h("div", { class: "composer" }, h("div", { class: "composer-frame" },
     h("div", { class: "composer-inner" }, chips, input, h("div", { class: "composer-bar" }, attach, picker, docInfo, modelBox, sendButton)),
-    h("p", { class: "composer-hint" }, "Enter to send, Shift + Enter for a new line. Drop files here to attach them."));
+    h("p", { class: "composer-hint" }, "Enter to send, Shift + Enter for a new line. Drop files here to attach them.")));
   const root = h("section", { class: "page chat" },
     pageHead(h("div", { class: "grow chat-title" }, title, projectChip), context, compactButton, moreButton, newButton), messagesBox, composer);
   container.append(root);
@@ -294,18 +335,23 @@ export function mountChat(container, user, { slot, fresh = false, project = null
     ...(message.files || []).map((file) => fileCard(file, who)),
   ];
 
+  const noteNode = (note) => h("div", { class: "note" }, icon(note.glyph, { size: 14 }),
+    h("span", {}, h("b", {}, note.label), note.detail ? ` ${note.detail}` : ""));
+
   function assistantNode(message) {
     const body = h("div", { class: "body" },
       h("div", { class: "text" }, message.content ? renderMarkdown(message.content) : null),
       h("div", { class: "cards" }, cardsOf(message)),
       message.failed && h("div", { class: "failed-note", role: "alert" }, icon("bolt", { size: 17 }), h("span", {}, message.failed)));
-    return h("div", { class: "msg assistant" + (message.failed ? " failed" : "") }, h("div", { class: "who" }, mark(26)), body);
+    return h("div", { class: "msg assistant" + (message.failed ? " failed" : "") },
+      h("div", { class: "speaker" }, mark(16), h("span", {}, "Clara")), body,
+      h("div", { class: "notes", "aria-label": "What Clara used" }, (message.notes || []).map(noteNode)));
   }
 
   function messageNode(message) {
     if (message.role === "user") {
       const { text, names } = splitMessage(displayAnswers(message.content));
-      return h("div", { class: "msg user" }, h("div", { class: "body" },
+      return h("div", { class: "msg user" }, h("div", { class: "speaker" }, h("span", { title: displayName }, displayName)), h("div", { class: "body" },
         text && h("div", { class: "bubble" }, text),
         names.length > 0 && h("div", { class: "chips" }, names.map((name) => h("span", { class: "chip" }, icon("file", { size: 15 }), h("span", { class: "name" }, name))))));
     }
@@ -379,7 +425,8 @@ export function mountChat(container, user, { slot, fresh = false, project = null
     node.classList.add("live");
     const body = node.querySelector(".text");
     const cards = node.querySelector(".cards");
-    body.append(h("span", { class: "typing-dots", "aria-label": "Clara is writing" }, h("i", {}), h("i", {}), h("i", {})));
+    const notes = node.querySelector(".notes");
+    body.append(h("span", { class: "waiting", role: "img", "aria-label": "Clara is writing" }));
     state.stick = true;
     scrollDown(true);
     state.abort = new AbortController();
@@ -415,6 +462,12 @@ export function mountChat(container, user, { slot, fresh = false, project = null
           cards.append(fileCard(file, who));
           if (!reply.content) clear(body); // nothing written before the file: no dots above it
           scrollDown();
+        } else if (event.type === "tool") {
+          const note = toolNote(event);
+          if (note) {
+            (reply.notes ||= []).push(note);
+            notes.append(noteNode(note));
+          }
         } else if (event.type === "compacted") toast("Older messages were summarised to make room.");
         else if (event.type === "warning") toast(event.message);
         else if (event.type === "error") { reply.failed = event.message; finished = true; }

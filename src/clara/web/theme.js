@@ -19,7 +19,7 @@
     else root.setAttribute("data-theme", choice);
     var dark = choice === "dark" || (choice === "auto" && media.matches);
     var meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute("content", dark ? "#1d1916" : "#f7f3ec");
+    if (meta) meta.setAttribute("content", dark ? "#0a1a2b" : "#eceFea");
   }
 
   apply(stored());

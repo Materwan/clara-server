@@ -1,0 +1,26 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "codex-grid-background",
+        "value": "*",
+        "files": [
+          "src/clara/web/style.css"
+        ],
+        "createdAt": "2026-10-05T16:24:49.071Z",
+        "reason": "Agent: the login panel's blueprint grid is the cyanotype world's single decorative motif (drawn once, login only); the user confirmed the Cyanotype world, not this detail"
+      },
+      {
+        "rule": "codex-grid-background",
+        "value": "*",
+        "files": [
+          "src/clara/web/index.html"
+        ],
+        "createdAt": "2026-10-05T16:24:57.706Z",
+        "reason": "Agent: the detector attributes the linked stylesheet's login-panel blueprint grid to index.html; same decision as for style.css"
+      }
+    ]
+  }
+}
