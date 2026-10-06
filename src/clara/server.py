@@ -787,9 +787,12 @@ def create_app(
         surface: Surface,
         user_id: ExternalId,
         limit: Annotated[int, Query(ge=1, le=1000)] = 200,
+        calls: bool = False,
     ) -> dict:
+        """The questions and answers of a conversation; with `calls`, the answers also carry the tools they
+        called (and an answer that only called tools is given, with no text)."""
         info = own_conversation(client, http, surface, user_id, conversation)
-        shown, more = memory.transcript(conversation, limit, forms=True)
+        shown, more = memory.transcript(conversation, limit, forms=True, calls=calls)
         state = memory.state(conversation)
         first_kept = shown[0].id if shown else 0
         return {
@@ -801,6 +804,7 @@ def create_app(
                 {"id": m.id, "role": m.role, "content": m.content, "created_at": m.created_at}
                 # a QCM asked by this answer, with the answers the user gave it later (null: not answered)
                 | ({"qcm": with_answers(list(m.forms), [n.content for n in shown[at + 1 :] if n.role == "user"])} if m.forms else {})
+                | ({"calls": list(m.calls)} if m.calls else {})
                 for at, m in enumerate(shown)
             ],
         }

@@ -696,6 +696,8 @@ class Agent:
                         if call.name in client_tools:
                             remote.append((call_id, call))
                         else:
+                            # the client shows the call while it runs; `tool` follows with its result
+                            yield {"type": "tool_start", "name": call.name, "arguments": call.arguments}
                             results[call_id] = await self.toolbox.arun(call.name, context, call.arguments)
                             yield {
                                 "type": "tool",

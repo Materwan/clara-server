@@ -139,10 +139,10 @@ All routes except `/health` need `Authorization: Bearer <token>`.
 | Route | |
 | --- | --- |
 | `POST /v1/chat` | `{surface, user_id, user_name?, message, conversation?, quiet?, space?, roster?, focus?, mode?}` → `{reply, conversation, person, tools, usage, passed}`; 413 if it cannot fit the model's window, 504 if the model hangs, 503 if the server is stopping. `quiet`: never notify the person about this turn; the group fields are described in *Discord* |
-| `POST /v1/chat/stream` | same body; Server-Sent Events `turn` / `thinking` / `token` / `tool` / `qcm` / `tool_requests` / `usage` / `compacted` / `warning` / `done` / `error` |
+| `POST /v1/chat/stream` | same body; Server-Sent Events `turn` / `thinking` / `token` / `tool_start` / `tool` / `qcm` / `tool_requests` / `usage` / `compacted` / `warning` / `done` / `error` |
 | `POST /v1/turns/{id}/tool-results` | `{results: [{id, content}]}`: a client's answer to a `tool_requests` event (see below) |
 | `GET /v1/conversations?surface=&user_id=&q=&limit=` | `{conversations: [{id, title, titled_by, pinned, created_at, updated_at, preview}]}`: the conversations the account's person started on that surface, pinned first, then the last written in; `q` keeps those whose title, messages or summary contain it (see *Conversation history*) |
-| `GET /v1/conversations/{id}/messages?surface=&user_id=&limit=` | the same fields, and `{messages: [{id, role, content, created_at}], summary, earlier}`: its last questions and answers (200), to show it again |
+| `GET /v1/conversations/{id}/messages?surface=&user_id=&limit=&calls=` | the same fields, and `{messages: [{id, role, content, created_at}], summary, earlier}`: its last questions and answers (200), to show it again. With `calls=true` an answer also has `calls: [{name, arguments}]`, the tools it called (arguments cut to 300 characters), and one that only called tools is given with an empty `content` |
 | `PATCH /v1/conversations/{id}` | `{surface, user_id, title?, pinned?}`: rename (`""`: no title) and/or pin |
 | `POST /v1/conversations/{id}/title` | `{surface, user_id}` → `{id, title}`: Clara writes its title if it has none; 409 nothing to title yet, 502 the model failed |
 | `GET /v1/conversations/{id}` | `{tokens, window, percent, summary, messages}`: how full the context is |
@@ -242,8 +242,8 @@ same as far as it went: the question, the tool calls made (a call left without i
 A client tool may have changed files before the turn stopped: the model must know it did. Nothing is stored when
 the model had not started.
 
-Other events of the stream: `tool` says a server tool ran (`{name, arguments, result}`, the result cut to 500
-characters), and `thinking` carries the reasoning of the models that show it apart (it is never stored nor sent
+Other events of the stream: `tool_start` (`{name, arguments}`) says a server tool is about to run and `tool` that it ran
+(`{name, arguments, result}`, the result cut to 500 characters), and `thinking` carries the reasoning of the models that show it apart (it is never stored nor sent
 back to the model).
 
 The system prompt only holds the date, and the time of day is added to the newest user message (not

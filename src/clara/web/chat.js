@@ -5,12 +5,11 @@ import { ApiError, api, conversationPath, streamChat } from "./api.js";
 import { approvalCard, pendingApprovals } from "./approvals.js";
 import { DocumentError, MAX_TOTAL_CHARS, compose, readDocument, splitMessage, totalChars } from "./documents.js";
 import { icon, mark, ring } from "./icons.js";
-import { renderMarkdown } from "./markdown.js";
-import { fileCard } from "./files.js";
 import { labelOf, renderGroups } from "./history.js";
 import { connectionCount, openConnections } from "./integrations.js";
 import { chooseModel, costText, loadModels, modelSelect } from "./models.js";
-import { displayAnswers, qcmNode } from "./qcm.js";
+import { displayAnswers } from "./qcm.js";
+import { addCall, addFile, addForm, addText, endCall, fileNamesIn, messagesFrom, newReply, replyBody, toolNote } from "./reply.js";
 import { chooseProject, listProjects } from "./projects.js";
 import { clear, confirmDialog, h, pageHead, popupMenu, promptDialog, randomId, toast, toggleRail } from "./ui.js";
 
@@ -22,57 +21,6 @@ const INSTRUCTIONS =
   'message, each inside <document name="..." type="..."> tags. Refer to them by name. To quiz the user or to ' +
   "collect several answers at once, call the qcm tool: the page shows it as a form (radio buttons, check boxes " +
   "or a text box) and their answers come back in their next message.";
-
-// What Clara used to answer, written in the margin of her reply: [icon, what she did, the argument that says what about].
-// Only the turns made in this tab have them: the server does not keep tool calls with the messages.
-const TOOL_NOTES = {
-  remember: ["memory", "Remembered", "fact"],
-  forget: ["memory", "Forgot a fact"],
-  recall_facts: ["memory", "Looked in memory for", "query"],
-  about_person: ["users", "Read what she knows about", "name"],
-  web_search: ["globe", "Searched the web for", "query"],
-  web_fetch: ["globe", "Read a page", "url"],
-  remind: ["bell", "Set a reminder", "text"],
-  list_reminders: ["bell", "Checked your reminders"],
-  cancel_reminder: ["bell", "Cancelled a reminder"],
-  notify: ["bell", "Notified you", "text"],
-  add_task: ["tasks", "Added a task", "title"],
-  list_tasks: ["tasks", "Read your tasks"],
-  update_task: ["tasks", "Updated a task", "title"],
-  delete_task: ["tasks", "Deleted a task"],
-  create_markdown_file: ["file", "Wrote", "name"],
-  edit_markdown_file: ["file", "Edited", "name"],
-  append_markdown_file: ["file", "Added to", "name"],
-  read_markdown_file: ["file", "Read", "name"],
-  list_markdown_files: ["file", "Listed your files"],
-  list_project_files: ["folder", "Listed the project's files"],
-  read_project_file: ["folder", "Read", "path"],
-  search_project: ["folder", "Searched the project for", "query"],
-  resources: ["plug", "Looked at what is connected"],
-  res_list: ["plug", "Listed", "path"],
-  res_read: ["plug", "Read", "path"],
-  res_search: ["plug", "Searched for", "query"],
-  res_write: ["plug", "Wrote", "path"],
-  res_delete: ["plug", "Asked to delete", "path"],
-  res_move: ["plug", "Asked to move", "path"],
-  github_branch: ["branch", "Worked on branches", "name"],
-  github_pr: ["branch", "Worked on a pull request", "title"],
-  github_issue: ["branch", "Worked on an issue", "title"],
-};
-const SILENT_TOOLS = new Set(["qcm", "adjust_relation"]); // the form is its own card; the relationship is not shown here
-
-/** The margin note for a `tool` event of the stream, or null for a tool that leaves none. */
-function toolNote(event) {
-  const name = String(event.name || "");
-  if (!name || SILENT_TOOLS.has(name)) return null;
-  const [glyph, label, key] = TOOL_NOTES[name] || ["bolt", name.replaceAll("_", " ")];
-  let args = event.arguments;
-  if (typeof args === "string") {
-    try { args = JSON.parse(args); } catch { args = {}; }
-  }
-  const raw = key && args && typeof args[key] === "string" ? args[key].trim() : "";
-  return { glyph, label, detail: raw.length > 80 ? raw.slice(0, 79) + "…" : raw };
-}
 
 function greeting() {
   const hour = new Date().getHours();
@@ -330,8 +278,8 @@ export function mountChat(container, user, { slot, fresh = false, project = null
     state.live = null;
     remember();
     try {
-      const body = await api.get(conversationPath(id) + "/messages", who);
-      state.messages = body.messages.map((m) => ({ role: m.role, content: m.content, qcm: m.qcm }));
+      const body = await api.get(conversationPath(id) + "/messages", { ...who, calls: true });
+      state.messages = messagesFrom(body.messages, await filesNamed(fileNamesIn(body.messages)));
       state.summary = body.summary || "";
       state.earlier = Boolean(body.earlier);
       state.project = body.project || null;
@@ -387,21 +335,24 @@ export function mountChat(container, user, { slot, fresh = false, project = null
     return true;
   }
 
-  const cardsOf = (message) => [
-    ...(message.qcm || []).map((form) => qcmNode(form, { submit: submitAnswers })),
-    ...(message.files || []).map((file) => fileCard(file, who)),
-  ];
-
-  const noteNode = (note) => h("div", { class: "note" }, icon(note.glyph, { size: 14 }),
-    h("span", {}, h("b", {}, note.label), note.detail ? ` ${note.detail}` : ""));
+  const views = new WeakMap(); // the reply -> what draws it, for the one being written
 
   function assistantNode(message) {
-    const body = h("div", { class: "body" },
-      h("div", { class: "text" }, message.content ? renderMarkdown(message.content) : null),
-      h("div", { class: "cards" }, cardsOf(message)),
-      message.failed && h("div", { class: "failed-note", role: "alert" }, icon("bolt", { size: 17 }), h("span", {}, message.failed)));
-    body.append(h("div", { class: "notes", "aria-label": "What Clara used" }, (message.notes || []).map(noteNode)));
-    return h("div", { class: "msg assistant" + (message.failed ? " failed" : "") }, h("div", { class: "who" }, mark(30)), body);
+    const view = replyBody(message, who, submitAnswers);
+    views.set(message, view);
+    view.sync();
+    if (message.failed) view.node.append(h("div", { class: "failed-note", role: "alert" }, icon("bolt", { size: 17 }), h("span", {}, message.failed)));
+    return h("div", { class: "msg assistant" + (message.failed ? " failed" : "") }, h("div", { class: "who" }, mark(30)), view.node);
+  }
+
+  /** The files of Clara that a conversation's history names, by name (those deleted since have no card). */
+  async function filesNamed(names) {
+    if (!names.length) return new Map();
+    try {
+      return new Map((await api.get("/v1/markdown-files", who)).files.map((file) => [file.name, file]));
+    } catch {
+      return new Map();
+    }
   }
 
   function messageNode(message) {
@@ -451,13 +402,6 @@ export function mountChat(container, user, { slot, fresh = false, project = null
     input.disabled = false;
   }
 
-  /** The caret goes at the very end of the text being written, not on a line of its own. */
-  function placeCaret(node) {
-    let at = node;
-    while (at.lastChild && at.lastChild.nodeType === Node.ELEMENT_NODE && !["PRE", "TABLE", "DIV", "HR", "BR"].includes(at.lastChild.tagName)) at = at.lastChild;
-    at.classList.add("caret");
-  }
-
   /** Send what is in the box (with its documents), or, given a text, that text alone (the answers of a QCM). */
   async function send(answers) {
     if (state.busy) { state.abort?.abort(); return; }
@@ -473,16 +417,12 @@ export function mountChat(container, user, { slot, fresh = false, project = null
       renderChips();
     }
     state.messages.push({ role: "user", content: message });
-    const reply = { role: "assistant", content: "" };
+    const reply = newReply();
+    reply.live = true; // what draws it shows the dots, the caret and the spinners
     state.messages.push(reply);
     state.live = { reply, node: null };
     renderMessages();
-    const node = messagesInner.lastElementChild;
-    node.classList.add("live");
-    const body = node.querySelector(".text");
-    const cards = node.querySelector(".cards");
-    const notes = node.querySelector(".notes");
-    body.append(h("span", { class: "waiting", role: "img", "aria-label": "Clara is writing" }));
+    messagesInner.lastElementChild.classList.add("live");
     state.stick = true;
     scrollDown(true);
     state.abort = new AbortController();
@@ -490,11 +430,10 @@ export function mountChat(container, user, { slot, fresh = false, project = null
     let frame = 0;
     const paint = () => {
       frame = 0;
-      const md = renderMarkdown(reply.content);
-      placeCaret(md);
-      clear(body).append(md);
+      views.get(reply)?.sync();
       scrollDown();
     };
+    const draw = () => { if (!frame) frame = requestAnimationFrame(paint); };
     let finished = false;
     try {
       const request = {
@@ -504,25 +443,20 @@ export function mountChat(container, user, { slot, fresh = false, project = null
       };
       for await (const event of streamChat(request, state.abort.signal)) {
         if (event.type === "token") {
-          reply.content += event.text;
-          if (!frame) frame = requestAnimationFrame(paint);
+          addText(reply, event.text);
+          draw();
         } else if (event.type === "qcm") {
-          const form = { ...event.form, answers: null };
-          (reply.qcm ||= []).push(form);
-          cards.append(qcmNode(form, { submit: submitAnswers }));
-          if (!reply.content) clear(body); // nothing written before the form: no dots above it
-          scrollDown();
+          addForm(reply, { ...event.form, answers: null });
+          draw();
         } else if (event.type === "markdown_file") {
-          const file = { ...event.file, action: event.action };
-          (reply.files ||= []).push(file);
-          cards.append(fileCard(file, who));
-          if (!reply.content) clear(body); // nothing written before the file: no dots above it
-          scrollDown();
-        } else if (event.type === "tool") {
+          addFile(reply, { ...event.file, action: event.action });
+          draw();
+        } else if (event.type === "tool_start" || event.type === "tool") {
           const note = toolNote(event);
           if (note) {
-            (reply.notes ||= []).push(note);
-            notes.append(noteNode(note));
+            if (event.type === "tool_start") addCall(reply, note, "running");
+            else endCall(reply, note);
+            draw();
           }
         } else if (event.type === "approval") {
           if (!state.approvals.some((a) => a.id === event.approval.id)) state.approvals.push(event.approval);
@@ -531,7 +465,7 @@ export function mountChat(container, user, { slot, fresh = false, project = null
         else if (event.type === "warning") toast(event.message);
         else if (event.type === "error") { reply.failed = event.message; finished = true; }
         else if (event.type === "done") {
-          if (event.reply) reply.content = event.reply;
+          if (event.reply && !reply.content) addText(reply, event.reply);
           state.context = { ...state.context, ...event.context, messages: (state.context?.messages || 0) + 2 };
           finished = true;
         }
@@ -543,6 +477,7 @@ export function mountChat(container, user, { slot, fresh = false, project = null
     }
     if (!finished && !reply.failed) reply.failed = "The answer was cut off.";
     cancelAnimationFrame(frame);
+    reply.live = false;
     state.live = null;
     state.abort = null;
     setBusy(false);

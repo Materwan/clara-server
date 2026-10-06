@@ -41,7 +41,7 @@ async def test_tools_run_and_memory_reaches_the_next_prompt(memory, tmp_path):
     agent = make_agent(memory, tmp_path, backend)
 
     first = await run(agent, message="I have a cat named Miso")
-    assert [e["type"] for e in first] == ["turn", "usage", "tool", "token", "usage", "done"]
+    assert [e["type"] for e in first] == ["turn", "usage", "tool_start", "tool", "token", "usage", "done"]
     assert first[-1]["tools"] == ["remember"]
 
     # Another surface, same person once linked: the fact is in the system prompt

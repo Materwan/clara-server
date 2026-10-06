@@ -81,6 +81,26 @@ def test_tool_calls_and_results_do_not_match_a_search_nor_show(memory, erwan):
     assert not more
 
 
+def test_a_transcript_read_with_calls_gives_the_tools_an_answer_called(memory, erwan):
+    rows = [
+        TurnRow("assistant", "Let me look.", [{"function": {"name": "web_search", "arguments": {"query": "tea"}}}]),
+        TurnRow("tool", "results", tool_name="web_search"),
+        TurnRow("assistant", "", [{"function": {"name": "create_markdown_file", "arguments": {"name": "a.md", "content": "x" * 1000}}}]),
+        TurnRow("tool", "Created", tool_name="create_markdown_file"),
+        TurnRow("assistant", "Done."),
+    ]
+    memory.add_turn("app:pc:1", erwan.id, "Look up tea", rows)
+    shown, _ = memory.transcript("app:pc:1", calls=True)
+    assert [(m.role, m.content, [c["name"] for c in m.calls]) for m in shown] == [
+        ("user", "Look up tea", []),
+        ("assistant", "Let me look.", ["web_search"]),
+        ("assistant", "", ["create_markdown_file"]),
+        ("assistant", "Done.", []),
+    ]
+    assert shown[1].calls[0]["arguments"] == {"query": "tea"}
+    assert len(shown[2].calls[0]["arguments"]["content"]) == 300  # what it was about, not all of it
+
+
 def test_a_long_conversation_gives_its_last_messages(memory, erwan):
     for number in range(5):
         memory.add_exchange("app:pc:1", erwan.id, f"q{number}", f"a{number}")

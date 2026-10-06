@@ -441,13 +441,31 @@ button.sm { padding: .32rem .65rem; font-size: .85rem; border-radius: var(--r-sm
   background: var(--danger-soft); color: var(--danger); font-size: .92rem;
 }
 
-/* under Clara's reply: what she used to answer (kept for the conversation you are in, not saved on the server) */
-.notes { display: flex; flex-wrap: wrap; gap: .2rem 1rem; margin-top: .6rem; }
-.notes:empty { display: none; }
+/* Clara's reply in the order she made it: text, tool calls (a run of them is one line that opens), forms; files last */
+.parts { display: flex; flex-direction: column; gap: .5rem; }
+.parts > .text > .md > :first-child { margin-top: 0; }
+.run { color: var(--muted); font-size: .82rem; line-height: 1.4; }
+.run [hidden] { display: none !important; }
+.run-head {
+  display: inline-flex; align-items: center; gap: .4rem; max-width: 100%; padding: .1rem .15rem; margin-left: -.15rem;
+  background: none; border: 0; border-radius: var(--r-xs); color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.run-head:hover { color: var(--text-2); }
+.run-head .icon { flex: none; transition: transform .15s ease; }
+.run.open .run-head .icon { transform: rotate(90deg); }
+.run-summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-list { display: flex; flex-direction: column; gap: .25rem; margin: .3rem 0 .15rem 1.4rem; }
 .note { display: inline-flex; gap: .35rem; align-items: baseline; font-size: .82rem; line-height: 1.4; color: var(--muted); min-width: 0; }
-.note .icon { transform: translateY(2px); color: var(--text-2); }
+.run .note { display: flex; }
+.note .icon { flex: none; transform: translateY(2px); color: var(--text-2); }
 .note b { color: var(--text-2); font-weight: 650; }
 .note span { min-width: 0; overflow-wrap: anywhere; }
+.spin {
+  flex: none; display: none; width: .8em; height: .8em; align-self: center; border: 2px solid var(--line-strong);
+  border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite;
+}
+.run.working .run-head .spin, .run .note .spin { display: inline-block; }
+@keyframes spin { to { transform: rotate(360deg); } }
 
 .waiting { display: inline-block; width: .5em; height: 1.05em; margin: .3em 0; vertical-align: -0.15em; background: var(--accent); border-radius: 1px; animation: blink 1s steps(2) infinite; }
 .caret::after { content: ""; display: inline-block; width: .5em; height: 1.05em; margin-left: 2px; vertical-align: -0.15em; background: var(--accent); border-radius: 1px; animation: blink 1s steps(2) infinite; }

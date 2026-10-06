@@ -274,6 +274,12 @@ def _cancel_reminder(context: ToolContext, reminder_id: Any) -> str:
     return "Cancelled." if context.reminders.cancel(context.person, number) else "No such reminder of yours."
 
 
+TASK_DESCRIPTION_HELP = (
+    "What the task is, beyond its title: what exactly to do, where, with whom, the steps, what the person said "
+    "about it. A sentence or two; leave it out only when the title says it all."
+)
+
+
 def _task_service(context: ToolContext) -> TaskService:
     if context.tasks is None:
         raise ValueError("Tasks are not available.")
@@ -978,13 +984,14 @@ def default_toolbox(web: WebClient | None = None) -> Toolbox:
             Tool(
                 name="add_task",
                 description=(
-                    "Add a task to the person's to-do list, with reminders: the times they gave, else sensible ones you "
-                    "choose (a day before and at a deadline, a morning for a chore); tell them when."
+                    "Add a task to the person's to-do list: a short title, a description of what it involves, and "
+                    "reminders: the times they gave, else sensible ones you choose (a day before and at a deadline, "
+                    "a morning for a chore); tell them when."
                 ),
                 function=_add_task,
                 parameters={
-                    "title": {"type": "string"},
-                    "description": {"type": "string"},
+                    "title": {"type": "string", "description": "Short name of the task."},
+                    "description": {"type": "string", "description": TASK_DESCRIPTION_HELP},
                     "due": {"type": "string", "description": "Deadline, local ISO 8601 without offset: 2026-10-05T18:00."},
                     "reminders": {"type": "array", "items": {"type": "string"}, "description": "Local ISO 8601, no offset."},
                     "targets": {"type": "array", "items": {"type": "string"}, "description": "Surfaces to remind on; omit: all."},
@@ -1012,7 +1019,7 @@ def default_toolbox(web: WebClient | None = None) -> Toolbox:
                 parameters={
                     "task_id": {"type": "integer"},
                     "title": {"type": "string"},
-                    "description": {"type": "string"},
+                    "description": {"type": "string", "description": TASK_DESCRIPTION_HELP + " Empty: remove it."},
                     "due": {"type": "string", "description": "Local ISO 8601, no offset."},
                     "reminders": {"type": "array", "items": {"type": "string"}, "description": "Local ISO 8601, no offset."},
                     "status": {"type": "string", "enum": list(STATUSES)},

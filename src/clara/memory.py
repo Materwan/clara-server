@@ -500,6 +500,19 @@ class ConversationInfo:
     project_id: int | None = None  # the project it belongs to
 
 
+SHOWN_ARGUMENT = 300  # characters of a tool argument given back with a message
+
+
+def _shown_call(call: dict) -> dict:
+    function = call.get("function") or {}
+    arguments = function.get("arguments")
+    if isinstance(arguments, dict):
+        arguments = {
+            key: value[:SHOWN_ARGUMENT] if isinstance(value, str) else value for key, value in arguments.items()
+        }
+    return {"name": function.get("name", ""), "arguments": arguments if isinstance(arguments, dict) else {}}
+
+
 @dataclass(frozen=True)
 class ShownMessage:
     """A message as a person reads it back: a question or an answer (tool calls and results are left out)."""
@@ -509,6 +522,7 @@ class ShownMessage:
     content: str
     created_at: str  # ISO, UTC
     forms: tuple[dict, ...] = ()  # QCM the message asked (only when the transcript was read with `forms`)
+    calls: tuple[dict, ...] = ()  # tools it called, `{"name", "arguments"}` (only when read with `calls`)
 
 
 @dataclass(frozen=True)
@@ -1460,13 +1474,16 @@ class Memory:
         return row["title"] if row else ""
 
     def transcript(
-        self, conversation: str, limit: int = 200, forms: bool = False
+        self, conversation: str, limit: int = 200, forms: bool = False, calls: bool = False
     ) -> tuple[list[ShownMessage], bool]:
         """The last `limit` questions and answers of a conversation still stored, oldest first, and
         whether older ones were left out. With `forms`, an answer that asked a QCM is kept even when it
-        wrote nothing, and carries the QCM."""
+        wrote nothing, and carries the QCM. With `calls`, an answer that called tools is kept as well, and
+        carries them (what they were given is cut short: it says what they were about, not all of it)."""
         # a call is stored as JSON: `"name": "qcm"` is how it shows; the forms are checked below
         keep = " OR tool_calls LIKE '%\"qcm\"%'" if forms else ""
+        if calls:
+            keep = " OR tool_calls IS NOT NULL"
         with self._lock:
             rows = self._db.execute(
                 "SELECT id, role, content, created_at, tool_calls FROM messages WHERE conversation = ?"
@@ -1475,9 +1492,11 @@ class Memory:
             ).fetchall()
         shown = []
         for row in rows[:limit]:
-            asked = tuple(forms_in(json.loads(row["tool_calls"]))) if forms and row["tool_calls"] else ()
-            if row["content"] or asked:
-                shown.append(ShownMessage(row["id"], row["role"], row["content"], row["created_at"], asked))
+            stored = json.loads(row["tool_calls"]) if row["tool_calls"] else []
+            asked = tuple(forms_in(stored)) if forms and stored else ()
+            called = tuple(_shown_call(call) for call in stored) if calls else ()
+            if row["content"] or asked or called:
+                shown.append(ShownMessage(row["id"], row["role"], row["content"], row["created_at"], asked, called))
         return shown[::-1], len(rows) > limit
 
     # ------------------------------------------------------------------
