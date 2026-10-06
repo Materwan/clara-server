@@ -207,6 +207,24 @@ def test_the_roster_and_the_people_mentioned_reach_the_prompt(make_client):
     assert "about_person" in [tool["function"]["name"] for tool in tools]
 
 
+def test_the_instructions_of_a_server_replace_the_personality_there_only(make_client):
+    client = make_client(say("a"), say("b"), say("c"))
+    register(client)
+    client.put("/v1/spaces", json={"surface": "discord", "spaces": [{"id": GUILD, "name": "Guild"}]}, headers=BOT)
+    items = [{"text": "You are a  pirate.", "enabled": True}, {"text": "Never speak of cats.", "enabled": False}]
+    done = client.patch(f"/v1/admin/spaces/{GUILD}", json={"instructions": items}, headers=ADMIN).json()
+    assert [i["text"] for i in done["instructions"]] == ["You are a pirate.", "Never speak of cats."] and done["chime"] is None
+    chat(client, message="hello", conversation=CHANNEL, space=GUILD)
+    system = client.backend.calls[0][0][0]["content"]
+    assert "- You are a pirate." in system and "cats" not in system and "helpful personal AI assistant" not in system
+    chat(client, message="in private")  # no space: the usual personality
+    assert "pirate" not in client.backend.calls[1][0][0]["content"]
+    client.patch(f"/v1/admin/spaces/{GUILD}", json={"instructions": []}, headers=ADMIN)  # nothing defined: the default
+    chat(client, message="again", conversation=CHANNEL, space=GUILD)
+    assert "pirate" not in client.backend.calls[2][0][0]["content"]
+    assert client.patch("/v1/admin/spaces/discord:guild:404", json={"instructions": []}, headers=ADMIN).status_code == 404
+
+
 def test_about_person_is_only_offered_with_other_people(make_client):
     client = make_client(say("hi"))
     register(client)

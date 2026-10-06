@@ -5,7 +5,8 @@ account's person, so it is the same on every surface of theirs.
     GET    /v1/projects                         ?surface=&user_id=  the person's projects
     POST   /v1/projects                         {surface, user_id, name, description?, instructions?}
     GET    /v1/projects/{id}                    the project, its repositories, its files (paths and sizes)
-    PATCH  /v1/projects/{id}                    {name?, description?, instructions?}
+    PATCH  /v1/projects/{id}                    {name?, description?, instructions?, pinned?}: only pinned projects have
+                                                their conversations in the history of the web site
     DELETE /v1/projects/{id}                    its files go, its conversations stay (in no project)
     POST   /v1/projects/{id}/files              {files: [{path, data (base64)}]}: text, code, PDF, .docx, .zip
     GET    /v1/projects/{id}/file               ?path=  a file's text
@@ -68,6 +69,7 @@ class ProjectPatch(_Account):
     name: str | None = Field(default=None, max_length=MAX_NAME)
     description: str | None = Field(default=None, max_length=MAX_DESCRIPTION)
     instructions: str | None = Field(default=None, max_length=MAX_INSTRUCTIONS)
+    pinned: bool | None = None  # pinned projects have their conversations in the history
 
 
 class UploadedFile(BaseModel):
@@ -93,6 +95,7 @@ def describe(project: Project, projects: Projects, window: int) -> dict:
         "instructions": project.instructions,
         "created_at": project.created_at,
         "updated_at": project.updated_at,
+        "pinned": project.pinned,
         "files": project.files,
         "size": project.size,
         "conversations": project.conversations,
@@ -185,11 +188,15 @@ async def get_project(project_id: int, client: Client, request: Request, surface
 @router.patch("/v1/projects/{project_id}")
 async def update_project(project_id: int, body: ProjectPatch, client: Client, request: Request) -> dict:
     project = own_project(request, client, body.surface, body.user_id, project_id)
+    projects = request.app.state.projects
     try:
-        project = request.app.state.projects.update(project.id, body.name, body.description, body.instructions)
+        if body.pinned is not None:
+            projects.pin(project.id, body.pinned)
+        if any(v is not None for v in (body.name, body.description, body.instructions)):
+            projects.update(project.id, body.name, body.description, body.instructions)
     except ProjectError as error:
         raise HTTPException(422, str(error)) from None
-    return _details(request, project)
+    return _details(request, projects.get(project.id) or project)
 
 
 @router.delete("/v1/projects/{project_id}")

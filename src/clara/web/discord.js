@@ -17,6 +17,45 @@ const STATES = {
 
 const fail = (error) => toast(error.detail || String(error), true);
 
+const MAX_INSTRUCTION = 500; // characters, as on the server
+const MAX_INSTRUCTIONS = 30;
+
+/** The instructions of a server (who Clara is there): a list to edit; resolves with it, or null when cancelled. */
+function instructionsDialog(space) {
+  return openDialog((close) => {
+    const rows = h("div", { class: "persona-rows" });
+    const note = h("p", { class: "muted small" });
+    const add = h("button", { type: "button", class: "sm", onclick: () => { addRow({ text: "", enabled: true }); rows.lastElementChild.querySelector("textarea").focus(); } },
+      icon("plus", { size: 16 }), "Add an instruction");
+    const refresh = () => {
+      const on = [...rows.querySelectorAll("input[type=checkbox]")].filter((box) => box.checked).length;
+      note.textContent = on
+        ? `${on} instruction${on === 1 ? " is" : "s are"} on: they replace Clara's usual personality in this server (not in private messages).`
+        : "Nothing is on: Clara keeps her usual personality in this server.";
+      add.disabled = rows.children.length >= MAX_INSTRUCTIONS;
+    };
+    function addRow(item) {
+      const box = h("input", { type: "checkbox", checked: item.enabled, title: "On or off", "aria-label": "On", onchange: refresh });
+      const text = h("textarea", { rows: 2, maxLength: MAX_INSTRUCTION, placeholder: "e.g. You are a pirate. Answer in French.", "aria-label": "Instruction" });
+      text.value = item.text;
+      const line = h("div", { class: "persona-row" }, box, text,
+        h("button", { type: "button", class: "ghost icon-btn", title: "Remove it", "aria-label": "Remove this instruction", onclick: () => { line.remove(); refresh(); } }, icon("close", { size: 16 })));
+      rows.append(line);
+      refresh();
+    }
+    for (const item of space.instructions) addRow(item);
+    return h("form", { class: "persona-form", onsubmit: (event) => {
+      event.preventDefault();
+      close([...rows.children].map((line) => ({ text: line.querySelector("textarea").value.trim(), enabled: line.querySelector("input").checked }))
+        .filter((item) => item.text));
+    } },
+    h("h3", {}, `Clara on ${space.name || space.id}`),
+    h("p", { class: "muted small" }, "Short instructions about who Clara is and how she talks on this Discord server. Switch one off to keep it without using it."),
+    rows, h("div", {}, add), note,
+    h("div", { class: "actions" }, h("button", { type: "button", onclick: () => close(null) }, "Cancel"), h("button", { class: "primary", type: "submit" }, "Save")));
+  });
+}
+
 export function mountDiscord(container) {
   const botPanel = h("section", { class: "panel" });
   const serversPanel = h("section", { class: "panel" });
@@ -96,8 +135,16 @@ export function mountDiscord(container) {
       return;
     }
     const choice = (value) => value === null ? "default" : value ? "on" : "off";
+    const personality = (space) => {
+      const on = space.instructions.filter((item) => item.enabled).length;
+      return h("button", { class: "sm", title: "Who Clara is on this server", onclick: async () => {
+        const instructions = await instructionsDialog(space);
+        if (instructions === null) return;
+        try { await api.patch(`/v1/admin/spaces/${encodeURIComponent(space.id)}`, { instructions }); toast("Saved."); load(); } catch (error) { fail(error); }
+      } }, icon("edit", { size: 16 }), on ? `${on} instruction${on === 1 ? "" : "s"}` : "Default");
+    };
     clear(serversPanel).append(head, defaults, h("table", { class: "grid cards" },
-      h("thead", {}, h("tr", {}, ["Server", "Chime in", ""].map((t) => h("th", {}, t)))),
+      h("thead", {}, h("tr", {}, ["Server", "Chime in", "Personality", ""].map((t) => h("th", {}, t)))),
       h("tbody", {}, found.spaces.map((space) => {
         const select = h("select", { "aria-label": `Chime in for ${space.name || space.id}`, onchange: async () => {
           const chime = { default: null, on: true, off: false }[select.value];
@@ -107,6 +154,7 @@ export function mountDiscord(container) {
         return h("tr", {},
           h("td", {}, h("strong", {}, space.name || space.id), h("div", { class: "muted small" }, space.id)),
           h("td", { "data-label": "Chime in" }, select),
+          h("td", { "data-label": "Personality" }, personality(space)),
           h("td", { class: "end" }, space.present ? h("span", { class: "badge ok" }, "Bot present") : h("span", { class: "badge off" }, "Bot gone")));
       }))));
   }

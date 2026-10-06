@@ -254,6 +254,11 @@ class Users:
         token = TOKEN_PREFIX + secrets.token_urlsafe(32)
         now = _stamp(self._clock())
         with self._memory.lock, self._memory.database as db:
+            if device:  # the same device logging in again (a console launched twice) takes the place of its old session
+                db.execute(
+                    "DELETE FROM sessions WHERE user = ? AND surface = ? AND device = ? AND address = ?",
+                    (user.name, surface, device[:80], address[:64]),
+                )
             created = db.execute(
                 "INSERT INTO sessions (token_hash, user, surface, device, address, created_at, last_used_at)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?)",

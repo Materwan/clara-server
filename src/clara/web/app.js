@@ -239,7 +239,7 @@ function route() {
   railHistory = null;
   clear(body);
   clear(slot);
-  if (WORK_PAGES.includes(name)) railHistory = mountHistory(slot, user); // the chat page draws its own
+  if (name !== "chat") railHistory = mountHistory(slot, user); // the chat page draws its own
   pageName = name;
   document.title = name === "chat" ? "Clara" : `${PAGES[name][0]} – Clara`;
   const fresh = wantNewChat || (name === "chat" && sub === "new");

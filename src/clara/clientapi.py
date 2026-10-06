@@ -16,7 +16,8 @@ the web site, the desktop app or the terminal.
 
     GET    /v1/admin/spaces             (administrators) the spaces, and whether Clara may chime in
     PATCH  /v1/admin/spaces             {default_chime}
-    PATCH  /v1/admin/spaces/{id}        {chime: true | false | null}
+    PATCH  /v1/admin/spaces/{id}        {chime?: true | false | null, instructions?: [{text, enabled}]}: the list replaces
+                                        the personality file of Clara in that space while some are enabled
     PATCH  /v1/admin/people/{id}        {relation: 0-100 | null}
     GET    /v1/admin/discord            the built-in Discord bot, its servers, the Discord accounts signed in
     GET    /v1/admin/discord/members    ?q=  people in the bot's servers (to pick one to sign in)
@@ -77,8 +78,18 @@ class SpacesBody(BaseModel):
     spaces: list[SpaceEntry] = Field(max_length=MAX_SPACES)
 
 
+MAX_INSTRUCTION = 500  # characters of one instruction of a space
+MAX_INSTRUCTIONS = 30
+
+
+class Instruction(BaseModel):
+    text: str = Field(min_length=1, max_length=MAX_INSTRUCTION)
+    enabled: bool = True
+
+
 class SpacePatch(BaseModel):
-    chime: bool | None  # null: back to the default
+    chime: bool | None = None  # null: back to the default
+    instructions: list[Instruction] | None = Field(default=None, max_length=MAX_INSTRUCTIONS)  # replaces the list
 
 
 class SpacesPatch(BaseModel):
@@ -106,7 +117,7 @@ def describe_space(space: Space, default: bool) -> dict:
     return {
         "id": space.id, "surface": space.surface, "name": space.name, "chime": space.chime,
         "chime_effective": default if space.chime is None else space.chime, "present": space.present,
-        "seen_at": space.seen_at,
+        "seen_at": space.seen_at, "instructions": list(space.instructions),
     }
 
 
@@ -294,9 +305,16 @@ async def admin_spaces_default(body: SpacesPatch, admin: Admin, request: Request
 @router.patch("/v1/admin/spaces/{space_id:path}")
 async def admin_space(space_id: str, body: SpacePatch, admin: Admin, request: Request) -> dict:
     memory = request.app.state.memory
-    if not memory.set_space_chime(space_id, body.chime):
+    if memory.space(space_id) is None:
         raise HTTPException(404, "No such space")
-    log.info("admin %s: chime in %s: %s", admin, space_id, body.chime)
+    if "chime" in body.model_fields_set:
+        memory.set_space_chime(space_id, body.chime)
+        log.info("admin %s: chime in %s: %s", admin, space_id, body.chime)
+    if body.instructions is not None:
+        memory.set_space_instructions(space_id, [
+            {"text": " ".join(item.text.split()), "enabled": item.enabled} for item in body.instructions
+        ])
+        log.info("admin %s: %d instructions for %s", admin, len(body.instructions), space_id)
     return describe_space(memory.space(space_id), memory.chime_default())
 
 

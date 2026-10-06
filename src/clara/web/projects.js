@@ -134,7 +134,15 @@ function mountList(container, user) {
       grid)));
   container.append(root);
 
-  (async () => {
+  async function setPinned(project, pinned) {
+    try {
+      await api.patch(`/v1/projects/${project.id}`, { ...who(user), pinned });
+      toast(pinned ? "Pinned: its conversations are in your history." : "Unpinned: its conversations are only on its page.");
+    } catch (error) { toast(error.detail || String(error), true); }
+    load();
+  }
+
+  async function load() {
     let projects;
     try {
       projects = await listProjects(user);
@@ -152,14 +160,19 @@ function mountList(container, user) {
     }
     for (const project of projects) {
       grid.append(h("a", { class: "project-card", href: `#/projects/${project.id}` },
-        h("div", { class: "project-card-head" }, h("span", { class: "glyph" }, icon("folder", { size: 20 })), h("strong", {}, project.name)),
+        h("div", { class: "project-card-head" }, h("span", { class: "glyph" }, icon("folder", { size: 20 })), h("strong", {}, project.name),
+          h("button", { class: "ghost icon-btn pin-project", "aria-pressed": String(project.pinned),
+            title: project.pinned ? "Unpin: its conversations leave your history" : "Pin: its conversations appear in your history",
+            "aria-label": `${project.pinned ? "Unpin" : "Pin"} ${project.name}`,
+            onclick: (event) => { event.preventDefault(); event.stopPropagation(); setPinned(project, !project.pinned); } }, icon("pin", { size: 17 }))),
         project.description ? h("p", { class: "description" }, project.description) : h("p", { class: "description muted" }, "No description"),
         h("div", { class: "meta" },
           h("span", {}, plural(project.files, "file")),
           h("span", {}, plural(project.conversations, "chat")),
           h("span", {}, `updated ${ago(project.updated_at)}`))));
     }
-  })();
+  }
+  load();
 
   return { destroy() { root.remove(); } };
 }
@@ -202,6 +215,7 @@ function mountProject(container, user, id) {
   let busy = false;
   const title = h("h1", { class: "title grow" }, "Project");
   const chatButton = h("button", { class: "primary sm", onclick: () => { location.hash = `#/chat/new/${id}`; } }, icon("plus", { size: 16 }), h("span", { class: "hide-sm" }, "New chat"));
+  const pinButton = h("button", { class: "ghost icon-btn pin-project", onclick: () => togglePin() }, icon("pin"));
   const moreButton = h("button", { class: "ghost icon-btn", "aria-label": "Project actions", title: "Project actions",
     onclick: (event) => { event.stopPropagation(); popupMenu(moreButton, [
       { label: "Edit", icon: "edit", run: edit },
@@ -257,7 +271,7 @@ function mountProject(container, user, id) {
         fileList)));
 
   const root = h("section", { class: "page project-page" },
-    pageHead(h("div", { class: "row grow head-title" }, back, title), chatButton, moreButton),
+    pageHead(h("div", { class: "row grow head-title" }, back, title), chatButton, pinButton, moreButton),
     h("div", { class: "scroll" }, h("div", { class: "container wide" }, page)));
   container.append(root);
 
@@ -265,6 +279,9 @@ function mountProject(container, user, id) {
   function draw() {
     if (!project) return;
     title.textContent = project.name;
+    pinButton.setAttribute("aria-pressed", String(project.pinned));
+    pinButton.title = project.pinned ? "Unpin: its conversations leave your history" : "Pin: its conversations appear in your history";
+    pinButton.setAttribute("aria-label", project.pinned ? "Unpin the project" : "Pin the project");
     document.title = `${project.name} – Clara`;
     description.textContent = project.description;
     description.hidden = !project.description;
@@ -495,6 +512,15 @@ function mountProject(container, user, id) {
     try {
       project = await api.patch(`/v1/projects/${id}`, { ...who(user), ...values });
       draw();
+    } catch (error) { toast(error.detail || String(error), true); }
+  }
+
+  async function togglePin() {
+    if (!project) return;
+    try {
+      project = await api.patch(`/v1/projects/${id}`, { ...who(user), pinned: !project.pinned });
+      draw();
+      toast(project.pinned ? "Pinned: its conversations are in your history." : "Unpinned: its conversations are only on this page.");
     } catch (error) { toast(error.detail || String(error), true); }
   }
 

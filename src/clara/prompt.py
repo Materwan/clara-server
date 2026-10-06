@@ -12,6 +12,11 @@ from pathlib import Path
 
 from .memory import Fact, Person
 
+SPACE_LEAD = (
+    "You are Clara, a personal AI assistant with a persistent memory. In this group space, who you are and how "
+    "you talk is defined by these instructions:"
+)
+
 DEFAULT_PERSONALITY = (
     "You are Clara, a helpful personal AI assistant with a persistent memory. "
     "Answer in the language of the person you talk to."
@@ -50,20 +55,23 @@ class SystemPrompt:
         others: tuple[tuple[Person, list[Fact]], ...] = (),
         project: str = "",
         integrations: str = "",
+        personality: list[str] | None = None,
     ) -> str:
         """The system prompt. `instructions` come from the client (what it is for, how to use
         its tools); `summary` replaces the older part of a long conversation. Only the date
         of `today` is used. In a group space (a Discord server), `roster` lists the members who
         have an account and `others` gives what is known about the people the message is about. `project` is what
-        the conversation's project says (projects.py): its instructions and its files."""
+        the conversation's project says (projects.py): its instructions and its files. `personality` (the
+        instructions a group space gives her) replaces the personality file."""
         if facts:
             known = "\n".join(f"- [{fact.id}] {fact.text}" for fact in facts)
         else:
             known = "(nothing yet)"
         if omitted_facts:
             known += f"\n[{omitted_facts} older facts not shown, use recall_facts]"
+        who = SPACE_LEAD + "\n" + "\n".join(f"- {text}" for text in personality) if personality else self.personality()
         parts = [
-            f"{self.personality()}\n\n"
+            f"{who}\n\n"
             "## Current context\n"
             f"- Date: {today.strftime('%A %Y-%m-%d %Z').strip()} (the time of day comes with each message)\n"
             f"- You are talking to: {person.name} (through: {surface})\n\n"

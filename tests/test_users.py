@@ -270,6 +270,21 @@ def test_me_logout_and_sessions(http):
     assert http.get("/v1/auth/me", headers=headers).status_code == 401
 
 
+def test_a_device_that_logs_in_again_takes_the_place_of_its_old_session(http):
+    def sign_in(device, surface="cli"):
+        body = {"username": "erwan", "password": PASSWORD, "surface": surface, "device": device}
+        return {"Authorization": f"Bearer {http.post('/v1/auth/login', json=body).json()['token']}"}
+
+    first = sign_in("laptop")  # a console launched again and again, from the same computer
+    second = sign_in("laptop")
+    other = sign_in("desktop")
+    seen = sign_in("laptop", surface="app")  # not the same surface: another device
+    devices = http.get("/v1/auth/sessions", headers=seen).json()["sessions"]
+    assert sorted((d["surface"], d["device"]) for d in devices) == [("app", "laptop"), ("cli", "desktop"), ("cli", "laptop")]
+    assert http.get("/v1/auth/me", headers=first).status_code == 401  # the old one was replaced
+    assert http.get("/v1/auth/me", headers=second).status_code == 200 and http.get("/v1/auth/me", headers=other).status_code == 200
+
+
 def test_client_tokens_cannot_use_the_account_routes(http):
     assert http.get("/v1/auth/me", headers=CLI_TOKEN).status_code == 403
 

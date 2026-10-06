@@ -22,38 +22,65 @@ export function groupOf(info) {
 
 export const labelOf = (info) => info.title || (info.preview ? splitMessage(info.preview).text || info.preview : "") || "New chat";
 
-// Which groups the person folded, kept in this browser (a group is "d:<date group>" or "p:<project id>").
+// What the person chose in this browser: the groups folded (a group is "d:<date group>" or "p:<project id>"), and how
+// many conversations of each project are shown.
 const FOLDED = "clara.rail.folded";
-const folded = (() => {
-  try { return new Set(JSON.parse(localStorage.getItem(FOLDED) || "[]")); } catch { return new Set(); }
-})();
-const keepFolded = () => {
-  try { localStorage.setItem(FOLDED, JSON.stringify([...folded])); } catch { /* private window: it is forgotten */ }
+const SHOWN = "clara.rail.shown";
+const PAGE = 5; // conversations of a project shown at first, and added by each click on "Show more"
+const stored = (key, fallback) => {
+  try { return JSON.parse(localStorage.getItem(key) || "null") ?? fallback; } catch { return fallback; }
+};
+const folded = new Set(stored(FOLDED, []));
+const shown = new Map(Object.entries(stored(SHOWN, {})));
+const keep = (key, value) => {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* private window: it is forgotten */ }
 };
 
-/** A group that folds: its title (a button; for a project, the name stays a link to it) and its conversations. A search shows everything. */
-function group(key, label, items, row, query, link = null) {
+/**
+ * A group that folds: its title (a button; for a project, the name stays a link to it) and its conversations. With a
+ * `page`, only the first ones are shown and buttons show more or fewer (a search shows them all).
+ */
+function group(key, label, items, row, query, link = null, page = 0) {
   const open = Boolean(query) || !folded.has(key);
-  const body = h("div", { class: "group-items", hidden: !open }, items.map(row));
+  const body = h("div", { class: "group-items", hidden: !open });
+  const limited = page > 0 && !query && items.length > page;
+  const show = (count, kind) => {
+    if (count <= page) shown.delete(key); else shown.set(key, count);
+    keep(SHOWN, Object.fromEntries(shown));
+    fill();
+    body.querySelector(`[data-kind="${kind}"]`)?.focus(); // the button that was clicked is drawn again
+  };
+  function fill() {
+    const count = limited ? Math.min(items.length, Number(shown.get(key)) || page) : items.length;
+    clear(body).append(...items.slice(0, count).map(row));
+    if (!limited) return;
+    body.append(h("div", { class: "group-more" },
+      count < items.length && h("button", { type: "button", class: "ghost sm", "data-kind": "more", onclick: () => show(count + page, "more") },
+        `Show ${Math.min(page, items.length - count)} more`),
+      count > page && h("button", { type: "button", class: "ghost sm", "data-kind": "less", onclick: () => show(page, "less") }, "Show less")));
+  }
+  fill();
   const toggle = h("button", { type: "button", class: "ghost group-toggle", "aria-expanded": String(open), title: open ? "Fold" : "Unfold",
     onclick: () => {
-      const show = body.hidden;
-      body.hidden = !show;
-      toggle.setAttribute("aria-expanded", String(show));
-      toggle.title = show ? "Fold" : "Unfold";
-      if (show) folded.delete(key); else folded.add(key);
-      keepFolded();
+      const unfold = body.hidden;
+      body.hidden = !unfold;
+      toggle.setAttribute("aria-expanded", String(unfold));
+      toggle.title = unfold ? "Fold" : "Unfold";
+      if (unfold) folded.delete(key); else folded.add(key);
+      keep(FOLDED, [...folded]);
     } }, icon("chevron", { size: 14, className: "caret" }), !link && h("span", { class: "name" }, label));
   return h("section", { class: "group" },
     h("div", { class: "group-title" + (link ? " project-title" : "") }, toggle, link, h("span", { class: "count" }, items.length)), body);
 }
 
 /**
- * Draw `list` in `box`: what is pinned first, then each project in a group of its own, named after it, newest first,
- * then the conversations that belong to no project by date. Every group folds. `row(info, inProject)` makes the line
- * of one conversation.
+ * Draw `list` in `box`: what is pinned first, then the pinned projects, each in a group of its own named after it,
+ * newest first, with its newest conversations, then the conversations that belong to no project by date. The
+ * conversations of a project that is not pinned are not shown (they are on its page), unless a search finds them.
+ * `pinned` is the set of the ids of the pinned projects (null: not known yet, every project counts as pinned).
+ * Every group folds. `row(info, inProject)` makes the line of one conversation.
  */
-export function renderGroups(box, list, projects, row, query = "") {
+export function renderGroups(box, list, projects, row, query = "", pinned = null) {
   clear(box);
   if (!list.length) {
     box.append(h("p", { class: "empty-note" }, query ? "No conversation matches." : "Your conversations will appear here."));
@@ -63,27 +90,30 @@ export function renderGroups(box, list, projects, row, query = "") {
   const byProject = new Map();
   for (const info of list) {
     if (info.project && !info.pinned) {
-      if (!byProject.has(info.project)) byProject.set(info.project, []);
-      byProject.get(info.project).push(info);
+      if (query || !pinned || pinned.has(info.project)) {
+        if (!byProject.has(info.project)) byProject.set(info.project, []);
+        byProject.get(info.project).push(info);
+      }
     } else groups.get(groupOf(info)).push(info);
   }
   const dates = ([name, items]) => items.length && box.append(group(`d:${name}`, name, items, (info) => row(info, false), query));
-  const [pinned, ...others] = groups;
-  dates(pinned);
+  const [pinnedChats, ...others] = groups;
+  dates(pinnedChats);
   const time = (info) => parseDate(info.updated_at)?.getTime() || 0;
   const newest = (items) => Math.max(...items.map(time));
   for (const [id, items] of [...byProject].sort((a, b) => newest(b[1]) - newest(a[1]))) {
     items.sort((a, b) => time(b) - time(a));
     const link = h("a", { href: `#/projects/${id}`, title: "Open the project" }, icon("folder", { size: 14 }), h("span", {}, projects.get(id) || "Project"));
-    box.append(group(`p:${id}`, projects.get(id) || "Project", items, (info) => row(info, true), query, link));
+    box.append(group(`p:${id}`, projects.get(id) || "Project", items, (info) => row(info, true), query, link, PAGE));
   }
   others.forEach(dates);
+  if (!box.children.length) box.append(h("p", { class: "empty-note" }, "The conversations of projects that are not pinned are on their project's page."));
 }
 
 /** The list for a page that is not the chat. Returns `{destroy}`. */
 export function mountHistory(slot, user) {
   const who = { surface: "web", user_id: user.name };
-  const state = { list: [], query: "", projects: new Map() };
+  const state = { list: [], query: "", projects: new Map(), pinned: null };
   const search = h("input", { type: "search", placeholder: "Search conversations", "aria-label": "Search conversations" });
   const box = h("div", { class: "convos", role: "list", "aria-label": "Conversations" });
   const parts = [h("div", { class: "convo-search" }, icon("search", { size: 16 }), search), box];
@@ -104,6 +134,7 @@ export function mountHistory(slot, user) {
       if (gone) return;
       state.list = found.conversations;
       state.projects = new Map(projects.map((item) => [item.id, item.name]));
+      state.pinned = new Set(projects.filter((item) => item.pinned).map((item) => item.id));
     } catch (error) {
       if (error.status !== 401 && !gone) toast(error.detail || String(error), true);
       return;
@@ -156,7 +187,7 @@ export function mountHistory(slot, user) {
     more);
   }
 
-  const draw = () => renderGroups(box, state.list, state.projects, row, state.query);
+  const draw = () => renderGroups(box, state.list, state.projects, row, state.query, state.pinned);
 
   search.addEventListener("input", () => {
     clearTimeout(timer);

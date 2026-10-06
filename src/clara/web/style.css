@@ -402,6 +402,9 @@ button.sm { padding: .32rem .65rem; font-size: .85rem; border-radius: var(--r-sm
 .project-title a:hover { color: var(--text); text-decoration: none; }
 .project-title a span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .group-items[hidden] { display: none; }
+.group-more { display: flex; gap: .2rem; padding: .1rem .2rem .2rem; }
+.group-more button { padding: .25rem .55rem; font-size: .8rem; color: var(--muted); }
+.group-more button:hover:not(:disabled) { color: var(--text); }
 .convo {
   position: relative; display: flex; align-items: center; gap: .3rem; border-radius: var(--r); padding: .1rem .15rem .1rem .6rem;
   cursor: pointer; color: var(--text-2); font-size: .9rem; min-height: 36px;
@@ -683,6 +686,9 @@ table.grid td.end { text-align: right; width: 1%; }
 }
 .project-card:hover { background: var(--hover); border-color: var(--text-2); border-top-color: var(--accent); text-decoration: none; }
 .project-card-head { display: flex; align-items: center; gap: .65rem; min-width: 0; }
+.project-card-head .pin-project { margin-left: auto; flex: none; }
+.pin-project[aria-pressed="true"], .pin-project[aria-pressed="true"]:hover:not(:disabled) { color: var(--accent-text); }
+.pin-project[aria-pressed="true"] .icon { fill: currentColor; fill-opacity: .25; }
 .project-card-head strong { font-family: var(--font-display); letter-spacing: -0.02em; font-size: 1.08rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-card .description {
   flex: 1; margin: 0; color: var(--text-2); font-size: .92rem;
@@ -993,6 +999,12 @@ dialog:has(.sched-form) { width: min(560px, calc(100vw - 2rem)); }
 .sched-form .pick-list { flex-direction: column; gap: .35rem; }
 .sched-form .pick { display: inline-flex; align-items: center; gap: .45rem; font-size: .9rem; font-weight: 400; color: var(--text); cursor: pointer; }
 .sched-form .pick .icon { color: var(--muted); }
+dialog:has(.persona-form) { width: min(560px, calc(100vw - 2rem)); }
+.persona-form { width: min(520px, 100%); }
+.persona-rows { display: flex; flex-direction: column; gap: .5rem; margin: .8rem 0 .6rem; }
+.persona-row { display: flex; align-items: flex-start; gap: .5rem; }
+.persona-row input[type="checkbox"] { margin-top: .6rem; }
+.persona-row textarea { flex: 1; min-width: 0; resize: vertical; font-size: .93rem; }
 .icon.flip { transform: rotate(180deg); }
 .cal { overflow: hidden; }
 .cal-bar { display: flex; align-items: center; gap: .4rem; padding: .75rem 1rem; border-bottom: 1px solid var(--line); }

@@ -49,6 +49,7 @@ class Project:
     files: int = 0
     size: int = 0  # characters of text, in all
     conversations: int = 0
+    pinned: bool = False
 
 
 @dataclass(frozen=True)
@@ -190,7 +191,7 @@ class Projects:
     def _project(row) -> Project:
         return Project(
             row["id"], row["person_id"], row["name"], row["description"], row["instructions"], row["created_at"],
-            row["updated_at"], row["files"], row["size"], row["conversations"],
+            row["updated_at"], row["files"], row["size"], row["conversations"], bool(row["pinned"]),
         )
 
     @staticmethod
@@ -221,10 +222,10 @@ class Projects:
         return self._project(row) if row else None
 
     def of(self, person_id: int) -> list[Project]:
-        """A person's projects, the last changed first."""
+        """A person's projects, the pinned ones first, then the last changed first."""
         with self._lock:
             rows = self._db.execute(
-                self._COLUMNS + " WHERE p.person_id = ? ORDER BY p.updated_at DESC, p.id DESC", (person_id,)
+                self._COLUMNS + " WHERE p.person_id = ? ORDER BY p.pinned DESC, p.updated_at DESC, p.id DESC", (person_id,)
             ).fetchall()
         return [self._project(row) for row in rows]
 
@@ -249,6 +250,11 @@ class Projects:
         if project is None:
             raise ProjectError("No such project")
         return project
+
+    def pin(self, project_id: int, pinned: bool) -> None:
+        """Pin or unpin a project (it is not a change of its content: `updated_at` stays)."""
+        with self._lock, self._db:
+            self._db.execute("UPDATE projects SET pinned = ? WHERE id = ?", (int(pinned), project_id))
 
     def delete(self, project_id: int) -> int:
         """Delete a project and its files. Its conversations stay, in no project. Returns how many there were."""

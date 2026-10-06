@@ -58,6 +58,17 @@ def upload(http, project_id: int, files: dict[str, bytes | str], who=ME) -> http
     return http.post(f"/v1/projects/{project_id}/files", headers=AUTH, json=body)
 
 
+def test_a_project_is_pinned_and_listed_first_without_being_touched(http):
+    old, new = new_project(http, name="Old"), new_project(http, name="New")
+    assert old["pinned"] is False
+    changed = http.patch(f"/v1/projects/{old['id']}", headers=AUTH, json={**ME, "pinned": True}).json()
+    assert (changed["pinned"], changed["updated_at"]) == (True, old["updated_at"])  # pinning is not a change of content
+    listed = http.get("/v1/projects", headers=AUTH, params=ME).json()["projects"]
+    assert [(p["name"], p["pinned"]) for p in listed] == [("Old", True), ("New", False)]
+    assert http.patch(f"/v1/projects/{old['id']}", headers=AUTH, json={**ME, "pinned": False}).json()["pinned"] is False
+    assert http.patch(f"/v1/projects/{new['id']}", headers=AUTH, json={**OTHER, "pinned": True}).status_code == 404
+
+
 def test_a_project_is_made_filled_and_described(http):
     project = new_project(http, description="A web app", instructions="Use TypeScript")
     assert (project["name"], project["files"], project["sources"], project["file_list"]) == ("My app", 0, [], [])

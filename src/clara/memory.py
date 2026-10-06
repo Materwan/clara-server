@@ -373,6 +373,12 @@ _ADDED_COLUMNS = {
         "notify_after": "INTEGER",  # seconds a task takes before it notifies the person (0: never, NULL: default)
         "approval_notify_after": "INTEGER",  # seconds before a request for permission is pushed (NULL: default)
     },
+    "spaces": {
+        "instructions": "TEXT NOT NULL DEFAULT '[]'",  # JSON [{"text", "enabled"}]: who Clara is in that space
+    },
+    "projects": {
+        "pinned": "INTEGER NOT NULL DEFAULT 0",  # only pinned projects have their conversations in the history
+    },
     "conversations": {
         "project_id": "INTEGER",  # the project it belongs to (projects.py), NULL: none
     },
@@ -434,6 +440,7 @@ class Space:
     chime: bool | None  # may Clara answer what was not addressed to her? None: the default
     present: bool  # the client is still in it (as it last said)
     seen_at: str  # ISO, UTC
+    instructions: tuple[dict, ...] = ()  # {"text", "enabled"}: when some are on, they are Clara's personality there
 
 
 @dataclass(frozen=True)
@@ -946,7 +953,7 @@ class Memory:
         chime = row["chime"]
         return Space(
             row["id"], row["surface"], row["name"], None if chime is None else bool(chime), bool(row["present"]),
-            row["seen_at"],
+            row["seen_at"], tuple(json.loads(row["instructions"])),
         )
 
     def sync_spaces(self, surface: str, spaces: list[tuple[str, str]]) -> list[Space]:
@@ -983,6 +990,18 @@ class Memory:
             return self._db.execute(
                 "UPDATE spaces SET chime = ? WHERE id = ?", (None if chime is None else int(chime), space_id)
             ).rowcount > 0
+
+    def set_space_instructions(self, space_id: str, instructions: list[dict]) -> bool:
+        """Replace the list of instructions of a space. False if there is no such space."""
+        with self._lock, self._db:
+            return self._db.execute(
+                "UPDATE spaces SET instructions = ? WHERE id = ?", (json.dumps(instructions), space_id)
+            ).rowcount > 0
+
+    def space_personality(self, space_id: str | None) -> list[str]:
+        """The instructions that are on for a space (none: Clara keeps her personality file)."""
+        space = self.space(space_id) if space_id else None
+        return [item["text"] for item in space.instructions if item["enabled"]] if space else []
 
     def chime_default(self) -> bool:
         return self.option(CHIME_OPTION) == "on"

@@ -27,6 +27,14 @@ function greeting() {
   return hour < 5 ? "Hello" : hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
 }
 
+// What was typed and not sent, per conversation (a conversation not started yet has its own id too): the text is kept in
+// this browser, so that it survives a change of page and a reload; the documents are too big to keep, they last until
+// the page is reloaded.
+const DRAFTS = "clara.drafts.";
+const DRAFT_DAYS = 30;
+const MAX_DRAFTS = 30;
+const keptDocs = new Map(); // "<user>|<conversation>" -> the documents of the draft
+
 export function mountChat(container, user, { slot, fresh = false, project = null, open: openId = null } = {}) {
   const who = { surface: SURFACE, user_id: user.name };
   const lastKey = `clara.last.${user.name}`;
@@ -35,7 +43,7 @@ export function mountChat(container, user, { slot, fresh = false, project = null
     list: [], query: "", current: null, messages: [], summary: "", earlier: false,
     busy: false, abort: null, docs: [], context: null, live: null, stick: true,
     stamp: null, // when the conversation shown was last written in, as we read it: another device may have gone on
-    project: null, projects: new Map(), // the project of the conversation shown; every project's name, by id
+    project: null, projects: new Map(), pinned: null, // the project of the conversation shown; every project's name, by id; the ids of those pinned
     approvals: [], // the requests for permission of the conversation shown that wait for an answer
     connections: 0, // how many resources are attached to it (or its project)
   };
@@ -99,11 +107,13 @@ export function mountChat(container, user, { slot, fresh = false, project = null
 
   async function loadProjects() {
     try {
-      state.projects = new Map((await listProjects(user)).map((item) => [item.id, item.name]));
+      const found = await listProjects(user);
+      state.projects = new Map(found.map((item) => [item.id, item.name]));
+      state.pinned = new Set(found.filter((item) => item.pinned).map((item) => item.id));
     } catch { /* the chips just show no name */ }
   }
 
-  const renderList = () => renderGroups(listBox, state.list, state.projects, convoRow, state.query);
+  const renderList = () => renderGroups(listBox, state.list, state.projects, convoRow, state.query, state.pinned);
 
   function actionsFor(info) {
     return [
@@ -251,10 +261,52 @@ export function mountChat(container, user, { slot, fresh = false, project = null
     }
   }
 
-  function newChat(inProject = null) {
+  // ---- what was typed and not sent ---------------------------------------------------------------------
+  const draftsKey = DRAFTS + user.name;
+  const docsKey = (id) => `${user.name}|${id}`;
+  function readDrafts() {
+    try { return JSON.parse(localStorage.getItem(draftsKey) || "{}"); } catch { return {}; }
+  }
+  const hasDraft = (id) => Boolean(readDrafts()[id]) || keptDocs.has(docsKey(id));
+
+  /** Keep the box (and its documents) as the draft of the conversation shown; an empty box leaves no draft. */
+  function saveDraft() {
+    if (!state.current) return;
+    const drafts = readDrafts();
+    if (input.value.trim()) drafts[state.current] = { text: input.value, project: state.project, at: Date.now() };
+    else delete drafts[state.current];
+    const recent = Object.entries(drafts).filter(([, draft]) => Date.now() - draft.at < DRAFT_DAYS * 86400000)
+      .sort((a, b) => b[1].at - a[1].at).slice(0, MAX_DRAFTS);
+    try { localStorage.setItem(draftsKey, JSON.stringify(Object.fromEntries(recent))); } catch { /* private mode: not kept */ }
+    if (state.docs.length) keptDocs.set(docsKey(state.current), state.docs); else keptDocs.delete(docsKey(state.current));
+  }
+
+  /** Put the draft of the conversation shown in the box (the box is emptied if there is none). */
+  function restoreDraft() {
+    input.value = readDrafts()[state.current]?.text || "";
+    state.docs = keptDocs.get(docsKey(state.current)) || [];
+    autosize();
+    renderChips();
+  }
+
+  let draftTimer = null;
+
+  /** A conversation to show: its draft replaces the one of the conversation left. */
+  function switchTo(id) {
+    if (id === state.current) return;
+    saveDraft();
+    state.current = id;
+    restoreDraft();
+  }
+
+  /** A new conversation (in a project, maybe); `again` is one not started yet that has a draft: it is shown instead. */
+  function newChat(inProject = null, again = null) {
     if (state.busy) return toast("Wait for Clara to finish, or stop the answer first.");
+    if (!again && state.current && !state.messages.length && !state.list.some((info) => info.id === state.current) && state.project === inProject) {
+      return input.focus(); // this one has not been started: it is the new chat
+    }
+    switchTo(again || `${SURFACE}:${user.name}:${randomId()}`); // saves the draft of the one left, with its project
     state.project = inProject;
-    state.current = `${SURFACE}:${user.name}:${randomId()}`;
     state.messages = [];
     state.summary = "";
     state.earlier = false;
@@ -274,7 +326,7 @@ export function mountChat(container, user, { slot, fresh = false, project = null
 
   async function open(id) {
     if (state.busy && id !== state.current) return toast("Wait for Clara to finish, or stop the answer first.");
-    state.current = id;
+    switchTo(id);
     state.live = null;
     remember();
     try {
@@ -286,7 +338,8 @@ export function mountChat(container, user, { slot, fresh = false, project = null
       state.stamp = body.updated_at || null;
     } catch (error) {
       if (error.status === 404 || error.status === 403) {
-        state.messages = []; state.summary = ""; state.earlier = false; state.project = null; state.stamp = null;
+        state.messages = []; state.summary = ""; state.earlier = false; state.stamp = null;
+        state.project = readDrafts()[id]?.project || null; // a conversation not started yet remembers its project
       } else {
         return toast(error.detail || String(error), true);
       }
@@ -415,6 +468,7 @@ export function mountChat(container, user, { slot, fresh = false, project = null
       autosize();
       state.docs = [];
       renderChips();
+      saveDraft(); // nothing is left to keep
     }
     state.messages.push({ role: "user", content: message });
     const reply = newReply();
@@ -536,6 +590,7 @@ export function mountChat(container, user, { slot, fresh = false, project = null
     sendButton.disabled = !canSend();
   }
   input.addEventListener("input", autosize);
+  input.addEventListener("input", () => { clearTimeout(draftTimer); draftTimer = setTimeout(saveDraft, 300); });
   input.addEventListener("keydown", (event) => {
     // on a touch screen Enter makes a new line; the send button sends
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing && matchMedia("(hover: hover)").matches) { event.preventDefault(); send(); }
@@ -598,18 +653,21 @@ export function mountChat(container, user, { slot, fresh = false, project = null
   (async () => {
     await Promise.all([loadList(), loadProjects()]);
     renderList(); // the project groups are named by the projects, which may have come after the list
-    if (fresh) return newChat(project);
-    if (openId) return open(openId);
     let last = null;
     try { last = localStorage.getItem(lastKey); } catch { /* private mode */ }
-    const start = state.list.find((info) => info.id === last) || state.list[0];
-    if (start) await open(start.id);
+    // the last conversation shown, if it was not started yet and something was typed in it
+    const unsent = last && !state.list.some((info) => info.id === last) && hasDraft(last) ? last : null;
+    if (fresh) return newChat(project, unsent && (readDrafts()[unsent]?.project || null) === project ? unsent : null);
+    if (openId) return open(openId);
+    const start = state.list.find((info) => info.id === last)?.id || unsent || state.list[0]?.id;
+    if (start) await open(start);
     else newChat();
   })();
 
   return {
     newChat: () => newChat(),
     destroy() {
+      clearTimeout(draftTimer); saveDraft();
       state.abort?.abort(); clearTimeout(searchTimer); clearInterval(refreshTimer); clearInterval(approvalTimer); clearInterval(followUp);
       document.removeEventListener("visibilitychange", refresh); removeEventListener("focus", refresh);
       root.remove(); for (const node of railPart) node.remove();

@@ -413,6 +413,7 @@ class Agent:
                 self.memory.relation(person.id), request.roster, others,
                 project=project.text if project else "",
                 integrations=self._integrations_context(request, person),
+                personality=self.memory.space_personality(request.space),
             )
             messages.append({"role": "system", "content": system})
             stored = self.memory.history(request.conversation_id, self.history_turns, state.upto_id)

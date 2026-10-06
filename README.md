@@ -164,7 +164,7 @@ All routes except `/health` need `Authorization: Bearer <token>`.
 | `POST /v1/accounts/register`, `POST /v1/accounts/login` | `{surface, user_id, user_name?, username, password}`: a client signs one of its accounts in (see *Discord*); 401 wrong password, 409 name taken or already signed in, 422 rules, 429 too many |
 | `POST /v1/accounts/logout`, `GET /v1/accounts/me?surface=&user_id=`, `GET /v1/accounts/signed-in?surface=` | sign it out; who it is signed in as, with its facts and relationship; every signed-in account of a surface |
 | `PUT /v1/spaces` | `{surface, spaces: [{id, name}]}`: the group spaces (Discord servers) the client is in now |
-| `GET /v1/admin/spaces`, `PATCH /v1/admin/spaces` `{default_chime}`, `PATCH /v1/admin/spaces/{id}` `{chime}`, `PATCH /v1/admin/people/{id}` `{relation}` | chime in, and the relationship (administrators) |
+| `GET /v1/admin/spaces`, `PATCH /v1/admin/spaces` `{default_chime}`, `PATCH /v1/admin/spaces/{id}` `{chime?, instructions?}`, `PATCH /v1/admin/people/{id}` `{relation}` | chime in, and the relationship (administrators) |
 | `POST /v1/accounts/link-code` | `{surface, user_id}` → `{code, expires_in}`: proof of control of that account |
 | `POST /v1/accounts/link` | `{surface, user_id, code, to_surface, to_user_id}`; 403 bad code, 409 both accounts have memories |
 | `DELETE /v1/conversations/{id}?surface=&user_id=` | forget a thread, keep the facts; with an account, only one its person started (404 otherwise) |
@@ -368,6 +368,12 @@ In a group, every message reaches the model prefixed with its author's name. The
 web site's *Discord* page), with a default for the spaces nobody set (off). The client tells the server which
 spaces it is in (`PUT /v1/spaces`, when it starts, and when it joins or leaves one). Mind that with chime in, every
 message of a signed-in member costs a model call.
+
+**A personality per server.** An administrator gives a space a list of short instructions (`instructions`: `{text,
+enabled}`, at most 30 of 500 characters; the web site's *Discord* page edits them). While at least one is enabled,
+they *replace* the personality file for every message of that space (`ChatRequest.space`): the prompt starts with
+one line naming Clara and the instructions as bullets, and keeps the rest (what she remembers, the relationship,
+the roster, tools). Private messages keep the usual personality; nothing enabled, nothing changes.
 
 **Privacy.** In a space, Clara can read what she remembers about a member while she talks to the others (that is
 what `about_person` and `focus` are for); the prompt asks her to be discreet. Registering on Discord means accepting
@@ -576,7 +582,9 @@ address (other than this machine) may make 5 users a minute, then none for an ho
 strangers can reach (Tailscale Funnel).
 
 The same things are on the web site's *Admin* page, where a password can also be typed instead of generated. A user
-changes their own password on the *Account* page, which signs out their other devices.
+changes their own password on the *Account* page, which signs out their other devices. A device that logs in
+again (same user, surface, device name and address: a console launched twice) replaces its old session instead of
+adding a line to the list of devices.
 
 A user takes over the memories of accounts that already have their name: `/user add erwan` finds `cli:erwan`,
 `app:erwan`... and the user is that person. Signing in on a surface joins its account (`app:erwan`) to them; if both
@@ -626,7 +634,7 @@ desktop app both manage them).
 | --- | --- |
 | `GET /v1/projects?surface=&user_id=` | the person's projects (files, size, conversations, how they reach the model now) |
 | `POST /v1/projects` | `{surface, user_id, name, description?, instructions?}` |
-| `GET`, `PATCH`, `DELETE /v1/projects/{id}` | one project, with its repositories and the list of its files |
+| `GET`, `PATCH`, `DELETE /v1/projects/{id}` | one project, with its repositories and the list of its files; `PATCH` takes `pinned` too (only pinned projects have their conversations in the web site's history; they come first in the list) |
 | `POST /v1/projects/{id}/files` | `{files: [{path, data}]}`, `data` in base64: text, code, PDF, `.docx`, `.zip` (80 MB per request) |
 | `GET /v1/projects/{id}/file?path=` | a file's text |
 | `DELETE /v1/projects/{id}/files?path=&folder=` | a file, or every file of a folder |
@@ -840,8 +848,11 @@ shown, and the user's answers come back as their next message, which Clara then 
   (vendored in `web/katex/`, so it works offline; the script is only loaded once an answer has a formula); your conversations at the side (search, pin, rename, delete, titles
   written by Clara); a bar showing how full the context is and *Summarise* to compact it; documents with 📎, by
   drag and drop or by pasting: PDFs are read by the server (`pypdf`), text and code in the browser, as in the desktop app.
-  The list shows what is pinned, then each project with its conversations, then the others by date; every group
-  folds (kept in the browser, and a search opens them all). There is no *Chat* link: the list is the way back to a
+  The list shows what is pinned, then each *pinned project* with its five newest conversations (*Show 5 more*, and
+  *Show less*, in the group), then the others by date; the conversations of a project that is not pinned are on its
+  page, and a search finds them all. Every group folds (these choices are kept in the browser). What you typed in a
+  conversation and did not send stays there when you change page or reload (the text is kept in the browser, the
+  attached documents until a reload). There is no *Chat* link: the list is the way back to a
   conversation and *New chat* starts one. A chip next to the title names the project of the conversation shown, and
   its menu moves it.
 - **Projects**: your projects as cards; one project shows its conversations (*New chat* starts one in it), its
