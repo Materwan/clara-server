@@ -108,6 +108,8 @@ TEXTS: dict[str, dict[str, str]] = {
     },
     "task_due": {FRENCH: "à faire pour {when}", ENGLISH: "due {when}"},
     "task_done": {FRENCH: "terminée", ENGLISH: "done"},
+    "task_sub_of": {FRENCH: "sous-tâche de `{parent}`", ENGLISH: "sub task of `{parent}`"},
+    "task_subtasks": {FRENCH: "{done}/{total} sous-tâches faites", ENGLISH: "{done}/{total} sub tasks done"},
     "task_sent_one": {FRENCH: "1 rappel envoyé", ENGLISH: "1 reminder sent"},
     "task_sent": {FRENCH: "{count} rappels envoyés", ENGLISH: "{count} reminders sent"},
     "task_next": {FRENCH: "prochain rappel {when}", ENGLISH: "next reminder {when}"},

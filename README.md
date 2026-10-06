@@ -73,6 +73,7 @@ Both consoles run the same commands (the `/` is optional):
 | `/chime [default on\|off \| <space> on\|off\|default]` | where Clara may answer Discord messages that are not for her (see *Discord*) |
 | `/discord [status\|start\|stop\|restart]` | the Discord bot built into the server (see *Discord*) |
 | `/stop [now]` | stop the server: tell every client, refuse new questions, wait for running replies and agents, exit (`now`: do not wait); works from `clara-admin` too |
+| `/restart [now]` | pull, update, stop the careful way and start again (see *Restarting the server*); works from `clara-admin` too |
 | `/help [command]`, `/quit` | `/quit` stops the server like `/stop` from the embedded console, and only closes a remote one |
 
 ### Providers
@@ -153,8 +154,8 @@ All routes except `/health` need `Authorization: Bearer <token>`.
 | `POST /v1/reminders` | `{surface, user_id, user_name?, text, at, repeat?, timezone?, conversation?, targets?}` → `{id, text, due_at, repeat, targets}`; 422 if `at` is past or not ISO 8601 (see *Reminders*); `conversation` (default: the account's own) is where Clara writes the announcement; `targets`: the surfaces it is shown on (default: all of the person's) |
 | `GET /v1/reminders?surface=&user_id=` | the person's reminders that have not fired yet |
 | `DELETE /v1/reminders/{id}?surface=&user_id=` | cancel one of the person's own reminders |
-| `POST /v1/tasks` | `{surface, user_id, user_name?, title, description?, due?, reminders?, timezone?, conversation?, targets?}` → the task: add one to the person's to-do list (see *Tasks*); `due` and `reminders` are ISO 8601 (a time without offset is read in `timezone`); **without `reminders` Clara picks them**; 422 for a past time or a bad field |
-| `GET /v1/tasks?surface=&user_id=&status=` | the person's tasks (`status`: `open` by default, `done` or `all`): each with `reminders_sent`, `next_reminder`, `reminders` (all those to come) and `max_reminders`; `GET /v1/tasks/{id}` one task |
+| `POST /v1/tasks` | `{surface, user_id, user_name?, title, description?, due?, reminders?, timezone?, conversation?, targets?, parent_id?}` → the task: add one to the person's to-do list (see *Tasks*); `due` and `reminders` are ISO 8601 (a time without offset is read in `timezone`); **without `reminders` Clara picks them**; 422 for a past time or a bad field |
+| `GET /v1/tasks?surface=&user_id=&status=` | the person's tasks (`status`: `open` by default, `done` or `all`): each with `reminders_sent`, `next_reminder`, `reminders` (all those to come), `max_reminders`, `parent_id`, `subtasks` (`{total, done}`) and `due_limit` (see *Sub tasks*); `GET /v1/tasks/{id}` one task |
 | `PATCH /v1/tasks/{id}` | `{surface, user_id, title?, description?, due?, reminders?, targets?, status?}`: only what is given changes; `due: null` removes the deadline, `reminders` replaces those to come (`[]`: stop reminding), `status` `done` or `open` closes or reopens it; `DELETE /v1/tasks/{id}?surface=&user_id=` deletes it |
 | `POST /v1/notifications` | `{surface, user_id, user_name?, text, title?, targets?, conversation?}` → `{id, sent_at, targets}`: notify that person now (see *Notifications*); 429 when too many |
 | `GET /v1/settings?surface=&user_id=` | the person's settings: `{notify_after, notify_after_default, notify_after_effective}`, the seconds a task takes before it notifies them when done (see *Notifications*); `notify_after` is `null` while they have not set one |
@@ -171,7 +172,7 @@ All routes except `/health` need `Authorization: Bearer <token>`.
 | `GET /v1/auth/signup`, `POST /v1/auth/register` | `{open}`: whether the web site lets people make their own user; `{username, password}` makes a user (never an administrator) and logs them in on `web`, as login does. 403 when `CLARA_WEB_SIGNUP` is off, 409 name taken, 422 rules, 429 too many (see *Users*) |
 | `POST /v1/auth/logout`, `GET /v1/auth/me`, `POST /v1/auth/password` `{current_password, new_password}`, `GET /v1/auth/sessions`, `DELETE /v1/auth/sessions/{id}` | the signed-in user's own account and devices |
 | `POST /v1/documents/extract` | the bytes of a PDF as the body → `{text, pages, truncated}` |
-| `GET /health` | no auth; shows the active provider and model |
+| `GET /health` | no auth; shows the active provider and model, and `restarted`: the id of the restart that started this server (see *Restarting the server*) |
 | `GET /v1/admin/commands`, `POST /v1/admin/command` | `{line}` → `{output, quit}`; an **admin token** or an administrator user (used by `clara-admin`) |
 | `GET/POST /v1/admin/users`, `PATCH/DELETE /v1/admin/users/{name}`, `POST .../sign-out`, `GET /v1/admin/status`, `GET /v1/admin/models`, `GET /v1/admin/people`, `GET/POST .../people/{id}/facts`, `DELETE .../facts/{fact}`, `GET .../people/{id}/footprint` | what the web site's administration page uses; same rights as above |
 
@@ -444,6 +445,17 @@ remind me about the taxes?", "I did the taxes"). Only its person can see or chan
 - **A task is not nagged for ever**: after `CLARA_TASK_MAX_REMINDERS` reminders (10) the queue is emptied
   (the last notification says so), and a done task is never reminded. At most 100 open tasks (500 in all) per
   person, 10 reminders queued per task, 200 characters of title, 2000 of description.
+- **Sub tasks.** A task can be divided into sub tasks (`parent_id` when adding one; the tool `add_task` has it
+  too; `/task sub <id> ...` in the consoles), and those into sub tasks again: each has its own title, description,
+  deadline and reminders (Clara picks the reminders of a sub task like any other). The rule: **a sub task's
+  deadline and reminders can never be after the deadline of the tasks it is part of** (the earliest of the chain
+  counts; a task without a deadline sets none). Adding or changing one past it is refused (422, with the limit),
+  and so is moving a deadline before one of its sub tasks, which is named: change that one first. The reminders
+  the rules or Clara pick are cut at the limit, and a follow-up never queues one after it. **Completion goes both
+  ways**: finishing a task finishes its open sub tasks, finishing the last open sub task finishes the task it is
+  part of (and so on up; so does deleting the last open one), reopening a sub task reopens the done tasks above it,
+  and a done task takes no new sub task. Deleting a task deletes its sub tasks. At most 50 sub tasks directly under
+  one task; they count in the 100 / 500 limits. There is no way to move a task under another one yet.
 - **Receiving them** is the event stream of *Notifications*: a task reminder is a `notification` titled
   `Task: <title>`, with the source `tasks`, for the surfaces the task names (`targets`, empty: all of the
   person's clients). A missed one arrives when the client is back, like the others.
@@ -879,6 +891,46 @@ server is back they get `{"type": "server", "state": "running"}`.
 A client that has no event stream open (a script, a bot) is not told; it only sees the 503, or the
 connection closing. The three clients of this repository (`clara-chat`, the console, the desktop app) all
 listen and say "Clara is stopping / is not running / is running again".
+
+## Restarting the server
+
+`/restart [now]` (in the console, or `clara-admin /restart`) and the **Restart…** button of the web site's
+*Admin → Server* page do, in this order:
+
+1. **Update, while the old server still runs**: `git pull --ff-only`; then `pip install --upgrade -e ".[discord]"` when
+   the code changed since the server started (or `discord.py` is missing); then `.env` is brought up to date with
+   `.env.example`, keeping your values (the old file is saved as `.env.bak.<date>` when it changes), as
+   `update-and-run.sh` does. **If a step fails, nothing is stopped**: the server goes on and the answer (HTTP 500)
+   holds what the step printed. Another restart or a stop under way is refused (409).
+2. **Stop the careful way**, as `/stop` does (`now`: without waiting for the answers that are running).
+3. **Start again** with the same arguments: the process executes itself again (same PID, so systemd is not
+   disturbed), or, on Windows, which cannot do that, starts a new process (in a new window when there is a console).
+   What `.env` had when the server started is renewed from the file as it is now; a setting the environment itself
+   sets (systemd, your shell) is not touched.
+
+`POST /v1/admin/restart` `{now?}` does the same: `202 {id, steps, message}`. The new server reads `data/restart.json`,
+and `GET /health` says `"restarted": "<id>"` from then on, which is how the page that asked knows it worked: it shows
+"Restarting…", waits for that id, says "The server restarted successfully" and reloads itself (so that it gets the new
+pages). A browser that was reloaded meanwhile goes on waiting. The page gives up after 3 minutes and says so.
+
+`GET /v1/admin/restart[?refresh=true]` → `{needed, reasons, in_progress, last}`. A restart is **proposed** to
+administrators (a *Restart needed* button in the navigation rail, on every page) when:
+
+- `.env` changed since the server started;
+- the code on disk is newer than what runs (somebody ran `git pull`);
+- the remote has new commits (`git fetch`, at most every 10 minutes; *Check for updates* asks at once).
+
+The pages that say "then restart the server" (the Discord bot's token, `discord.py` missing) carry the button too.
+
+## Model overload and retries
+
+A model that is overloaded (HTTP 429, 500, 502, 503, 504, `Retry-After` honoured up to a minute) or that cannot be
+reached (connection refused or cut) is asked again, **only while it has said nothing yet**: once a piece of the answer
+was sent on, asking again would repeat it, so that failure ends the turn as before. The wait starts at
+`CLARA_LLM_RETRY_DELAY` seconds (2) and doubles, with a little jitter, for at most `CLARA_LLM_RETRIES` new tries (3;
+`0` never retries). The model's slot is free while waiting. Clients get `{"type": "retrying", "message": "The model is
+busy, trying again (1/3)…"}` events (the web site shows them as a notice; the other clients ignore them). A model that
+stays silent (`CLARA_LLM_FIRST_TOKEN_TIMEOUT`) and a refused key are not retried.
 
 ## Simultaneous use
 

@@ -41,6 +41,11 @@ are talking to, the surface they use, and the facts you remember about them.
 - Give every task a `description` whenever there is anything to say beyond its title: what exactly is to be done,
   where, with whom, what to bring, the steps, or what the person told you about it. The title stays short; leave the
   description empty only when the title says it all. To add one to a task that has none, use `update_task`.
+- A task can be divided into sub tasks (and those again): when a task is big or the person lists the steps of
+  something, add the main task, then each part with `add_task` and `parent_id` (the main task's number). Every sub task
+  has its own title, description and reminders, but its deadline and reminders can never be after the deadline of the
+  task it is part of: choose them before it (an error says the limit). A task is done when all its sub tasks are, and
+  finishing a task finishes its sub tasks.
 - `list_tasks` answers "what is on my list" and "what is coming" (tasks with the reminders sent and the next
   one); `list_tasks` with a `task_id` gives the description and every reminder of that task. `update_task` changes a
   task (title, description, deadline), moves its reminders, or marks it done with `status` (done tasks are not

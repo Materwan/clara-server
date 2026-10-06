@@ -947,6 +947,8 @@ label.field .picker .hint.error { color: var(--danger); }
 
 /* ---- tasks ------------------------------------------------------------------------------------------ */
 .list.tasks > li { align-items: flex-start; }
+.list.tasks > li.sub { padding-left: calc(1.3rem + var(--depth, 1) * 1.7rem); background: var(--panel-2, transparent); }
+.list.tasks > li.sub .title { font-size: .95rem; font-weight: 600; }
 .task .check {
   width: 1.4rem; height: 1.4rem; padding: 0; border-radius: var(--r-xs); border: 2px solid var(--line-strong); background: transparent;
   color: var(--bg); flex: none; margin-top: .1rem;
@@ -1051,6 +1053,17 @@ dialog:has(.approval-dialog) { width: min(700px, calc(100vw - 2rem)); }
 .rail .approvals-badge .icon { color: var(--rail-signal); }
 .rail .approvals-badge .text { flex: 1; text-align: left; font-weight: 650; }
 .rail .approvals-badge .count { background: var(--rail-signal); color: var(--rail-bg); border-radius: 999px; padding: 0 .5rem; font-weight: 700; font-size: .8rem; font-variant-numeric: tabular-nums; }
+
+.restart-banner {
+  position: fixed; left: 50%; bottom: 1.2rem; transform: translateX(-50%); z-index: 60; max-width: min(560px, calc(100vw - 2rem));
+  display: flex; align-items: center; gap: .6rem; padding: .7rem 1rem; border-radius: var(--r);
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--line); box-shadow: 0 8px 28px rgb(0 0 0 / .25);
+}
+.restart-banner.bad { background: var(--danger-soft); color: var(--danger); }
+.restart-banner .icon { flex: none; }
+.restart-reasons { margin: .5rem 0 0; padding-left: 1.2rem; }
+.restart-output { max-height: 16rem; overflow: auto; background: var(--panel-2); padding: .7rem .8rem; border-radius: var(--r-xs); }
+.restart-notice { display: flex; align-items: center; justify-content: space-between; gap: .8rem; flex-wrap: wrap; }
 
 dialog:has(.picker) { width: min(640px, calc(100vw - 2rem)); }
 dialog:has(.connections-dialog) { width: min(720px, calc(100vw - 2rem)); }

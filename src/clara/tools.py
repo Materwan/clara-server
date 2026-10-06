@@ -24,7 +24,7 @@ from .notifications import CLARA, NotificationError, Notifier
 from .projects import READ_MAX_LINES, Projects
 from .qcm import MAX_OPTION, MAX_OPTIONS, MAX_QUESTION, MAX_QUESTIONS, MIN_OPTIONS, TYPES, build_form
 from .reminders import REPEATS, ReminderError, ReminderService
-from .tasks import NO_DUE, TaskError, TaskService, task_detail, task_line
+from .tasks import NO_DUE, TaskError, TaskService
 from .taskstore import DONE, OPEN, STATUSES
 from .web import WebClient, WebError
 
@@ -305,30 +305,33 @@ def _task_number(task_id: Any) -> int:
 
 
 async def _add_task(
-    context: ToolContext, title: str, description: str = "", due: str = "", reminders: Any = None, targets: Any = None
+    context: ToolContext, title: str, description: str = "", due: str = "", reminders: Any = None, targets: Any = None,
+    parent_id: Any = None,
 ) -> str:
+    service = _task_service(context)
     try:
-        task = await _task_service(context).create(
+        task = await service.create(
             context.person, str(title), str(description or ""), str(due) if due else None, _texts(reminders),
             context.timezone, context.origin, _targets(targets),
+            None if parent_id in (None, "") else _task_number(parent_id),
         )
     except TaskError as error:
         raise ValueError(str(error)) from None
     shown = f"\nReminders are shown{_where(context, task.targets)}." if task.targets else ""
-    return f"Task added.\n{task_detail(task)}{shown}"
+    return f"{'Sub task' if task.parent_id else 'Task'} added.\n{service.detail(task)}{shown}"
 
 
 def _list_tasks(context: ToolContext, task_id: Any = None, status: str = OPEN) -> str:
     tasks = _task_service(context)
     try:
         if task_id not in (None, ""):
-            return task_detail(tasks.get(context.person, _task_number(task_id)))
+            return tasks.detail(tasks.get(context.person, _task_number(task_id)))
         found = tasks.tasks(context.person, None if status == "all" else status)
     except TaskError as error:
         raise ValueError(str(error)) from None
     if not found:
         return "No task." if status == "all" else f"No {status} task."
-    return "\n".join(task_line(task) for task in found)
+    return "\n".join(tasks.line(task) for task in found)
 
 
 async def _update_task(
@@ -360,7 +363,7 @@ async def _update_task(
             tasks.complete(context.person, number)
         elif settling:
             await tasks.reopen(context.person, number, times, context.timezone)
-        return f"Task updated.\n{task_detail(tasks.get(context.person, number))}"
+        return f"Task updated.\n{tasks.detail(tasks.get(context.person, number))}"
     except TaskError as error:
         raise ValueError(str(error)) from None
 
@@ -986,7 +989,9 @@ def default_toolbox(web: WebClient | None = None) -> Toolbox:
                 description=(
                     "Add a task to the person's to-do list: a short title, a description of what it involves, and "
                     "reminders: the times they gave, else sensible ones you choose (a day before and at a deadline, "
-                    "a morning for a chore); tell them when."
+                    "a morning for a chore); tell them when. A big task can be divided: add each part with "
+                    "`parent_id` (the number of the task it belongs to) as a sub task, with its own description, "
+                    "deadline and reminders."
                 ),
                 function=_add_task,
                 parameters={
@@ -995,6 +1000,13 @@ def default_toolbox(web: WebClient | None = None) -> Toolbox:
                     "due": {"type": "string", "description": "Deadline, local ISO 8601 without offset: 2026-10-05T18:00."},
                     "reminders": {"type": "array", "items": {"type": "string"}, "description": "Local ISO 8601, no offset."},
                     "targets": {"type": "array", "items": {"type": "string"}, "description": "Surfaces to remind on; omit: all."},
+                    "parent_id": {
+                        "type": "integer",
+                        "description": (
+                            "Make it a sub task of the task with this number. Its deadline and reminders cannot be "
+                            "after that task's deadline."
+                        ),
+                    },
                 },
                 required=("title",),
             ),

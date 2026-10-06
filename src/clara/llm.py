@@ -40,6 +40,7 @@ class LlmChunk:
     tool_calls: list[ToolCall] = field(default_factory=list)
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    notice: str = ""  # not from the model: the agent says it is waiting to ask again (see agent._model)
 
 
 class LlmBackend(Protocol):
@@ -148,7 +149,13 @@ OPENAI_READ_TIMEOUT = 600.0  # the agent gives up on a silent model sooner (CLAR
 
 
 class LlmError(Exception):
-    """The provider refused the request: the message says why (never with the key)."""
+    """The provider refused the request: the message says why (never with the key). `status` is the HTTP
+    status when there is one, `retry_after` the seconds the provider asked to wait."""
+
+    def __init__(self, message: str, status: int | None = None, retry_after: float | None = None):
+        super().__init__(message)
+        self.status = status
+        self.retry_after = retry_after
 
 
 @dataclass(frozen=True)
@@ -223,9 +230,14 @@ class OpenAIBackend:
     async def _refused(self, response: httpx.Response) -> LlmError:
         await response.aread()
         detail = _error_detail(response)
-        if response.status_code in (401, 403):
-            return LlmError(f"{self._label} refused the API key (HTTP {response.status_code}): {detail}")
-        return LlmError(f"{self._label} answered HTTP {response.status_code}: {detail}")
+        status = response.status_code
+        if status in (401, 403):
+            return LlmError(f"{self._label} refused the API key (HTTP {status}): {detail}", status)
+        try:
+            retry_after = float(response.headers.get("retry-after", ""))
+        except ValueError:
+            retry_after = None
+        return LlmError(f"{self._label} answered HTTP {status}: {detail}", status, retry_after)
 
     def convert(self, messages: list[dict]) -> list[dict]:
         """The messages as the OpenAI API takes them: tool calls get ids, and each result the id of its call."""
@@ -309,7 +321,11 @@ class OpenAIBackend:
                         continue
                     if part.get("error"):
                         error = part["error"]
-                        raise LlmError(f"{self._label}: {error.get('message', error) if isinstance(error, dict) else error}")
+                        code = error.get("code") if isinstance(error, dict) else None
+                        raise LlmError(
+                            f"{self._label}: {error.get('message', error) if isinstance(error, dict) else error}",
+                            code if isinstance(code, int) else None,
+                        )
                     usage = part.get("usage") or {}
                     chunk = LlmChunk(
                         prompt_tokens=int(usage.get("prompt_tokens") or 0),

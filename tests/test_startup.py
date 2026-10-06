@@ -5,6 +5,7 @@ import os
 import signal
 import socket
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 from conftest import FakeBackend, fake_providers
@@ -15,6 +16,9 @@ from clara.server import create_app, main, parse_args
 from clara.tailscale import CommandOutput, Tailscale
 
 # --- the arguments ----------------------------------------------------------------------------------------
+
+# what `main` needs of the app it builds when `serve` is replaced: the restart service says nothing was asked
+FAKE_APP = SimpleNamespace(state=SimpleNamespace(restart=SimpleNamespace(record_boot=lambda: None, requested=False)))
 
 
 def test_headless_and_test_exclude_each_other(capsys):
@@ -81,7 +85,7 @@ def test_main_headless_logs_to_the_file_and_detaches(settings, monkeypatch, caps
         calls.append(("serve", with_console, is_headless))
 
     monkeypatch.setattr("clara.server.serve", fake_serve)
-    monkeypatch.setattr("clara.server.create_app", lambda given: object())
+    monkeypatch.setattr("clara.server.create_app", lambda given: FAKE_APP)
     main(["--headless"])
     assert calls == ["detached", ("serve", False, True)]
     assert str(headless.log_path(settings)) in capsys.readouterr().out
@@ -96,7 +100,7 @@ def test_main_headless_records_a_crash_in_the_log(settings, monkeypatch, restore
         raise RuntimeError("boom")
 
     monkeypatch.setattr("clara.server.serve", broken_serve)
-    monkeypatch.setattr("clara.server.create_app", lambda given: object())
+    monkeypatch.setattr("clara.server.create_app", lambda given: FAKE_APP)
     with pytest.raises(SystemExit) as stop:
         main(["--headless"])
     assert stop.value.code == 1
@@ -266,7 +270,7 @@ def test_main_with_test_goes_on_normally_when_accepted(settings, monkeypatch):
         calls.append(("serve", is_headless))
 
     monkeypatch.setattr("clara.server.serve", fake_serve)
-    monkeypatch.setattr("clara.server.create_app", lambda given: object())
+    monkeypatch.setattr("clara.server.create_app", lambda given: FAKE_APP)
     main(["--test"])
     assert calls == ["tested", ("serve", False)]
 

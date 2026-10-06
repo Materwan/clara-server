@@ -23,6 +23,7 @@ from .models import ModelCatalog, show_weight
 from .notifications import Notifier
 from .prompt import relation_label
 from .providers import ProviderError, ProviderManager, make_ref
+from .restart import RestartError, RestartService
 from .settings import Settings
 from .tailscale import Tailscale
 from .users import UserError, Users, generate_password
@@ -58,6 +59,7 @@ class CommandContext:
     discord: DiscordService | None = None  # the Discord bot built into the server
     limits: UsageLimits | None = None  # the daily credits of each person
     models: ModelCatalog | None = None  # the models users may choose, and what they cost
+    restart: RestartService | None = None  # pull, update and start again
 
     def tell_everybody(self, text: str) -> None:
         if self.notifier is not None:
@@ -200,6 +202,25 @@ async def stop_command(ctx: CommandContext, args: str) -> str:
     if args and args.lower() != "now":
         raise CommandError("Usage: /stop [now]   (now: do not wait for what is running)")
     return ctx.lifecycle.request_stop(force=bool(args))
+
+
+@registry.command(
+    "restart",
+    "[now]",
+    "Pull, update, stop the server the careful way (as /stop does) and start it again",
+    lambda ctx: ["now"],
+)
+async def restart_command(ctx: CommandContext, args: str) -> str:
+    if ctx.restart is None:
+        raise CommandError("This server cannot be restarted from here.")
+    if args and args.lower() != "now":
+        raise CommandError("Usage: /restart [now]   (now: do not wait for what is running)")
+    try:
+        done = await ctx.restart.restart("the console", now=bool(args))
+    except RestartError as error:
+        raise CommandError(str(error)) from None
+    steps = [f"{step['name']}: {step['output'] or 'done'}" for step in done["steps"]]
+    return "\n".join([*steps, done["message"]])
 
 
 @registry.command("status", "", "Provider, model, activity and memory size")

@@ -91,6 +91,7 @@ from .providers import ProviderManager
 from .qcm import with_answers
 from .ratelimit import FailureLimiter
 from .reminders import ReminderError, ReminderService, describe
+from .restart import RestartService, relaunch
 from .settings import Settings, SettingsError
 from .tailscale import Tailscale
 from .taskai import follow as follow_task
@@ -321,6 +322,8 @@ def create_app(
         tool_timeout=settings.tool_timeout,
         first_token_timeout=settings.llm_first_token_timeout,
         idle_timeout=settings.llm_idle_timeout,
+        retries=settings.llm_retries,
+        retry_delay=settings.llm_retry_delay,
         reminders=reminders,
         notifier=notifier,
         long_turn_seconds=settings.notify_long_turn,
@@ -346,9 +349,12 @@ def create_app(
         ai_timeout = float(settings.reminder_ai_timeout)
         reminders.composer = lambda reminder: compose(agent, reminder, ai_timeout)
         tasks.plan_timeout = min(ai_timeout, tasks.plan_timeout)
-        tasks.planner = lambda task, now: plan_task(agent, task, now, tasks.plan_timeout)
-        tasks.follower = lambda task, now: follow_task(agent, task, now, ai_timeout, tasks.max_reminders)
+        tasks.planner = lambda task, now: plan_task(agent, task, now, tasks.plan_timeout, tasks.family(task))
+        tasks.follower = lambda task, now: follow_task(
+            agent, task, now, ai_timeout, tasks.max_reminders, tasks.family(task)
+        )
     lifecycle = Lifecycle(agent, reminders, tasks=tasks)
+    restart = RestartService(settings.data_dir, lifecycle)
     users = Users(memory, settings.session_days)
     users.prune()
     tailscale = tailscale or Tailscale.from_settings(settings)
@@ -419,6 +425,7 @@ def create_app(
     app.state.notifier = notifier
     app.state.traffic = traffic
     app.state.lifecycle = lifecycle
+    app.state.restart = restart
     app.state.providers = providers
     app.state.discord = discord_bot
     app.state.projects = projects
@@ -429,7 +436,7 @@ def create_app(
     app.state.integrations = integrations
     app.state.commands = CommandContext(
         settings, memory, agent, providers, time.monotonic(), f"{settings.host}:{settings.port}", lifecycle,
-        notifier, tailscale, users, discord_bot, limits, models,
+        notifier, tailscale, users, discord_bot, limits, models, restart,
     )
 
     def known_person(surface: Surface, user_id: ExternalId) -> Person:
@@ -440,7 +447,8 @@ def create_app(
 
     @app.get("/health")
     async def health() -> dict:
-        return {"status": "ok", "provider": providers.active, "model": providers.model}
+        # `restarted`: the id of the restart that started this server, which whoever asked it waits for
+        return {"status": "ok", "provider": providers.active, "model": providers.model, "restarted": restart.restarted}
 
     def refuse_when_stopping() -> None:
         if lifecycle.stopping:
@@ -1041,8 +1049,10 @@ def main(argv: list[str] | None = None) -> None:
     else:
         configure_logging()
     with_console = not args.headless and sys.stdin.isatty() and sys.stdout.isatty()
+    app = create_app(settings)
+    app.state.restart.record_boot()
     try:
-        asyncio.run(serve(create_app(settings), settings, with_console, args.headless))
+        asyncio.run(serve(app, settings, with_console, args.headless))
     except KeyboardInterrupt:
         pass
     except Exception:
@@ -1050,6 +1060,9 @@ def main(argv: list[str] | None = None) -> None:
             raise
         log.exception("clara-server crashed")  # nobody is watching a terminal: the log is the only trace
         raise SystemExit(1) from None
+    if app.state.restart.requested:  # asked from the web site or with /restart: start again
+        log.info("starting again")
+        relaunch(sys.argv[1:] if argv is None else argv, app.state.restart.env_keys, with_console)
 
 
 if __name__ == "__main__":

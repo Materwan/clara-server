@@ -44,6 +44,9 @@ HELP = """\
 /task add [@surfaces] [due <when>] [remind <when>]... <title> [| <description>]
                   a task; without `remind`, Clara picks the reminders (she also moves them
                   after each one). e.g. /task add due tomorrow 18:00 Send the invoice
+/task sub <id> [@surfaces] [due <when>] [remind <when>]... <title> [| <description>]
+                  a sub task of task <id>, with its own description, deadline and reminders: none of them
+                  can be after the deadline of that task. A task is done when all its sub tasks are.
 /task done|reopen|delete <id>
 /task set <id> title|description|due|remind <value>
                   due and remind take a <when> (remind: several, comma-separated) or `none`
@@ -199,9 +202,9 @@ class ClaraApi:
 
     def add_task(
         self, title: str, description: str = "", due: datetime | None = None,
-        reminders: list[datetime] | None = None, targets: list[str] | None = None,
+        reminders: list[datetime] | None = None, targets: list[str] | None = None, parent_id: int | None = None,
     ) -> dict:
-        """A task for this user; without `reminders` Clara picks them."""
+        """A task for this user (a sub task of `parent_id`, if given); without `reminders` Clara picks them."""
         response = self.http.post(
             "/v1/tasks",
             json={
@@ -209,6 +212,7 @@ class ClaraApi:
                 "due": due.isoformat(timespec="seconds") if due else None,
                 "reminders": [at.isoformat(timespec="seconds") for at in reminders or []],
                 "targets": targets or [],
+                "parent_id": parent_id,
             },
             timeout=httpx.Timeout(10.0, read=120.0),  # she may be picking the reminders
         )
@@ -405,6 +409,10 @@ def describe_task(task: dict) -> str:
     parts = [f"[{task['id']}] {task['title']}"]
     if task["status"] == "done":
         parts.append("done")
+    if task.get("parent_id"):
+        parts.append(f"sub task of [{task['parent_id']}]")
+    if task.get("subtasks", {}).get("total"):
+        parts.append(f"{task['subtasks']['done']}/{task['subtasks']['total']} sub tasks done")
     if task.get("due_at"):
         parts.append(f"due {local(task['due_at'])}")
     sent = task["reminders_sent"]
@@ -418,6 +426,8 @@ def describe_task_detail(task: dict) -> str:
     lines = [describe_task(task), f"Description: {task['description'] or '(none)'}"]
     if len(task["reminders"]) > 1:
         lines.append("Reminders to come: " + ", ".join(local(at) for at in task["reminders"]))
+    if task.get("due_limit"):
+        lines.append(f"Nothing of it may be later than {local(task['due_limit'])} (the deadline of the task it is part of).")
     if task["targets"]:
         lines.append("Shown on: " + ", ".join(task["targets"]))
     return "\n".join(lines)
@@ -530,11 +540,17 @@ def task_command(api: ClaraApi, name: str, argument: str) -> bool:
             print("\n".join(describe_task(t) for t in api.tasks(status)) or "(no task)")
         elif word.isdigit() and not rest:
             print(describe_task_detail(api.task(int(word))))
-        elif word == "add":
+        elif word in ("add", "sub"):
+            parent = None
+            if word == "sub":
+                number, _, rest = rest.partition(" ")
+                if not number.isdigit():
+                    raise ValueError("Usage: /task sub <id> [due <when>] [remind <when>]... <title> [| <description>]")
+                parent, rest = int(number), rest.strip()
             targets, rest = take_targets(rest)
             title, description, due, reminders = parse_task(rest, now)
-            task = api.add_task(title, description, due, reminders, targets)
-            print("Task added.\n" + describe_task_detail(task))
+            task = api.add_task(title, description, due, reminders, targets, parent)
+            print(("Sub task added.\n" if parent else "Task added.\n") + describe_task_detail(task))
         elif word in ("done", "reopen", "delete") and rest.isdigit():
             if word == "delete":
                 api.delete_task(int(rest))

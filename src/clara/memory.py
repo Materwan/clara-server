@@ -361,6 +361,9 @@ _ADDED_COLUMNS = {
         "tool_name": "TEXT",
         "thinking": "TEXT",  # the model's reasoning before tool calls: some providers want it back (DeepSeek)
     },
+    "tasks": {
+        "parent_id": "INTEGER REFERENCES tasks (id) ON DELETE CASCADE",  # the task it is a sub task of (NULL: a main task)
+    },
     "reminders": {  # where the reminder was set: the answer that announces it is written there
         "surface": "TEXT NOT NULL DEFAULT ''",
         "user_id": "TEXT NOT NULL DEFAULT ''",

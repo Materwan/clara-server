@@ -12,6 +12,7 @@ import { mountHistory } from "./history.js";
 import { icon, mark } from "./icons.js";
 import { mountIntegrations } from "./integrations.js";
 import { mountProjects } from "./projects.js";
+import { mountRestartBadge, resumeRestart } from "./restart.js";
 import { mountTasks } from "./tasks.js";
 import { avatar, clear, h, themeSwitch, toast, toggleRail } from "./ui.js";
 
@@ -22,6 +23,7 @@ let pageName = "";
 let healthTimer = null;
 let railHistory = null; // the list of conversations on the work pages other than the chat
 let approvalBadge = null; // "waiting for you": requests for permission, in the rail
+let restartBadge = null; // "restart needed", for administrators
 let wantNewChat = false;
 
 // ---- signing in ----------------------------------------------------------------------------------------
@@ -172,6 +174,7 @@ function shell() {
   healthTimer = setInterval(() => health(status), 20000);
   health(status);
   approvalBadge = mountApprovalBadge(user, rail.querySelector("#approvals-slot"));
+  restartBadge = mountRestartBadge(user, rail.querySelector("#approvals-slot"));
   return body;
 }
 
@@ -206,6 +209,8 @@ function stop() {
   railHistory = null;
   approvalBadge?.destroy();
   approvalBadge = null;
+  restartBadge?.destroy();
+  restartBadge = null;
   pageName = "";
   toggleRail(false);
 }
@@ -277,6 +282,7 @@ async function boot() {
   shell();
   if (!location.hash) history.replaceState(null, "", "#/chat"); // no hashchange: the page is drawn once
   route();
+  if (user.is_admin) resumeRestart();
 }
 
 boot().catch((error) => toast(String(error), true));

@@ -46,6 +46,7 @@ from .projects import PROJECT_TOOLS, Projects
 from .prompt import SystemPrompt
 from .qcm import SURFACES as QCM_SURFACES
 from .reminders import ReminderService
+from .retry import delay_before, retryable
 from .tasks import TaskService
 from .tools import ABOUT_PERSON, INTEGRATION_TOOLS, MARKDOWN_TOOLS, QCM, Toolbox, ToolContext
 
@@ -221,6 +222,8 @@ class Agent:
         tool_timeout: float = 900.0,
         first_token_timeout: float = 300.0,
         idle_timeout: float = 120.0,
+        retries: int = 3,
+        retry_delay: float = 2.0,
         clock: Callable[[str | None], datetime] = now_in,
         reminders: ReminderService | None = None,
         notifier: Notifier | None = None,
@@ -255,6 +258,8 @@ class Agent:
         self.tool_timeout = tool_timeout
         self.first_token_timeout = first_token_timeout  # seconds before the model starts answering
         self.idle_timeout = idle_timeout  # seconds the model may pause once it has started
+        self.retries = retries  # times a busy or unreachable model is asked again, before it has said anything
+        self.retry_delay = retry_delay  # seconds before the first new try; doubled each time
         self._clock = clock
         self._context_window = context_window
         self.stats = AgentStats()
@@ -630,6 +635,9 @@ class Agent:
                             self._model(messages, schemas if offer_tools else None, chosen.ref)
                         ) as model:
                             async for chunk in model:
+                                if chunk.notice:  # the model is busy and is asked again: say so
+                                    yield {"type": "retrying", "message": chunk.notice}
+                                    continue
                                 round_prompt += chunk.prompt_tokens
                                 round_completion += chunk.completion_tokens
                                 calls.extend(chunk.tool_calls)
@@ -843,18 +851,32 @@ class Agent:
         queue: asyncio.Queue = asyncio.Queue()
 
         async def produce() -> None:
-            try:
-                async with self._llm_slots:
-                    stream = (
-                        self.backend.stream(messages, tools)
-                        if ref is None
-                        else self.backend.stream_ref(ref, messages, tools)
-                    )
-                    async for chunk in with_idle_timeout(stream, self.first_token_timeout, self.idle_timeout):
-                        queue.put_nowait(chunk)
-                queue.put_nowait(_END)
-            except Exception as error:
-                queue.put_nowait(error)
+            attempt = 0
+            while True:
+                started = False
+                try:
+                    async with self._llm_slots:  # released while waiting to ask again
+                        stream = (
+                            self.backend.stream(messages, tools)
+                            if ref is None
+                            else self.backend.stream_ref(ref, messages, tools)
+                        )
+                        async for chunk in with_idle_timeout(stream, self.first_token_timeout, self.idle_timeout):
+                            started = True
+                            queue.put_nowait(chunk)
+                    queue.put_nowait(_END)
+                    return
+                except Exception as error:
+                    wait = None
+                    if not started and attempt < self.retries and retryable(error):
+                        wait = delay_before(error, attempt, self.retry_delay)
+                    if wait is None:
+                        queue.put_nowait(error)
+                        return
+                    attempt += 1
+                    log.warning("the model failed (%s), asking again in %.1f s (%d/%d)", error, wait, attempt, self.retries)
+                    queue.put_nowait(LlmChunk(notice=f"The model is busy, trying again ({attempt}/{self.retries})…"))
+                    await asyncio.sleep(wait)
 
         producer = asyncio.ensure_future(produce())
         try:

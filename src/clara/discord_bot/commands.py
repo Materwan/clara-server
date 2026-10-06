@@ -196,6 +196,11 @@ def task_text(lang: str, task: dict, detail: bool = False) -> str:
     parts = [f"`{task['id']}` **{task['title']}**"]
     if task["status"] == "done":
         parts.append(t(lang, "task_done"))
+    if task.get("parent_id"):
+        parts.append(t(lang, "task_sub_of", parent=task["parent_id"]))
+    progress = task.get("subtasks") or {}
+    if progress.get("total"):
+        parts.append(t(lang, "task_subtasks", done=progress["done"], total=progress["total"]))
     if task.get("due_at"):
         parts.append(t(lang, "task_due", when=moment(task["due_at"])))
     sent = task["reminders_sent"]

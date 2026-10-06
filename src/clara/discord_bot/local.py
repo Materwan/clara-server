@@ -121,7 +121,7 @@ class LocalBackend:
         if person is None:
             return []
         service = self.state.tasks
-        return [service.describe(task) for task in service.tasks(person, None if status == "all" else status)]
+        return service.describe_all(person, service.tasks(person, None if status == "all" else status))
 
     async def task(self, user_id: int, task_id: int) -> dict:
         external = self._account(user_id)

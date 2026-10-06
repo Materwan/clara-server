@@ -462,7 +462,7 @@ export function mountChat(container, user, { slot, fresh = false, project = null
           if (!state.approvals.some((a) => a.id === event.approval.id)) state.approvals.push(event.approval);
           if (conversation === state.current) drawApprovals();
         } else if (event.type === "compacted") toast("Older messages were summarised to make room.");
-        else if (event.type === "warning") toast(event.message);
+        else if (event.type === "warning" || event.type === "retrying") toast(event.message);
         else if (event.type === "error") { reply.failed = event.message; finished = true; }
         else if (event.type === "done") {
           if (event.reply && !reply.content) addText(reply, event.reply);

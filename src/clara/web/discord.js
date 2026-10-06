@@ -3,6 +3,7 @@
 
 import { api } from "./api.js";
 import { mark } from "./icons.js";
+import { restartNotice } from "./restart.js";
 import { avatar, clear, confirmDialog, duration, h, icon, openDialog, pageHead, toast } from "./ui.js";
 
 const STATES = {
@@ -70,8 +71,8 @@ export function mountDiscord(container) {
           !live && h("button", { class: "primary", disabled: busy || !usable, onclick: () => act("start") }, icon("bolt", { size: 18 }), "Start"),
           live && h("button", { disabled: busy, onclick: () => act("restart") }, "Restart"),
           live && h("button", { class: "danger", disabled: busy, onclick: () => act("stop") }, icon("power", { size: 18 }), "Stop"))),
-      !bot.available && h("div", { class: "panel-body" }, h("p", { class: "notice warn small" }, "discord.py is not installed on this server: pip install clara-server[discord], then restart it.")),
-      bot.available && !bot.token_set && h("div", { class: "panel-body" }, h("p", { class: "notice warn small" }, "Put the bot's token in the server's .env (DISCORD_BOT_TOKEN), then restart the server. It is never shown here.")),
+      !bot.available && h("div", { class: "panel-body" }, restartNotice("discord.py is not installed on this server. Restarting installs it (pip install clara-server[discord]).")),
+      bot.available && !bot.token_set && h("div", { class: "panel-body" }, restartNotice("Put the bot's token in the server's .env (DISCORD_BOT_TOKEN), then restart the server. It is never shown here.")),
       bot.last_error && h("div", { class: "panel-body" }, h("p", { class: "notice warn small", role: "alert" }, bot.last_error)),
       h("dl", { class: "kv" },
         stat("Discord account", bot.user || "–"),

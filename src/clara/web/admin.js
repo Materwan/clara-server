@@ -4,6 +4,7 @@ import { api } from "./api.js";
 import { discordPicker, signInDiscordDialog } from "./discord.js";
 import { mark } from "./icons.js";
 import { costText, weightText } from "./models.js";
+import { CHECK, askRestart, restartStatus } from "./restart.js";
 import {
   ago, avatar, clear, confirmDialog, dateTime, duration, h, icon, openDialog, pageHead, parseTokens, popupMenu, promptDialog, secretDialog,
   toast, tokenCount, usageBar,
@@ -315,9 +316,11 @@ function models(box) {
 function server(box, me, setTimer) {
   const controls = h("section", { class: "panel" });
   const stats = h("dl", { class: "kv" });
+  const restartPanel = h("section", { class: "panel" });
   box.append(
     controls,
     h("section", { class: "panel" }, h("div", { class: "panel-head" }, h("div", {}, h("h3", {}, "Status"), h("p", { class: "muted small" }, "Refreshed every 5 seconds."))), stats),
+    restartPanel,
     h("section", { class: "panel danger-zone" },
       h("div", { class: "panel-head" },
         h("div", { class: "grow" }, h("h3", {}, "Stop the server"),
@@ -369,12 +372,28 @@ function server(box, me, setTimer) {
     load();
   }
 
+  async function loadRestart(refresh = false) {
+    let found;
+    try { found = await restartStatus(refresh); } catch { return; }
+    const check = h("button", { onclick: async () => { await loadRestart(true); window.dispatchEvent(new Event(CHECK)); } }, icon("refresh", { size: 18 }), "Check for updates");
+    const restart = h("button", { class: found.needed ? "primary" : "", onclick: () => askRestart(found.reasons) }, icon("power", { size: 18 }), "Restart…");
+    clear(restartPanel).append(
+      h("div", { class: "panel-head" },
+        h("div", { class: "grow" }, h("h3", {}, "Restart the server"),
+          h("p", { class: "muted small" }, "Pulls the latest code, installs what it needs, brings .env up to date with .env.example (your values are kept), finishes the answers that are running, then starts again. Needed to apply a change to .env, the code or the Discord token.")),
+        h("div", { class: "row wrap" }, check, restart)),
+      found.reasons.length > 0
+        ? h("div", { class: "panel-body" }, h("ul", { class: "restart-reasons" }, found.reasons.map((reason) => h("li", {}, reason.text))))
+        : h("div", { class: "panel-body" }, h("p", { class: "muted small" }, "Nothing is waiting for a restart.")));
+  }
+
   async function stop() {
     if (!await confirmDialog("Stop the server", "Running answers finish first; new questions are refused. Nobody can use Clara until it is started again.", "Stop the server", true)) return;
     try { toast((await command("/stop")).split("\n")[0]); } catch (error) { fail(error); }
   }
 
   load();
+  loadRestart();
   setTimer(setInterval(load, 5000));
 }
 

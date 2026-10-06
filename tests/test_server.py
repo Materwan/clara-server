@@ -31,6 +31,7 @@ def test_health_needs_no_token(make_client):
         "status": "ok",
         "provider": "local",
         "model": "fake",
+        "restarted": None,
     }
 
 

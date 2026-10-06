@@ -35,6 +35,7 @@ class Task:
     user_id: str = ""
     conversation: str = ""
     targets: tuple[str, ...] = ()  # surfaces the reminders are shown on; empty: every surface of the person
+    parent_id: int | None = None  # the task it is a sub task of (None: a main task)
     next: tuple[datetime, ...] = ()  # the reminders still to come, soonest first (UTC)
 
     @property
@@ -80,7 +81,7 @@ class TaskStore:
                 row["id"], row["person_id"], row["title"], row["description"], _moment(row["due_at"]), row["status"],
                 row["reminders_sent"], row["timezone"], datetime.fromisoformat(row["created_at"]),
                 datetime.fromisoformat(row["updated_at"]), _moment(row["done_at"]), row["surface"], row["user_id"],
-                row["conversation"], split_targets(row["targets"]), tuple(queued.get(row["id"], ())),
+                row["conversation"], split_targets(row["targets"]), row["parent_id"], tuple(queued.get(row["id"], ())),
             )
             for row in rows
         ]
@@ -117,6 +118,40 @@ class TaskStore:
             key=lambda t: (t.status != OPEN, t.next_reminder or t.due_at or far, t.due_at or far, t.id),
         )
 
+    def children(self, task_id: int) -> list[Task]:
+        """The sub tasks of a task, the oldest first."""
+        with self._lock:
+            return self._tasks(self._db.execute("SELECT * FROM tasks WHERE parent_id = ? ORDER BY id", (task_id,)).fetchall())
+
+    def descendants(self, task_id: int) -> list[Task]:
+        """Its sub tasks, their sub tasks, and so on (the oldest first)."""
+        with self._lock:
+            rows = self._db.execute(
+                "WITH RECURSIVE sub(id) AS (SELECT id FROM tasks WHERE parent_id = ?"
+                " UNION SELECT t.id FROM tasks t JOIN sub ON t.parent_id = sub.id)"
+                " SELECT * FROM tasks WHERE id IN (SELECT id FROM sub) ORDER BY id",
+                (task_id,),
+            ).fetchall()
+            return self._tasks(rows)
+
+    def ancestors(self, task: Task) -> list[Task]:
+        """The task it is a sub task of, then that one's, up to the main task."""
+        found: list[Task] = []
+        seen = {task.id}
+        parent = task.parent_id
+        while parent is not None and parent not in seen:
+            up = self.get_any(parent)
+            if up is None:
+                break
+            found.append(up)
+            seen.add(up.id)
+            parent = up.parent_id
+        return found
+
+    def count_children(self, task_id: int) -> int:
+        with self._lock:
+            return self._db.execute("SELECT COUNT(*) FROM tasks WHERE parent_id = ?", (task_id,)).fetchone()[0]
+
     def count_open(self, person_id: int) -> int:
         with self._lock:
             return self._db.execute(
@@ -140,14 +175,15 @@ class TaskStore:
         targets: tuple[str, ...],
         now: datetime,
         reminders: Iterable[datetime] = (),
+        parent_id: int | None = None,
     ) -> Task:
         with self._lock, self._db:
             cursor = self._db.execute(
                 "INSERT INTO tasks (person_id, title, description, due_at, timezone, surface, user_id, conversation,"
-                " targets, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " targets, created_at, updated_at, parent_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     person_id, title, description, _stamp(due_at) if due_at else None, zone, *origin,
-                    join_targets(targets), _stamp(now), _stamp(now),
+                    join_targets(targets), _stamp(now), _stamp(now), parent_id,
                 ),
             )
             task_id = cursor.lastrowid

@@ -1,10 +1,14 @@
 """The routes of the to-do list (tasks.py). Like the reminders, a person is asked for with an account
 (`surface`, `user_id`); the same list is seen from every surface they use.
 
-    POST   /v1/tasks                 {surface, user_id, title, description?, due?, reminders?, timezone?, targets?}:
-                                     add a task. `reminders` are local ISO 8601 times; without any, Clara picks them
+    POST   /v1/tasks                 {surface, user_id, title, description?, due?, reminders?, timezone?, targets?,
+                                     parent_id?}: add a task. `reminders` are local ISO 8601 times; without any, Clara
+                                     picks them. With `parent_id` it is a sub task of that task: its deadline and its
+                                     reminders cannot be after the deadline of the tasks it is part of (422)
     GET    /v1/tasks                 ?surface=&user_id=&status=open|done|all  the person's tasks: for each its
-                                     reminders sent, the next reminder and all those to come
+                                     reminders sent, the next reminder and all those to come; `parent_id` says
+                                     which task it is a sub task of, `subtasks` {total, done} how many it has and
+                                     `due_limit` the latest time its dates may have
     GET    /v1/tasks/{id}            ?surface=&user_id=  one task, with its description
     PATCH  /v1/tasks/{id}            {surface, user_id, title?, description?, due?, reminders?, targets?, status?}:
                                      only what is given changes; `due` null removes the deadline, `reminders` replaces
@@ -42,6 +46,7 @@ class TaskBody(BaseModel):
     timezone: str | None = Field(default=None, max_length=64)  # IANA name; read the times without offset in it
     conversation: str | None = Field(default=None, min_length=1, max_length=200)
     targets: list[str] = Field(default_factory=list, max_length=MAX_TARGETS)  # surfaces shown on; []: all
+    parent_id: int | None = Field(default=None, ge=1)  # the task it is a sub task of
 
 
 class TaskPatch(BaseModel):
@@ -82,7 +87,8 @@ async def add_task(body: TaskBody, client: Client, request: Request) -> dict:
     tasks = _tasks(request)
     try:
         task = await tasks.create(
-            person, body.title, body.description, body.due, body.reminders, body.timezone, origin, body.targets
+            person, body.title, body.description, body.due, body.reminders, body.timezone, origin, body.targets,
+            body.parent_id,
         )
     except TaskError as error:
         raise _failed(error) from None
@@ -98,7 +104,7 @@ async def list_tasks(
     tasks = _tasks(request)
     person = request.app.state.memory.find_person(surface, user_id)
     found = tasks.tasks(person, None if status == "all" else status) if person else []
-    return {"tasks": [tasks.describe(task) for task in found], "max_reminders": tasks.max_reminders}
+    return {"tasks": tasks.describe_all(person, found) if person else [], "max_reminders": tasks.max_reminders}
 
 
 @router.get("/v1/tasks/{task_id}")

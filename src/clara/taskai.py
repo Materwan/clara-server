@@ -31,7 +31,8 @@ PLAN_INSTRUCTIONS = (
     "person (ISO 8601, no offset), all after the current time. Pick reasonable moments: mornings for ordinary "
     "tasks, further from the deadline for big ones, close to it for small ones, and a reminder at the deadline "
     "when there is one. A task with no deadline needs only a first reminder, soon (tomorrow morning for a "
-    "chore, later for something long-term). Do not remind in the middle of the night."
+    "chore, later for something long-term). Do not remind in the middle of the night. When the task is a sub task, "
+    "no reminder may be after the time you are given as the limit."
 )
 
 FOLLOW_INSTRUCTIONS = (
@@ -82,13 +83,14 @@ def _moments(values: object, zone: str) -> list[datetime]:
     return found
 
 
-def _describe(task: Task, now: datetime) -> str:
-    """The task, as the model reads it."""
+def _describe(task: Task, now: datetime, family: list[str] | None = None) -> str:
+    """The task, as the model reads it. `family`: what to know of the tasks it is part of or made of."""
     zone = task.timezone
     lines = [
         f"Task: {task.title}",
         f"Description: {task.description or '(none)'}",
         f"Deadline: {local_text(task.due_at, zone) if task.due_at else 'none'}",
+        *(family or []),
         f"Current time: {local_text(now, zone)}",
     ]
     return "\n".join(lines)
@@ -122,20 +124,24 @@ async def _ask(agent: Agent, task: Task, message: str, instructions: str, timeou
     return answer
 
 
-async def plan(agent: Agent, task: Task, now: datetime, timeout: float) -> list[datetime] | None:
+async def plan(
+    agent: Agent, task: Task, now: datetime, timeout: float, family: list[str] | None = None
+) -> list[datetime] | None:
     """The reminders Clara picks for a new task (None: nothing usable, the rules' ones stay)."""
-    answer = await _ask(agent, task, _describe(task, now), PLAN_INSTRUCTIONS, timeout)
+    answer = await _ask(agent, task, _describe(task, now, family), PLAN_INSTRUCTIONS, timeout)
     found = _object(answer)
     return _moments(found.get("reminders"), task.timezone) if found else None
 
 
-async def follow(agent: Agent, task: Task, now: datetime, timeout: float, max_reminders: int) -> Followup | None:
+async def follow(
+    agent: Agent, task: Task, now: datetime, timeout: float, max_reminders: int, family: list[str] | None = None
+) -> Followup | None:
     """What Clara decides now that a reminder of `task` came due: the notification, and the reminders to come."""
     sent = task.reminders_sent + 1
     queued = [local_text(at, task.timezone) for at in task.next if at > now]
     message = "\n".join(
         [
-            _describe(task, now),
+            _describe(task, now, family),
             f"This is reminder number {sent} of at most {max_reminders}" + (" (the last one)." if sent >= max_reminders else "."),
             f"Reminders sent before this one: {task.reminders_sent}",
             "Reminders still queued: " + (", ".join(queued) if queued else "none"),

@@ -1,6 +1,8 @@
 // Your to-do list: tasks with the reminders that are still to come, as a list and as a calendar. Clara keeps the
 // same list on every device and in every chat ("add a task: …"); when a reminder is sent she looks at the task again
-// and may move the next ones, so the numbers here change by themselves.
+// and may move the next ones, so the numbers here change by themselves. A task can be divided into sub tasks (and
+// those into sub tasks): each has its own description and reminders, none of them later than the deadline of the
+// tasks it is part of; they are drawn under their task, and a task is done when all its sub tasks are.
 
 import { api } from "./api.js";
 import { mark } from "./icons.js";
@@ -58,7 +60,28 @@ export function mountTasks(container, user) {
     h("div", { class: "scroll" }, page));
   container.append(root);
 
-  const shown = () => tasks.filter((task) => filter === "all" || task.status === filter);
+  const known = () => new Map(tasks.map((task) => [task.id, task]));
+  const kidsOf = (id) => tasks.filter((task) => task.parent_id === id).sort((a, b) => a.id - b.id);
+  const below = (task) => kidsOf(task.id).flatMap((kid) => [kid, ...below(kid)]); // its sub tasks, theirs, and so on
+  const earliest = (...moments) => moments.filter(Boolean).sort((a, b) => parseDate(a) - parseDate(b))[0] || null;
+
+  /** What the list draws, in order, with how deep each is: the main tasks that match, each followed by its sub tasks. */
+  function rows() {
+    const byId = known();
+    const isRoot = (task) => {
+      const parent = byId.get(task.parent_id);
+      if (filter === "done") return task.status === "done" && parent?.status !== "done"; // a done sub task of a task still to do
+      if (filter === "open") return task.status === "open" && !parent;
+      return !parent;
+    };
+    const out = [];
+    const walk = (task, depth) => {
+      out.push({ task, depth });
+      for (const kid of kidsOf(task.id)) walk(kid, depth + 1);
+    };
+    for (const task of tasks) if (isRoot(task)) walk(task, 0);
+    return out;
+  }
 
   // ---- drawing ---------------------------------------------------------------------------------------
 
@@ -86,14 +109,19 @@ export function mountTasks(container, user) {
 
   function listView() {
     const list = h("ul", { class: "list tasks", "aria-label": "Your tasks" });
-    const found = shown();
+    const found = rows();
     if (!found.length) list.append(emptyState());
-    for (const task of found) list.append(row(task));
+    for (const { task, depth } of found) list.append(row(task, depth));
     return h("div", { class: "panel" }, list);
   }
 
-  function facts(task) {
+  function facts(task, depth = 0) {
     const found = [];
+    const parent = task.parent_id && known().get(task.parent_id);
+    if (parent && depth === 0) found.push(h("span", { class: "muted small", title: "The task it is part of" }, `Part of “${parent.title}”`));
+    if (task.subtasks?.total) {
+      found.push(h("span", { class: "muted small", title: "Sub tasks done" }, icon("tasks", { size: 13 }), ` ${task.subtasks.done}/${task.subtasks.total} sub tasks`));
+    }
     if (task.due_at) {
       found.push(h("span", { class: "badge" + (isOverdue(task) ? " off" : task.status === "done" ? "" : " admin"), title: dateTime(task.due_at) },
         icon("calendar", { size: 13 }), `${isOverdue(task) ? "Overdue, was due" : "Due"} ${dateTime(task.due_at)}`));
@@ -108,16 +136,17 @@ export function mountTasks(container, user) {
     return found;
   }
 
-  function row(task) {
+  function row(task, depth = 0) {
     const done = task.status === "done";
-    return h("li", { class: "task" + (done ? " done" : "") },
+    return h("li", { class: "task" + (done ? " done" : "") + (depth ? " sub" : ""), style: `--depth: ${depth}` },
       h("button", { class: "check", type: "button", role: "checkbox", "aria-checked": String(done),
         title: done ? "Reopen this task" : "Mark as done", "aria-label": `${done ? "Reopen" : "Mark as done"}: ${task.title}`,
         onclick: (event) => toggle(task, event.currentTarget) }, done && icon("check", { size: 15 })),
       h("div", { class: "text" },
         h("button", { class: "linkish title", onclick: () => show(task) }, task.title),
-        h("div", { class: "meta" }, facts(task))),
+        h("div", { class: "meta" }, facts(task, depth))),
       h("div", { class: "actions" },
+        !done && h("button", { class: "ghost icon-btn", title: "Add a sub task", "aria-label": `Add a sub task to ${task.title}`, onclick: () => addTask(task) }, icon("plus", { size: 18 })),
         h("button", { class: "ghost icon-btn", title: "Edit", "aria-label": `Edit ${task.title}`, onclick: () => editTask(task) }, icon("edit", { size: 18 })),
         h("button", { class: "ghost icon-btn danger forget", title: "Delete", "aria-label": `Delete ${task.title}`, onclick: () => remove(task) }, icon("trash", { size: 18 }))));
   }
@@ -206,11 +235,13 @@ export function mountTasks(container, user) {
 
   async function toggle(task, button) {
     const reopening = task.status === "done";
+    const unfinished = reopening ? 0 : below(task).filter((kid) => kid.status === "open").length;
+    if (unfinished && !await confirmDialog("Mark as done", `“${task.title}” has ${plural(unfinished, "sub task")} still to do: they will be marked as done too.`, "Mark as done")) return;
     if (button) button.disabled = true;
     if (reopening) toast("Reopening: Clara is choosing the next reminders…");
     try {
       replace(await api.patch(`/v1/tasks/${task.id}`, { ...query, status: reopening ? "open" : "done", timezone: browserZone() }));
-      toast(reopening ? "Task reopened." : "Done. No more reminders for this one.");
+      toast(reopening ? "Task reopened." : unfinished ? "Done, with its sub tasks. No more reminders for them." : "Done. No more reminders for this one.");
     } catch (error) {
       toast(error.detail || String(error), true);
       if (button) button.disabled = false;
@@ -218,19 +249,23 @@ export function mountTasks(container, user) {
   }
 
   async function remove(task) {
-    if (!await confirmDialog("Delete this task", `“${task.title}” and its reminders will be deleted for good.`, "Delete", true)) return;
+    const parts = below(task);
+    const also = parts.length ? `, its ${plural(parts.length, "sub task")}` : "";
+    if (!await confirmDialog("Delete this task", `“${task.title}”${also} and the reminders will be deleted for good.`, "Delete", true)) return;
     try {
       await api.delete(`/v1/tasks/${task.id}`, query);
-      tasks = tasks.filter((item) => item.id !== task.id);
+      tasks = tasks.filter((item) => item.id !== task.id && !parts.includes(item));
       draw();
+      load(); // the task it was part of may be done now
       toast("Deleted.");
     } catch (error) {
       toast(error.detail || String(error), true);
     }
   }
 
-  async function addTask() {
-    const created = await editor(null);
+  /** A new task, or a sub task of `parent`. */
+  async function addTask(parent = null) {
+    const created = await editor(null, parent);
     if (created) replace(created);
   }
 
@@ -239,19 +274,23 @@ export function mountTasks(container, user) {
     if (changed) replace(changed);
   }
 
-  /** The form to add or change a task: resolves with the task as the server has it, or null. */
-  function editor(task) {
+  /** The form to add or change a task (a sub task of `parent`, if given): resolves with the task as the server has it, or null. */
+  function editor(task, parent = null) {
+    // nothing of a sub task may be later than the deadline of the tasks it is part of
+    const limit = task ? task.due_limit : earliest(parent?.due_at, parent?.due_limit);
+    const limitInput = limit ? toInput(limit) : "";
+    const partOf = task ? known().get(task.parent_id) : parent;
     return openDialog((close) => {
       const title = h("input", { type: "text", maxLength: 200, required: true, autofocus: true, placeholder: "What has to be done", value: task?.title || "" });
       const description = h("textarea", { rows: 3, maxLength: 2000, placeholder: "Details, if any", "aria-label": "Description" });
       description.value = task?.description || "";
       const initialDue = task?.due_at ? toInput(task.due_at) : "";
-      const due = h("input", { type: "datetime-local", "aria-label": "Deadline", value: initialDue });
+      const due = h("input", { type: "datetime-local", "aria-label": "Deadline", value: initialDue, max: limitInput || false });
       const initialReminders = (task?.reminders || []).map(toInput);
       const reminders = h("div", { class: "reminder-rows" });
       let changed = false; // the reminders were touched: only then are they sent
       const addRow = (value = "") => {
-        const input = h("input", { type: "datetime-local", "aria-label": "Reminder", value });
+        const input = h("input", { type: "datetime-local", "aria-label": "Reminder", value, max: limitInput || false });
         input.addEventListener("input", () => { changed = true; });
         const line = h("div", { class: "row" }, input,
           h("button", { type: "button", class: "ghost icon-btn", title: "Remove this reminder", "aria-label": "Remove this reminder",
@@ -269,7 +308,7 @@ export function mountTasks(container, user) {
       for (const value of initialReminders) addRow(value);
       hint();
       const error = h("p", { class: "notice warn small", hidden: true, role: "alert" });
-      const save = h("button", { class: "primary", type: "submit" }, task ? "Save" : "Add task");
+      const save = h("button", { class: "primary", type: "submit" }, task ? "Save" : parent ? "Add sub task" : "Add task");
       const form = h("form", { class: "task-form", onsubmit: async (event) => {
         event.preventDefault();
         error.hidden = true;
@@ -281,7 +320,7 @@ export function mountTasks(container, user) {
             save.textContent = times.length ? "Adding…" : "Clara is choosing the reminders…";
             saved = await api.post("/v1/tasks", {
               ...query, user_name: user.person?.name || user.name, title: title.value.trim(), description: description.value,
-              due: due.value || null, reminders: times, timezone: browserZone(),
+              due: due.value || null, reminders: times, timezone: browserZone(), parent_id: parent?.id,
             });
           } else {
             const body = { ...query, title: title.value.trim(), description: description.value, timezone: browserZone() };
@@ -294,10 +333,11 @@ export function mountTasks(container, user) {
           error.hidden = false;
           error.textContent = failure.detail || String(failure);
           save.disabled = false;
-          save.textContent = task ? "Save" : "Add task";
+          save.textContent = task ? "Save" : parent ? "Add sub task" : "Add task";
         }
       } },
-      h("h3", {}, task ? "Edit task" : "New task"),
+      h("h3", {}, task ? (task.parent_id ? "Edit sub task" : "Edit task") : parent ? "New sub task" : "New task"),
+      partOf && h("p", { class: "muted small" }, `Part of “${partOf.title}”.${limit ? ` Its deadline and reminders cannot be after ${dateTime(limit)}.` : ""}`),
       h("div", { class: "stack" },
         h("label", { class: "field" }, "Title", title),
         h("label", { class: "field" }, "Description", description),
@@ -326,6 +366,15 @@ export function mountTasks(container, user) {
           : h("span", { class: "muted" }, "none: Clara will not remind you of this task unless you add one")]);
       } else if (task.done_at) lines.push(["Done", dateTime(task.done_at)]);
       if (task.targets.length) lines.push(["Shown on", task.targets.join(", ")]);
+      const byId = known();
+      const parent = byId.get(task.parent_id);
+      if (parent) lines.unshift(["Part of", h("button", { class: "linkish", onclick: () => close(`open:${parent.id}`) }, parent.title)]);
+      if (task.due_limit) lines.push(["Latest allowed", `${dateTime(task.due_limit)}, the deadline of the task it is part of`]);
+      const kids = kidsOf(task.id);
+      if (kids.length) {
+        lines.push(["Sub tasks", h("ul", { class: "plain" }, kids.map((kid) => h("li", {},
+          h("button", { class: "linkish", onclick: () => close(`open:${kid.id}`) }, `${kid.status === "done" ? "✓ " : ""}${kid.title}`))))]);
+      }
       lines.push(["Added", dateTime(task.created_at)]);
       return h("div", { class: "task-view" },
         h("h3", {}, task.title),
@@ -333,11 +382,17 @@ export function mountTasks(container, user) {
         h("dl", {}, lines.flatMap(([name, value]) => [h("dt", {}, name), h("dd", {}, value)])),
         h("div", { class: "actions" },
           h("button", { class: "danger", onclick: () => close("delete") }, "Delete"),
+          task.status === "open" && h("button", { onclick: () => close("sub") }, "Add a sub task"),
           h("button", { onclick: () => close("edit") }, "Edit"),
           h("button", { onclick: () => close("toggle") }, task.status === "done" ? "Reopen" : "Mark as done"),
           h("button", { class: "primary", onclick: () => close(null) }, "Close")));
     });
     if (action === "edit") await editTask(task);
+    else if (action === "sub") await addTask(task);
+    else if (typeof action === "string" && action.startsWith("open:")) {
+      const next = known().get(Number(action.slice(5)));
+      if (next) await show(next);
+    }
     else if (action === "toggle") await toggle(task);
     else if (action === "delete") await remove(task);
   }
@@ -358,7 +413,7 @@ export function mountTasks(container, user) {
   }
 
   page.append(
-    h("p", { class: "intro" }, "Your to-do list, the same on every device and in every chat with Clara. Each task has reminders: choose them, or leave it to Clara, who also moves the next ones each time one is sent. You can just ask her too: “add a task: send the invoice by Friday”."),
+    h("p", { class: "intro" }, "Your to-do list, the same on every device and in every chat with Clara. Each task has reminders: choose them, or leave it to Clara, who also moves the next ones each time one is sent. A task can be divided into sub tasks, each with its own reminders and none of them later than the task's deadline. You can just ask her too: “add a task: send the invoice by Friday”."),
     h("div", { class: "toolbar" }, filterBox, viewBox),
     content);
   draw();

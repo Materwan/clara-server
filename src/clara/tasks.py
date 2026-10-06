@@ -6,7 +6,9 @@
                 decides what the next reminders are
 
 A task has a title, a description, an optional deadline (`due_at`), a queue of reminders (`next`) and a count of
-the reminders already sent. When a reminder is due, Clara (see taskai.py) is given the task and that count: she
+the reminders already sent. A task can be divided into sub tasks (and those into sub tasks, with no limit but the
+number of tasks): each has its own description, deadline and reminders, none of them later than the deadline of the
+tasks it is part of. A task is done when all its sub tasks are; finishing a task finishes its sub tasks. When a reminder is due, Clara (see taskai.py) is given the task and that count: she
 writes the notification, and may replace the queue (move the next reminders, add some, or stop reminding).
 Whatever she cannot do (the model is down, she answers garbage), plain rules do: see `default_reminders` and
 `default_follow_up`. Reminders go through the notification stream (see notifications.py), to the person
@@ -37,6 +39,7 @@ MAX_TITLE = 200
 MAX_DESCRIPTION = 2000
 MAX_OPEN = 100  # open tasks per person
 MAX_TASKS = 500  # tasks per person, done ones included
+MAX_SUBTASKS = 50  # sub tasks directly under one task
 MAX_QUEUE = 10  # reminders queued for one task
 MAX_REMINDERS = 10  # reminders sent for one task (the default of the server's setting)
 HORIZON = timedelta(days=366)  # no reminder is set further than this
@@ -124,12 +127,20 @@ def valid_reminders(moments: Iterable[datetime], now: datetime) -> list[datetime
     return sorted(kept)[:MAX_QUEUE]
 
 
-def describe(task: Task, max_reminders: int = MAX_REMINDERS) -> dict[str, Any]:
+def describe(
+    task: Task, max_reminders: int = MAX_REMINDERS, subtasks: tuple[int, int] = (0, 0), due_limit: datetime | None = None
+) -> dict[str, Any]:
+    """`subtasks`: how many it has directly, and how many of them are done. `due_limit`: the latest moment a deadline or
+    reminder of it may have (the earliest deadline of the tasks it is part of)."""
+
     def when(moment: datetime | None) -> str | None:
         return moment.isoformat(timespec="seconds") if moment else None
 
     return {
         "id": task.id,
+        "parent_id": task.parent_id,
+        "subtasks": {"total": subtasks[0], "done": subtasks[1]},
+        "due_limit": when(due_limit),
         "title": task.title,
         "description": task.description,
         "status": task.status,
@@ -146,9 +157,13 @@ def describe(task: Task, max_reminders: int = MAX_REMINDERS) -> dict[str, Any]:
     }
 
 
-def task_line(task: Task) -> str:
+def task_line(task: Task, subtasks: tuple[int, int] = (0, 0)) -> str:
     """One line for a list: its number, title, status, reminders sent and next reminder."""
     parts = [f"[{task.id}] {task.title}", task.status]
+    if task.parent_id is not None:
+        parts.append(f"sub task of [{task.parent_id}]")
+    if subtasks[0]:
+        parts.append(f"{subtasks[1]}/{subtasks[0]} sub tasks done")
     if task.due_at:
         parts.append(f"due {local_text(task.due_at, task.timezone)}")
     sent = f"{task.reminders_sent} reminder{'s' if task.reminders_sent != 1 else ''} sent"
@@ -158,8 +173,12 @@ def task_line(task: Task) -> str:
     return " | ".join(parts)
 
 
-def task_detail(task: Task) -> str:
-    lines = [task_line(task), f"Description: {task.description or '(none)'}"]
+def task_detail(task: Task, subtasks: Iterable[str] = (), limit: str = "", counts: tuple[int, int] = (0, 0)) -> str:
+    """The task in full. `subtasks`: the lines of its sub tasks; `limit`: the latest time its dates may have."""
+    lines = [task_line(task, counts), f"Description: {task.description or '(none)'}"]
+    if limit:
+        lines.append(f"Nothing of it may be later than {limit} (the deadline of the task it is part of).")
+    lines.extend(f"Sub task: {line}" for line in subtasks)
     if len(task.next) > 1:
         lines.append("Reminders to come: " + ", ".join(local_text(at, task.timezone) for at in task.next))
     if task.targets:
@@ -202,7 +221,123 @@ class TaskService:
         return task
 
     def describe(self, task: Task) -> dict[str, Any]:
-        return describe(task, self.max_reminders)
+        kids = self.store.children(task.id)
+        return describe(task, self.max_reminders, (len(kids), sum(k.status == DONE for k in kids)), self.limit_for(task)[0])
+
+    def describe_all(self, person: Person, tasks: Iterable[Task]) -> list[dict[str, Any]]:
+        """Several tasks of a person, described with one look at their whole list."""
+        everyone = {task.id: task for task in self.store.of(person.id, None)}
+        counts: dict[int, tuple[int, int]] = {}
+        for task in everyone.values():
+            if task.parent_id is not None:
+                total, done = counts.get(task.parent_id, (0, 0))
+                counts[task.parent_id] = (total + 1, done + (task.status == DONE))
+
+        def limit(task: Task) -> datetime | None:
+            dues, seen = [], {task.id}
+            up = everyone.get(task.parent_id) if task.parent_id else None
+            while up is not None and up.id not in seen:
+                seen.add(up.id)
+                if up.due_at:
+                    dues.append(up.due_at)
+                up = everyone.get(up.parent_id) if up.parent_id else None
+            return min(dues) if dues else None
+
+        return [describe(task, self.max_reminders, counts.get(task.id, (0, 0)), limit(task)) for task in tasks]
+
+    def line(self, task: Task) -> str:
+        kids = self.store.children(task.id)
+        return task_line(task, (len(kids), sum(k.status == DONE for k in kids)))
+
+    def detail(self, task: Task) -> str:
+        limit, _ = self.limit_for(task)
+        kids = self.store.children(task.id)
+        return task_detail(
+            task, [self.line(kid) for kid in kids], local_text(limit, task.timezone) if limit else "",
+            (len(kids), sum(k.status == DONE for k in kids)),
+        )
+
+    def family(self, task: Task) -> list[str]:
+        """What a model should know about where a task stands among the others (for taskai)."""
+        lines = []
+        limit, owner = self.limit_for(task)
+        parent = self.store.get_any(task.parent_id) if task.parent_id else None
+        if parent is not None:
+            lines.append(f"This is a sub task of: {parent.title}")
+        if limit is not None and owner is not None:
+            lines.append(
+                f"No reminder may be after {local_text(limit, task.timezone)} (the deadline of the task \u201c{owner.title}\u201d)"
+            )
+        kids = self.store.children(task.id)
+        if kids:
+            lines.append(
+                f"Its sub tasks ({sum(k.status == DONE for k in kids)} of {len(kids)} done): "
+                + "; ".join(f"{k.title} ({k.status})" for k in kids[:10])
+            )
+        return lines
+
+    # -- sub tasks -----------------------------------------------------------------------------
+
+    def limit_for(self, task: Task) -> tuple[datetime | None, Task | None]:
+        """The latest moment a deadline or reminder of `task` may have, and the task whose deadline it is: the
+        earliest deadline among the tasks it is part of (None: no limit)."""
+        return self._limit_above(self.store.get_any(task.parent_id) if task.parent_id else None)
+
+    def _limit_above(self, parent: Task | None) -> tuple[datetime | None, Task | None]:
+        if parent is None:
+            return None, None
+        with_due = [t for t in (parent, *self.store.ancestors(parent)) if t.due_at is not None]
+        if not with_due:
+            return None, None
+        owner = min(with_due, key=lambda t: t.due_at)  # type: ignore[arg-type, return-value]
+        return owner.due_at, owner
+
+    @staticmethod
+    def _inside(
+        limit: datetime | None, owner: Task | None, zone: str, due_at: datetime | None, moments: Iterable[datetime] = ()
+    ) -> None:
+        """Refuse a deadline or a reminder of a sub task that is after the deadline of the task it is part of."""
+        if limit is None or owner is None:
+            return
+        when = f"{local_text(limit, zone)}, the deadline of \u201c{owner.title}\u201d"
+        if due_at is not None and due_at > limit:
+            raise TaskError(f"A sub task cannot be due after the task it is part of: the limit is {when}.")
+        late = [m for m in moments if m > limit]
+        if late:
+            raise TaskError(
+                "A reminder of a sub task cannot be after the deadline of the task it is part of: "
+                f"{local_text(min(late), zone)} is too late, the limit is {when}."
+            )
+
+    def _inside_subtasks(self, task: Task, due_at: datetime, zone: str) -> None:
+        """Refuse a deadline that is before one of the sub tasks (their deadlines and reminders) of the task."""
+        for sub in self.store.descendants(task.id):
+            if (sub.due_at is not None and sub.due_at > due_at) or any(at > due_at for at in sub.next):
+                raise TaskError(
+                    f"The sub task [{sub.id}] \u201c{sub.title}\u201d is due or reminded after {local_text(due_at, zone)}: "
+                    "change it first."
+                )
+
+    @staticmethod
+    def _before(limit: datetime | None, moments: Iterable[datetime]) -> list[datetime]:
+        return [m for m in moments if limit is None or m <= limit]
+
+    def _default_queue(self, due: datetime | None, now: datetime, zone: str, limit: datetime | None) -> list[datetime]:
+        """The rules' reminders, none after `limit` (at it, if the rules' ones are all after it)."""
+        queue = self._before(limit, default_reminders(due, now, zone))
+        if not queue and limit is not None and limit > now + timedelta(minutes=1):
+            queue = [limit]
+        return queue
+
+    def _settle(self, parent_id: int | None, now: datetime) -> None:
+        """A task is done once all its sub tasks are, and so on up to the main task."""
+        while parent_id is not None:
+            parent = self.store.get_any(parent_id)
+            kids = self.store.children(parent_id) if parent else []
+            if parent is None or parent.status != OPEN or not kids or any(k.status != DONE for k in kids):
+                return
+            self.store.set_status(parent.id, DONE, now)
+            parent_id = parent.parent_id
 
     # -- changing ----------------------------------------------------------------------------- #
 
@@ -261,26 +396,40 @@ class TaskService:
         zone: str | None = None,
         origin: tuple[str, str, str] = ("", "", ""),
         targets: Iterable[str] | str | None = (),
+        parent_id: int | None = None,
     ) -> Task:
         """Add a task. `due`: its deadline (ISO 8601, a time without offset is read in `zone`, else the server's
         clock). `reminders`: when to remind, as the person said; none given: Clara picks them (and the rules do
-        if she cannot). Raises :class:`TaskError`."""
+        if she cannot). `parent_id`: make it a sub task of that (open) task; nothing of it may be later than the
+        deadline of the tasks it is part of. Raises :class:`TaskError`."""
         title, description, surfaces = self._title(title), self._description(description), self._targets(targets)
         now = self._clock()
+        parent = None
+        if parent_id is not None:
+            try:
+                parent = self.get(person, parent_id)
+            except TaskError:
+                raise TaskError(f"The task [{parent_id}] it should be part of does not exist.") from None
+            if parent.status != OPEN:
+                raise TaskError(f"\u201c{parent.title}\u201d is done: reopen it before adding a sub task.")
+            if self.store.count_children(parent.id) >= MAX_SUBTASKS:
+                raise TaskError(f"At most {MAX_SUBTASKS} sub tasks under one task.")
+        limit, owner = self._limit_above(parent)
         clock = zone or ""
         due_at = None
         if due:
-            due_at, clock = self._moment(str(due), zone)
+            due_at, clock = self._moment(str(due), zone or (parent.timezone if parent else None))
             if due_at <= now:
                 raise TaskError("That deadline is already past.")
-        given, given_clock = self._given(list(reminders or ()), zone, now)
+        given, given_clock = self._given(list(reminders or ()), zone or (parent.timezone if parent else None), now)
+        self._inside(limit, owner, clock or given_clock or (parent.timezone if parent else ""), due_at, given)
         clock = clock or given_clock or _offset_name(now.astimezone())
         if self.store.count_open(person.id) >= MAX_OPEN:
             raise TaskError(f"At most {MAX_OPEN} open tasks at a time: finish or delete some first.")
         if self.store.count(person.id) >= MAX_TASKS:
             raise TaskError(f"At most {MAX_TASKS} tasks, done ones included: delete some first.")
-        queue = given or default_reminders(due_at, now, clock)  # always something: Clara may only improve it
-        task = self.store.add(person.id, title, description, due_at, clock, origin, surfaces, now, queue)
+        queue = given or self._default_queue(due_at, now, clock, limit)  # always something: Clara may only improve it
+        task = self.store.add(person.id, title, description, due_at, clock, origin, surfaces, now, queue, parent_id)
         self._wake.set()
         return task if given else await self._plan(task)
 
@@ -299,6 +448,7 @@ class TaskService:
         `reminders` replaces the reminders to come ([]: stop reminding)."""
         task = self.get(person, task_id)
         now = self._clock()
+        limit, owner = self.limit_for(task)
         fields: dict[str, Any] = {}
         if title is not None:
             fields["title"] = self._title(title)
@@ -312,6 +462,8 @@ class TaskService:
                 due_at, _ = self._moment(str(due), zone or task.timezone or None)
                 if due_at <= now:
                     raise TaskError("That deadline is already past.")
+                self._inside(limit, owner, task.timezone, due_at)
+                self._inside_subtasks(task, due_at, task.timezone)
                 fields["due_at"] = due_at
             else:
                 fields["due_at"] = None
@@ -320,6 +472,7 @@ class TaskService:
             if task.status != OPEN:
                 raise TaskError("The task is done: reopen it before setting reminders.")
             queue, _ = self._given(list(reminders), zone or clock or None, now)
+            self._inside(limit, owner, task.timezone, None, queue)
         if fields:
             self.store.update(task.id, now, **fields)
         if queue is not None:
@@ -331,30 +484,46 @@ class TaskService:
         """Mark a task done: it is not reminded any more."""
         task = self.get(person, task_id)
         if task.status != DONE:
-            self.store.set_status(task.id, DONE, self._clock())
+            now = self._clock()
+            for open_one in (task, *(d for d in self.store.descendants(task.id) if d.status == OPEN)):
+                self.store.set_status(open_one.id, DONE, now)
+            self._settle(task.parent_id, now)
             self._wake.set()
         return self.get(person, task_id)
 
     async def reopen(
         self, person: Person, task_id: int, reminders: Iterable[str] | None = None, zone: str | None = None
     ) -> Task:
-        """A done task is open again, with reminders as given or as Clara picks them."""
+        """A done task is open again, with reminders as given or as Clara picks them. The tasks it is part of are
+        open again too (a task is not done while one of its sub tasks is not)."""
         task = self.get(person, task_id)
         if task.status == OPEN:
             return task
         now = self._clock()
         given, _ = self._given(list(reminders or ()), zone or task.timezone or None, now)
-        if self.store.count_open(person.id) >= MAX_OPEN:
+        limit, owner = self.limit_for(task)
+        self._inside(limit, owner, task.timezone, None, given)
+        above = [a for a in self.store.ancestors(task) if a.status == DONE]
+        if self.store.count_open(person.id) + len(above) >= MAX_OPEN:
             raise TaskError(f"At most {MAX_OPEN} open tasks at a time: finish or delete some first.")
+        for parent in reversed(above):
+            self.store.set_status(parent.id, OPEN, now)
+            self.store.set_reminders(
+                parent.id, self._default_queue(parent.due_at, now, parent.timezone, self.limit_for(parent)[0]), now
+            )
         self.store.set_status(task.id, OPEN, now)
-        self.store.set_reminders(task.id, given or default_reminders(task.due_at, now, task.timezone), now)
+        self.store.set_reminders(task.id, given or self._default_queue(task.due_at, now, task.timezone, limit), now)
         self._wake.set()
         task = self.get(person, task_id)
         return task if given else await self._plan(task)
 
     def delete(self, person: Person, task_id: int) -> bool:
+        """Delete a task and its sub tasks. What is left of the task it was part of may be all done: then it is."""
+        task = self.store.get(person.id, task_id)
         deleted = self.store.delete(person.id, task_id)
         if deleted:
+            if task is not None:
+                self._settle(task.parent_id, self._clock())
             self._wake.set()
         return deleted
 
@@ -374,7 +543,7 @@ class TaskService:
         except Exception:
             log.exception("task %s: could not pick the reminders", task.id)
             return task
-        picked = valid_reminders(planned or (), now)
+        picked = self._before(self.limit_for(task)[0], valid_reminders(planned or (), now))
         if not picked or self.store.get_any(task.id) is None:
             return task
         self.store.set_reminders(task.id, picked, now)
@@ -435,6 +604,7 @@ class TaskService:
             remaining = kept
         else:
             remaining = default_follow_up(replace(task, reminders_sent=sent), now)
+        remaining = self._before(self.limit_for(task)[0], remaining)  # nothing after the deadline of the task it is part of
         text = follow.message if follow and follow.message else self._plain_text(task, sent)
         if last and not (follow and follow.message):
             text += " This was the last reminder of this task: mark it done, or ask me to remind you again."

@@ -187,6 +187,8 @@ class Settings:
     tool_timeout: int  # seconds a client may take to run its tools (it may ask the user first)
     llm_first_token_timeout: int  # seconds the model may take to start answering
     llm_idle_timeout: int  # seconds the model may pause between two pieces of its answer
+    llm_retries: int  # times a busy or unreachable model is asked again (0 = never)
+    llm_retry_delay: int  # seconds before the first new try; doubled each time
     compact_percent: int  # summarise a conversation when its context is this full (0 = never)
     keep_recent_turns: int  # turns a compaction leaves unsummarised
     facts_token_budget: int  # tokens of remembered facts shown to the model in each prompt
@@ -364,6 +366,8 @@ class Settings:
             tool_timeout=_positive_int(env, "CLARA_TOOL_TIMEOUT", 900),
             llm_first_token_timeout=_positive_int(env, "CLARA_LLM_FIRST_TOKEN_TIMEOUT", 300),
             llm_idle_timeout=_positive_int(env, "CLARA_LLM_IDLE_TIMEOUT", 120),
+            llm_retries=_non_negative_int(env, "CLARA_LLM_RETRIES", 3),
+            llm_retry_delay=_positive_int(env, "CLARA_LLM_RETRY_DELAY", 2),
             compact_percent=_non_negative_int(env, "CLARA_COMPACT_PERCENT", 80),
             keep_recent_turns=_non_negative_int(env, "CLARA_KEEP_RECENT_TURNS", 2),
             facts_token_budget=_positive_int(env, "CLARA_FACTS_TOKEN_BUDGET", 2000),

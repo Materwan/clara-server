@@ -19,6 +19,8 @@ administration of users and people, reading a PDF, and the web site itself (`web
     GET    /v1/admin/limits             {default}: the tokens a day of a user with no limit of their own (null: none)
     PUT    /v1/admin/limits/default     {tokens}: change it (0: no limit); a user's own is set with PATCH /users/{name}
     GET    /v1/admin/status             provider, model, activity, address
+    GET    /v1/admin/restart            {needed, reasons, in_progress, last}: is a restart worth it, and why
+    POST   /v1/admin/restart            {now?}: pull, update, stop and start again (202 {id}; /health says `restarted: id`)
     GET    /v1/admin/models             what the active provider offers
     GET    /v1/admin/people             everybody Clara knows
     GET|POST /v1/admin/people/{id}/facts, DELETE /v1/admin/people/{id}/facts/{fact}, GET /v1/admin/people/{id}/footprint
@@ -43,6 +45,7 @@ from .clientapi import DISCORD, DISCORD_ID, announce_discord_sign_in
 from .ingest import IngestError
 from .limits import show_limit
 from .memory import MergeRefused
+from .restart import RestartError
 from .users import User, UserError, generate_password
 
 log = logging.getLogger("clara")
@@ -403,6 +406,28 @@ async def admin_status(admin: Admin, request: Request) -> dict:
         "facts": facts,
         "tailscale": {"mode": tailscale.mode, "url": tailscale.url, "problem": tailscale.problem},
     }
+
+
+class RestartBody(BaseModel):
+    now: bool = False  # do not wait for the answers that are running
+
+
+@router.get("/v1/admin/restart")
+async def admin_restart_status(admin: Admin, request: Request, refresh: bool = False) -> dict:
+    """Does the server need a restart (and why), is one under way, what did the last one say?"""
+    return await request.app.state.restart.status(refresh)
+
+
+@router.post("/v1/admin/restart", status_code=202)
+async def admin_restart(body: RestartBody, admin: Admin, request: Request) -> dict:
+    """Pull, update, stop and start again. 202 once it is under way: `id` is what `/health` says as `restarted`
+    when the new server is up. 409 / 500, the server going on, when it cannot (with the output of the step)."""
+    log.info("%s asked for a restart", admin)
+    try:
+        done = await request.app.state.restart.restart(str(admin), now=body.now)
+    except RestartError as error:
+        raise HTTPException(error.status, str(error)) from None
+    return done
 
 
 @router.get("/v1/admin/models")
