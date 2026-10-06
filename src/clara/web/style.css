@@ -391,10 +391,17 @@ button.sm { padding: .32rem .65rem; font-size: .85rem; border-radius: var(--r-sm
 .convos { overflow: auto; flex: 1; min-height: 0; margin: 0 -.3rem; padding: 0 .3rem .8rem; }
 .convos .empty-note { padding: .8rem .5rem; color: var(--muted); font-size: .88rem; }
 .rail-note { padding: .4rem .5rem; color: var(--muted); font-size: .86rem; }
-.group-title { font-size: .78rem; font-weight: 650; color: var(--muted); padding: .9rem .6rem .3rem; }
-.project-title { display: flex; align-items: center; gap: .4rem; text-decoration: none; color: var(--muted); }
-.project-title:hover { color: var(--text); text-decoration: none; }
-.project-title span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-title { display: flex; align-items: center; gap: .15rem; font-size: .78rem; font-weight: 650; color: var(--muted); padding: .6rem .1rem .1rem; }
+.group-toggle { padding: .25rem .4rem; font-size: inherit; font-weight: inherit; color: inherit; gap: .3rem; border-radius: var(--r-sm); }
+.group-title > .group-toggle:first-child:not(:last-child) { flex: none; }
+.group-title:not(.project-title) .group-toggle { flex: 1; justify-content: flex-start; }
+.group-toggle .caret { transition: transform .15s ease; transform: rotate(90deg); }
+.group-toggle[aria-expanded="false"] .caret { transform: none; }
+.group-title .count { margin-left: auto; padding-right: .5rem; font-weight: 500; font-variant-numeric: tabular-nums; opacity: .8; }
+.project-title a { display: flex; align-items: center; gap: .4rem; min-width: 0; text-decoration: none; color: var(--muted); }
+.project-title a:hover { color: var(--text); text-decoration: none; }
+.project-title a span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-items[hidden] { display: none; }
 .convo {
   position: relative; display: flex; align-items: center; gap: .3rem; border-radius: var(--r); padding: .1rem .15rem .1rem .6rem;
   cursor: pointer; color: var(--text-2); font-size: .9rem; min-height: 36px;
@@ -974,6 +981,18 @@ dialog:has(.task-form), dialog:has(.task-view) { width: min(560px, calc(100vw - 
 .task-view .task-description { margin: 0; white-space: pre-wrap; color: var(--text); }
 .task-view ul.plain { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .2rem; }
 
+/* ---- scheduled tasks ----------------------------------------------------------------------------------- */
+.list.schedules > li { align-items: flex-start; }
+.sched .title { font-family: var(--font); font-size: 1rem; font-weight: 650; }
+.sched .meta { display: flex; flex-wrap: wrap; align-items: center; gap: .2rem .8rem; margin-top: .3rem; }
+.sched .meta .muted .icon, .sched .next .icon { vertical-align: -2px; }
+.sched .last { margin: .45rem 0 0; font-size: .88rem; color: var(--text-2); overflow-wrap: anywhere; }
+dialog:has(.sched-form) { width: min(560px, calc(100vw - 2rem)); }
+.sched-form select { width: 100%; }
+.sched-form .weekdays, .sched-form .pick-list { display: flex; flex-wrap: wrap; gap: .4rem .9rem; font-weight: 400; }
+.sched-form .pick-list { flex-direction: column; gap: .35rem; }
+.sched-form .pick { display: inline-flex; align-items: center; gap: .45rem; font-size: .9rem; font-weight: 400; color: var(--text); cursor: pointer; }
+.sched-form .pick .icon { color: var(--muted); }
 .icon.flip { transform: rotate(180deg); }
 .cal { overflow: hidden; }
 .cal-bar { display: flex; align-items: center; gap: .4rem; padding: .75rem 1rem; border-bottom: 1px solid var(--line); }

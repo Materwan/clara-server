@@ -15,6 +15,7 @@
     GET    /v1/reminders                the reminders a person set that have not fired
     DELETE /v1/reminders/{id}           cancel one
     GET|POST|PATCH|DELETE /v1/tasks...  a person's to-do list: tasks with their reminders (taskapi.py)
+    GET|POST|PATCH|DELETE /v1/schedules...  prompts Clara runs by herself at a set time, once or as a routine (scheduleapi.py)
     POST   /v1/notifications            send a notification to a person, now
     GET    /v1/notifications/stream     Server-Sent Events of an account: `reminder`, `notification`, `server`
                                         (also served as /v1/reminders/stream)
@@ -75,6 +76,7 @@ from .discord_bot.service import DiscordService
 from .github import GitHub
 from .integrationapi import install as install_integrations
 from .integrations.service import build as build_integrations
+from .integrations.store import PENDING
 from .lifecycle import Lifecycle
 from .limits import UsageLimitReached, UsageLimits
 from .linking import LinkCodes
@@ -92,6 +94,8 @@ from .qcm import with_answers
 from .ratelimit import FailureLimiter
 from .reminders import ReminderError, ReminderService, describe
 from .restart import RestartService, relaunch
+from .schedule import ScheduleService
+from .scheduleapi import install as install_schedules
 from .settings import Settings, SettingsError
 from .tailscale import Tailscale
 from .taskai import follow as follow_task
@@ -298,6 +302,7 @@ def create_app(
     notifier = Notifier(memory)
     reminders = ReminderService(memory, notifier=notifier)
     tasks = TaskService(memory, notifier, max_reminders=settings.task_max_reminders)
+    schedules = ScheduleService(memory, notifier)
     web = WebClient(settings.ollama_api_key) if settings.web_tools and settings.ollama_api_key else None
     projects = Projects(
         memory, settings.project_max_bytes, settings.project_max_files, settings.project_inline_percent
@@ -344,6 +349,8 @@ def create_app(
             pass
 
     integrations.approvals.followup = integration_followup
+    schedules.agent = agent
+    schedules.waiting = lambda conversation: len(integrations.store.approvals_in(conversation, (PENDING,)))
 
     if settings.reminder_ai_timeout:
         ai_timeout = float(settings.reminder_ai_timeout)
@@ -353,7 +360,7 @@ def create_app(
         tasks.follower = lambda task, now: follow_task(
             agent, task, now, ai_timeout, tasks.max_reminders, tasks.family(task)
         )
-    lifecycle = Lifecycle(agent, reminders, tasks=tasks)
+    lifecycle = Lifecycle(agent, reminders, tasks=tasks, schedules=schedules)
     restart = RestartService(settings.data_dir, lifecycle)
     users = Users(memory, settings.session_days)
     users.prune()
@@ -375,6 +382,7 @@ def create_app(
         lifecycle.loop = asyncio.get_running_loop()
         scheduler = asyncio.create_task(reminders.run())
         task_scheduler = asyncio.create_task(tasks.run())
+        schedule_scheduler = asyncio.create_task(schedules.run())
         approval_scheduler = asyncio.create_task(integrations.approvals.run())
         publishing = asyncio.create_task(tailscale.start())  # slow if tailscale hangs: not before the server is up
         bot_start = None
@@ -397,11 +405,14 @@ def create_app(
             await tailscale.stop()
             scheduler.cancel()
             task_scheduler.cancel()
+            schedule_scheduler.cancel()
             approval_scheduler.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await scheduler
             with contextlib.suppress(asyncio.CancelledError):
                 await task_scheduler
+            with contextlib.suppress(asyncio.CancelledError):
+                await schedule_scheduler
             with contextlib.suppress(asyncio.CancelledError):
                 await approval_scheduler
             await integrations.approvals.close()
@@ -434,6 +445,7 @@ def create_app(
     app.state.models = models
     app.state.github = GitHub(settings.github_token)
     app.state.integrations = integrations
+    app.state.schedules = schedules
     app.state.commands = CommandContext(
         settings, memory, agent, providers, time.monotonic(), f"{settings.host}:{settings.port}", lifecycle,
         notifier, tailscale, users, discord_bot, limits, models, restart,
@@ -911,6 +923,7 @@ def create_app(
     install_models(app)
     install_tasks(app)
     install_integrations(app)
+    install_schedules(app)
     install_web(app)
     return app
 

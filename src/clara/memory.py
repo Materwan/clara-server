@@ -250,6 +250,30 @@ CREATE TABLE IF NOT EXISTS task_reminders (
 );
 CREATE INDEX IF NOT EXISTS idx_task_reminders_at ON task_reminders (at);
 CREATE INDEX IF NOT EXISTS idx_task_reminders_task ON task_reminders (task_id);
+CREATE TABLE IF NOT EXISTS schedules (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id    INTEGER NOT NULL REFERENCES people (id) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    prompt       TEXT NOT NULL DEFAULT '',
+    documents    TEXT NOT NULL DEFAULT '[]',  -- JSON: [{"name", "kind", "text"}], put after the prompt
+    surface      TEXT NOT NULL,  -- the account it runs as
+    user_id      TEXT NOT NULL,
+    conversation TEXT NOT NULL,  -- one conversation for every run
+    project_id   INTEGER,
+    repeat       TEXT NOT NULL DEFAULT '',  -- '' (once), daily, weekly, monthly
+    days         TEXT NOT NULL DEFAULT '',  -- weekly: the weekdays (0 = Monday), ","-separated
+    start_at     TEXT NOT NULL,  -- the first moment, UTC: gives the time of day and the day of the month
+    timezone     TEXT NOT NULL DEFAULT '',  -- IANA name or "+02:00"
+    next_at      TEXT,  -- the next run, UTC (NULL: none to come)
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    runs         INTEGER NOT NULL DEFAULT 0,
+    last_at      TEXT,
+    last_status  TEXT NOT NULL DEFAULT '',  -- ok, failed, missed
+    last_summary TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_schedules_next ON schedules (next_at);
+CREATE INDEX IF NOT EXISTS idx_schedules_person ON schedules (person_id);
 CREATE TABLE IF NOT EXISTS markdown_files (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     person_id  INTEGER NOT NULL REFERENCES people (id) ON DELETE CASCADE,

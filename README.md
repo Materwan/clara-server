@@ -463,6 +463,30 @@ remind me about the taxes?", "I did the taxes"). Only its person can see or chan
   those given). A task's `timezone` is the person's clock when it was made (an IANA name, or an offset).
 - **Privacy.** `/forget-person` erases the person's tasks; merging two people merges their lists.
 
+## Scheduled tasks
+
+A scheduled task is a prompt that Clara runs by herself at a set time (`schedule.py`, routes in `scheduleapi.py`,
+the *Schedule* page of the web site). It has a name, a prompt, documents (read by the browser like in the chat and put
+after the prompt), the integrations attached to it, and optionally a project. It runs **once**, or as a **routine**:
+every day, on some days of the week, or every month (on the day of the first run, the last day of a shorter month), at
+the time of day of its first run in the clock it was made in (an IANA name, so summer time is followed).
+
+- **One conversation per task.** Every run is a turn in the same conversation (`<surface>:<user>:schedule-<id>`),
+  as the person's account, so the runs read one after the other in their history; the integrations of the task are
+  attached to that conversation (and those of its project are inherited). The turn is told it is a scheduled task: it
+  asks nothing, and begins its final answer with a summary of at most three sentences.
+- **Permissions work as in a chat.** A run never waits: an action set to *ask* is stored, pushed to the person's
+  surfaces, and Clara carries on and says what is waiting; when they answer, the usual follow-up turn happens in the
+  same conversation.
+- **The summary.** When a run is over the person gets a private Discord message (a notification to the surface
+  `discord`, title `Scheduled task: <name>`): the first paragraph of Clara's answer, or why it failed, and how many
+  requests wait for them. Without a linked Discord account nobody is messaged; the result is in the conversation and
+  on the page (`last_status`: ok / failed / missed, `last_summary`).
+- **A missed run.** The next run is set before a run starts, so nothing runs twice. If the server was off and the due
+  time is more than an hour past, the run is skipped (and the person told); a run that was cut by a stop starts again
+  at the next start. A run due while the previous one still goes is skipped too.
+- **Limits.** 50 per person; prompt 20 000 characters, documents 150 000 in all.
+
 ## Notifications
 
 A notification is a message pushed to a person's clients **now**: a pop-up in the desktop app, a line with
@@ -816,8 +840,10 @@ shown, and the user's answers come back as their next message, which Clara then 
   (vendored in `web/katex/`, so it works offline; the script is only loaded once an answer has a formula); your conversations at the side (search, pin, rename, delete, titles
   written by Clara); a bar showing how full the context is and *Summarise* to compact it; documents with 📎, by
   drag and drop or by pasting: PDFs are read by the server (`pypdf`), text and code in the browser, as in the desktop app.
-  The conversations of projects are not in the list at the side (they are on their project's page), unless a search
-  finds them; a chip next to the title names the project of the conversation shown, and its menu moves it.
+  The list shows what is pinned, then each project with its conversations, then the others by date; every group
+  folds (kept in the browser, and a search opens them all). There is no *Chat* link: the list is the way back to a
+  conversation and *New chat* starts one. A chip next to the title names the project of the conversation shown, and
+  its menu moves it.
 - **Projects**: your projects as cards; one project shows its conversations (*New chat* starts one in it), its
   instructions, and its files: add files, a folder, or a GitHub repository (or drop files and folders on the page),
   read a file, remove it, sync or remove a repository. It says whether Clara reads all the files with every message
@@ -826,6 +852,8 @@ shown, and the user's answers come back as their next message, which Clara then 
   the reminders sent and the next one; add, edit, mark as done, reopen, delete, read one in full. A task given no
   reminder gets them chosen by Clara, who also moves the next ones each time one is sent: the page reads the list
   again every 30 seconds.
+- **Schedule**: prompts Clara runs by herself (see *Scheduled tasks*): each with when it runs next and how the last run
+  went; plan one, edit, pause, *Run it now*, delete, open its conversation.
 - **Memory**: what Clara remembers about you, to add to or remove from.
 - **Account**: your usage, the model Clara answers you with on each surface (among those an administrator offers, with
   their cost in credits), change your password, see and sign out your devices, link an account that has no password
@@ -1047,6 +1075,8 @@ src/clara/
   tasks.py      the to-do list: tasks, their reminders, the rules, the scheduler (storage: taskstore.py)
   taskai.py     Clara picks the reminders of a task and decides the next ones at each reminder
   taskapi.py    the routes of tasks
+  schedule.py   scheduled tasks: prompts Clara runs by herself, once or as a routine, and the Discord summary
+  scheduleapi.py the routes of scheduled tasks
   users.py      users, password hashes, login tokens (the tables are in memory.py)
   auth.py       who is calling (client token, user token or web cookie) and what they may touch
   webapi.py     login, sign-up, account, administration and PDF routes, and the web site's files

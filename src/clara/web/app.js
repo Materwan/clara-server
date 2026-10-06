@@ -13,6 +13,7 @@ import { icon, mark } from "./icons.js";
 import { mountIntegrations } from "./integrations.js";
 import { mountProjects } from "./projects.js";
 import { mountRestartBadge, resumeRestart } from "./restart.js";
+import { mountSchedule } from "./schedule.js";
 import { mountTasks } from "./tasks.js";
 import { avatar, clear, h, themeSwitch, toast, toggleRail } from "./ui.js";
 
@@ -136,8 +137,8 @@ events.addEventListener("signed-out", () => { if (user) showLogin("Your session 
 
 // ---- the shell and the pages -----------------------------------------------------------------------------
 
-const PAGES = { chat: ["Chat", "chat"], projects: ["Projects", "folder"], tasks: ["Tasks", "tasks"], files: ["Files", "file"], memory: ["Memory", "memory"], account: ["Account", "user"], integrations: ["Integrations", "plug"], discord: ["Discord", "bot"], admin: ["Admin", "admin"] };
-const WORK_PAGES = ["chat", "projects", "tasks", "files"]; // what you do with Clara: the links of the rail
+const PAGES = { chat: ["Chat", "chat"], projects: ["Projects", "folder"], tasks: ["Tasks", "tasks"], schedule: ["Schedule", "clock"], files: ["Files", "file"], memory: ["Memory", "memory"], account: ["Account", "user"], integrations: ["Integrations", "plug"], discord: ["Discord", "bot"], admin: ["Admin", "admin"] };
+const WORK_PAGES = ["projects", "tasks", "schedule", "files"]; // what you do with Clara: the links of the rail (the chat is the conversations listed below them)
 const SETTINGS_PAGES = ["memory", "account", "integrations", "discord", "admin"]; // reached by your avatar, they share a bar at the top
 const ADMIN_PAGES = new Set(["discord", "admin"]);
 
@@ -238,7 +239,7 @@ function route() {
   railHistory = null;
   clear(body);
   clear(slot);
-  if (WORK_PAGES.includes(name) && name !== "chat") railHistory = mountHistory(slot, user); // the chat page draws its own
+  if (WORK_PAGES.includes(name)) railHistory = mountHistory(slot, user); // the chat page draws its own
   pageName = name;
   document.title = name === "chat" ? "Clara" : `${PAGES[name][0]} – Clara`;
   const fresh = wantNewChat || (name === "chat" && sub === "new");
@@ -249,6 +250,7 @@ function route() {
   if (name === "chat" && sub) history.replaceState(null, "", "#/chat"); // no hashchange: nothing is drawn twice
   page = name === "chat" ? mountChat(body, user, { slot, fresh, project, open: openId })
     : name === "tasks" ? mountTasks(body, user)
+    : name === "schedule" ? mountSchedule(body, user)
     : name === "projects" ? mountProjects(body, user, sub)
     : name === "files" ? mountFiles(body, user)
     : name === "memory" ? mountMemory(body, user)

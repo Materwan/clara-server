@@ -22,9 +22,36 @@ export function groupOf(info) {
 
 export const labelOf = (info) => info.title || (info.preview ? splitMessage(info.preview).text || info.preview : "") || "New chat";
 
+// Which groups the person folded, kept in this browser (a group is "d:<date group>" or "p:<project id>").
+const FOLDED = "clara.rail.folded";
+const folded = (() => {
+  try { return new Set(JSON.parse(localStorage.getItem(FOLDED) || "[]")); } catch { return new Set(); }
+})();
+const keepFolded = () => {
+  try { localStorage.setItem(FOLDED, JSON.stringify([...folded])); } catch { /* private window: it is forgotten */ }
+};
+
+/** A group that folds: its title (a button; for a project, the name stays a link to it) and its conversations. A search shows everything. */
+function group(key, label, items, row, query, link = null) {
+  const open = Boolean(query) || !folded.has(key);
+  const body = h("div", { class: "group-items", hidden: !open }, items.map(row));
+  const toggle = h("button", { type: "button", class: "ghost group-toggle", "aria-expanded": String(open), title: open ? "Fold" : "Unfold",
+    onclick: () => {
+      const show = body.hidden;
+      body.hidden = !show;
+      toggle.setAttribute("aria-expanded", String(show));
+      toggle.title = show ? "Fold" : "Unfold";
+      if (show) folded.delete(key); else folded.add(key);
+      keepFolded();
+    } }, icon("chevron", { size: 14, className: "caret" }), !link && h("span", { class: "name" }, label));
+  return h("section", { class: "group" },
+    h("div", { class: "group-title" + (link ? " project-title" : "") }, toggle, link, h("span", { class: "count" }, items.length)), body);
+}
+
 /**
- * Draw `list` in `box`: the date groups hold what is pinned and what belongs to no project, then each project has a
- * group of its own, named after it, newest first. `row(info, inProject)` makes the line of one conversation.
+ * Draw `list` in `box`: what is pinned first, then each project in a group of its own, named after it, newest first,
+ * then the conversations that belong to no project by date. Every group folds. `row(info, inProject)` makes the line
+ * of one conversation.
  */
 export function renderGroups(box, list, projects, row, query = "") {
   clear(box);
@@ -40,19 +67,17 @@ export function renderGroups(box, list, projects, row, query = "") {
       byProject.get(info.project).push(info);
     } else groups.get(groupOf(info)).push(info);
   }
-  for (const [name, items] of groups) {
-    if (!items.length) continue;
-    box.append(h("div", { class: "group-title" }, name));
-    for (const info of items) box.append(row(info, false));
-  }
+  const dates = ([name, items]) => items.length && box.append(group(`d:${name}`, name, items, (info) => row(info, false), query));
+  const [pinned, ...others] = groups;
+  dates(pinned);
   const time = (info) => parseDate(info.updated_at)?.getTime() || 0;
   const newest = (items) => Math.max(...items.map(time));
   for (const [id, items] of [...byProject].sort((a, b) => newest(b[1]) - newest(a[1]))) {
     items.sort((a, b) => time(b) - time(a));
-    box.append(h("a", { class: "group-title project-title", href: `#/projects/${id}`, title: "Open the project" },
-      icon("folder", { size: 14 }), h("span", {}, projects.get(id) || "Project")));
-    for (const info of items) box.append(row(info, true));
+    const link = h("a", { href: `#/projects/${id}`, title: "Open the project" }, icon("folder", { size: 14 }), h("span", {}, projects.get(id) || "Project"));
+    box.append(group(`p:${id}`, projects.get(id) || "Project", items, (info) => row(info, true), query, link));
   }
+  others.forEach(dates);
 }
 
 /** The list for a page that is not the chat. Returns `{destroy}`. */
