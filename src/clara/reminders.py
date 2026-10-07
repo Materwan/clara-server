@@ -16,13 +16,14 @@ from __future__ import annotations
 
 import asyncio
 import calendar
-import contextlib
 import logging
 import re
-from datetime import datetime, timedelta, timezone, tzinfo
-from typing import Any, AsyncIterator, Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
+from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .dueloop import DueLoop
 from .memory import Memory, Person, Reminder
 from .notifications import SERVER, NotificationError, Notifier, clean_targets
 
@@ -31,7 +32,6 @@ log = logging.getLogger(__name__)
 REPEATS = ("daily", "weekly", "monthly")
 MAX_TEXT = 500
 MAX_PER_PERSON = 100
-MAX_SLEEP = 30.0  # seconds: the scheduler looks again at least this often (clock changes, safety net)
 
 # Writes the announcement of a reminder that came due: its text, or None to announce the reminder as it is.
 # It raises AnnounceFailed when it should have written one and could not.
@@ -49,13 +49,13 @@ class AnnounceFailed(Exception):
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _tzinfo(spec: str) -> tzinfo:
     """A clock from its name: an IANA zone ("Europe/Paris"), an offset ("+02:00"), or UTC for ""."""
     if not spec:
-        return timezone.utc
+        return UTC
     match = _OFFSET.match(spec)
     if match:
         delta = timedelta(hours=int(match[2]), minutes=int(match[3]))
@@ -87,7 +87,7 @@ def parse_moment(at: str, zone: str | None) -> tuple[datetime, str]:
         _tzinfo(zone)  # validates the name
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=_tzinfo(zone)) if zone else moment.astimezone()
-    return moment.astimezone(timezone.utc), zone or _offset_name(moment)
+    return moment.astimezone(UTC), zone or _offset_name(moment)
 
 
 def _shift(local: datetime, repeat: str, count: int) -> datetime:
@@ -110,7 +110,7 @@ def next_occurrence(reminder: Reminder, after: datetime) -> datetime:
     count = 0
     while True:
         count += 1
-        candidate = _shift(anchor, reminder.repeat, count).astimezone(timezone.utc)
+        candidate = _shift(anchor, reminder.repeat, count).astimezone(UTC)
         if candidate > after:
             return candidate
 
@@ -125,7 +125,7 @@ def describe(reminder: Reminder) -> dict[str, Any]:
     }
 
 
-class ReminderService:
+class ReminderService(DueLoop):
     def __init__(
         self, memory: Memory, clock: Callable[[], datetime] = _utc_now, notifier: Notifier | None = None
     ):
@@ -246,19 +246,8 @@ class ReminderService:
         """Tell every connected client what the server is doing ("stopping", "stopped")."""
         self.notifier.announce_server(state)
 
-    async def run(self) -> None:
-        """The scheduler loop; runs for the life of the server."""
-        while True:
-            self._wake.clear()  # before looking: a reminder set meanwhile wakes the next wait at once
-            try:
-                if not self.stopping:
-                    await self.fire_due()
-            except Exception:
-                log.exception("reminders: could not fire the due ones")
-            upcoming = self.memory.next_reminder_due()
-            delay = MAX_SLEEP if upcoming is None or self.stopping else (upcoming - self._clock()).total_seconds()
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(self._wake.wait(), max(0.0, min(delay, MAX_SLEEP)))
+    def next_due(self) -> datetime | None:
+        return self.memory.next_reminder_due()
 
     # -- one listener's stream ----------------------------------------------------------------- #
 

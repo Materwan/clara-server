@@ -24,10 +24,11 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from dotenv import dotenv_values, find_dotenv
 
@@ -212,7 +213,7 @@ class RestartService:
             return None
         if not isinstance(record, dict) or record.get("done_at"):
             return record if isinstance(record, dict) else None
-        record["done_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        record["done_at"] = datetime.now(UTC).isoformat(timespec="seconds")
         self._write(record)
         log.info("restarted (asked by %s)", record.get("by"))
         return record
@@ -273,7 +274,7 @@ class RestartService:
         record = {
             "id": uuid.uuid4().hex,
             "by": by,
-            "requested_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "requested_at": datetime.now(UTC).isoformat(timespec="seconds"),
             "steps": [step.as_dict() for step in steps],
         }
         self._write(record)

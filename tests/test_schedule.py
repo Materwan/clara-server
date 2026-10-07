@@ -1,6 +1,6 @@
 """Scheduled tasks: a prompt Clara runs by herself, once or as a routine, and tells the person on Discord."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from conftest import FakeBackend, fake_providers, say
@@ -15,7 +15,7 @@ from clara.tools import default_toolbox
 
 AUTH = {"Authorization": "Bearer secret-cli"}
 ME = {"surface": "cli", "user_id": "erwan"}
-NOW = datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)  # a Monday
+NOW = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)  # a Monday
 
 
 class Clock:
@@ -39,7 +39,8 @@ def at(**delta) -> str:
 def build(memory, tmp_path, backend):
     clock = Clock()
     service = ScheduleService(memory, Notifier(memory, clock), clock)
-    service.agent = Agent(memory, backend, default_toolbox(), SystemPrompt(tmp_path / "none.md"))
+    # retries=0: a broken model fails at once instead of sleeping through the retry delays
+    service.agent = Agent(memory, backend, default_toolbox(), SystemPrompt(tmp_path / "none.md"), retries=0)
     person = memory.resolve("cli", "erwan", "Erwan")
     return service, clock, person
 
@@ -59,9 +60,9 @@ def test_a_routine_comes_back_at_the_same_time_of_day():
 def test_a_weekly_routine_runs_on_its_weekdays_and_a_monthly_one_clamps_to_the_month():
     friday_after = next_run(NOW, "UTC", "weekly", (0, 4), NOW)  # Monday and Friday: after Monday noon, Friday
     assert friday_after == NOW + timedelta(days=4)
-    jan31 = datetime(2026, 1, 31, 9, 0, tzinfo=timezone.utc)
-    assert next_run(jan31, "UTC", "monthly", (), jan31) == datetime(2026, 2, 28, 9, 0, tzinfo=timezone.utc)
-    assert next_run(jan31, "UTC", "monthly", (), datetime(2026, 2, 28, 9, 0, tzinfo=timezone.utc)) == datetime(2026, 3, 31, 9, 0, tzinfo=timezone.utc)
+    jan31 = datetime(2026, 1, 31, 9, 0, tzinfo=UTC)
+    assert next_run(jan31, "UTC", "monthly", (), jan31) == datetime(2026, 2, 28, 9, 0, tzinfo=UTC)
+    assert next_run(jan31, "UTC", "monthly", (), datetime(2026, 2, 28, 9, 0, tzinfo=UTC)) == datetime(2026, 3, 31, 9, 0, tzinfo=UTC)
 
 
 def test_the_message_is_the_prompt_then_the_documents_like_in_the_chat(memory, tmp_path):

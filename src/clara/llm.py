@@ -14,11 +14,14 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Protocol
+from typing import Any, Protocol
 
 import httpx
 from ollama import AsyncClient
+
+from .httpclient import SharedClient
 
 log = logging.getLogger(__name__)
 
@@ -217,15 +220,15 @@ class OpenAIBackend:
         self._api_key = api_key
         self._flavor = flavor or OpenAIFlavor()
         self._label = label
-        self._transport = transport  # tests answer from here instead of the network
-
-    def _client(self) -> httpx.AsyncClient:
-        headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
-        return httpx.AsyncClient(
-            headers=headers,
+        # one client for every request: each model round reuses the open connection (transport: tests answer from it)
+        self._http = SharedClient(
+            headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
             timeout=httpx.Timeout(OPENAI_CONNECT_TIMEOUT, read=OPENAI_READ_TIMEOUT),
-            transport=self._transport,
+            transport=transport,
         )
+
+    async def aclose(self) -> None:
+        await self._http.aclose()
 
     async def _refused(self, response: httpx.Response) -> LlmError:
         await response.aread()
@@ -302,50 +305,49 @@ class OpenAIBackend:
 
     async def stream(self, messages: list[dict], tools: list[dict] | None) -> AsyncIterator[LlmChunk]:
         calls: dict[int, dict[str, Any]] = {}  # tool calls come in pieces, by index
-        async with self._client() as client:
-            request = client.stream("POST", f"{self._host}/chat/completions", json=self.body(messages, tools))
-            async with request as response:
-                if response.is_error:
-                    raise await self._refused(response)
-                async for line in response.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    try:
-                        part = json.loads(data)
-                    except ValueError:
-                        continue
-                    if not isinstance(part, dict):
-                        continue
-                    if part.get("error"):
-                        error = part["error"]
-                        code = error.get("code") if isinstance(error, dict) else None
-                        raise LlmError(
-                            f"{self._label}: {error.get('message', error) if isinstance(error, dict) else error}",
-                            code if isinstance(code, int) else None,
-                        )
-                    usage = part.get("usage") or {}
-                    chunk = LlmChunk(
-                        prompt_tokens=int(usage.get("prompt_tokens") or 0),
-                        completion_tokens=int(usage.get("completion_tokens") or 0),
+        request = self._http.get().stream("POST", f"{self._host}/chat/completions", json=self.body(messages, tools))
+        async with request as response:
+            if response.is_error:
+                raise await self._refused(response)
+            async for line in response.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    part = json.loads(data)
+                except ValueError:
+                    continue
+                if not isinstance(part, dict):
+                    continue
+                if part.get("error"):
+                    error = part["error"]
+                    code = error.get("code") if isinstance(error, dict) else None
+                    raise LlmError(
+                        f"{self._label}: {error.get('message', error) if isinstance(error, dict) else error}",
+                        code if isinstance(code, int) else None,
                     )
-                    for choice in part.get("choices") or []:
-                        delta = choice.get("delta") or {}
-                        chunk.text += delta.get("content") or ""
-                        chunk.thinking += delta.get("reasoning_content") or delta.get("reasoning") or ""
-                        for piece in delta.get("tool_calls") or []:
-                            index = int(piece.get("index", len(calls)))
-                            slot = calls.setdefault(index, {"name": "", "arguments": "", "extra": None})
-                            function = piece.get("function") or {}
-                            slot["name"] += function.get("name") or ""
-                            arguments = function.get("arguments") or ""
-                            slot["arguments"] += arguments if isinstance(arguments, str) else json.dumps(arguments)
-                            if piece.get("extra_content"):
-                                slot["extra"] = piece["extra_content"]
-                    if chunk.text or chunk.thinking or chunk.prompt_tokens or chunk.completion_tokens:
-                        yield chunk
+                usage = part.get("usage") or {}
+                chunk = LlmChunk(
+                    prompt_tokens=int(usage.get("prompt_tokens") or 0),
+                    completion_tokens=int(usage.get("completion_tokens") or 0),
+                )
+                for choice in part.get("choices") or []:
+                    delta = choice.get("delta") or {}
+                    chunk.text += delta.get("content") or ""
+                    chunk.thinking += delta.get("reasoning_content") or delta.get("reasoning") or ""
+                    for piece in delta.get("tool_calls") or []:
+                        index = int(piece.get("index", len(calls)))
+                        slot = calls.setdefault(index, {"name": "", "arguments": "", "extra": None})
+                        function = piece.get("function") or {}
+                        slot["name"] += function.get("name") or ""
+                        arguments = function.get("arguments") or ""
+                        slot["arguments"] += arguments if isinstance(arguments, str) else json.dumps(arguments)
+                        if piece.get("extra_content"):
+                            slot["extra"] = piece["extra_content"]
+                if chunk.text or chunk.thinking or chunk.prompt_tokens or chunk.completion_tokens:
+                    yield chunk
         if calls:
             yield LlmChunk(
                 tool_calls=[
@@ -356,10 +358,9 @@ class OpenAIBackend:
             )
 
     async def list_models(self) -> list[str]:
-        async with self._client() as client:
-            response = await client.get(f"{self._host}/models")
-            if response.is_error:
-                raise await self._refused(response)
+        response = await self._http.get().get(f"{self._host}/models")
+        if response.is_error:
+            raise await self._refused(response)
         models = response.json().get("data") or []
         names = {str(model.get("id", "")).removeprefix("models/") for model in models if isinstance(model, dict)}
         return sorted(name for name in names if name)
@@ -369,6 +370,6 @@ class OpenAIBackend:
         try:
             await self.list_models()
         except LlmError as error:
-            if "refused the API key" in str(error):
+            if error.status in (401, 403):
                 raise PermissionError(str(error)) from None
             raise

@@ -12,7 +12,8 @@ import uvicorn
 from conftest import FakeBackend, call, fake_providers, say
 from fastapi.testclient import TestClient
 
-from clara.server import create_app, with_keepalive
+from clara.apicommon import with_keepalive
+from clara.server import create_app
 
 CHAT = {"Authorization": "Bearer secret-cli"}
 OTHER = {"Authorization": "Bearer secret-discord"}

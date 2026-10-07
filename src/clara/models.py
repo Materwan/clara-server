@@ -21,8 +21,8 @@ import asyncio
 import logging
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from .memory import Memory
 from .providers import ProviderError, ProviderManager, make_ref, split_ref
@@ -127,7 +127,9 @@ class ModelCatalog:
             return {row["ref"]: row for row in self._memory.database.execute("SELECT * FROM models").fetchall()}
 
     def _upsert(self, ref: str, **fields) -> None:
-        assert set(fields) <= {"enabled", "weight", "size_b"}
+        unknown = set(fields) - {"enabled", "weight", "size_b"}
+        if unknown:  # the names go into the SQL: only ours
+            raise ValueError(f"Unknown model fields: {', '.join(sorted(unknown))}")
         columns = ", ".join(fields)
         marks = ", ".join("?" for _ in fields)
         updates = ", ".join(f"{name} = excluded.{name}" for name in fields)

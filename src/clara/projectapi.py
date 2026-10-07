@@ -232,7 +232,8 @@ async def upload_files(project_id: int, body: Upload, client: Client, request: R
         raise HTTPException(413, f"Send at most {MAX_UPLOAD_BYTES // 1_000_000} MB at once.")
     project = own_project(request, client, body.surface, body.user_id, project_id)
     extracted, skipped = await asyncio.to_thread(_read_upload, body.files)
-    result = request.app.state.projects.add(project.id, extracted)
+    # up to many MB written: in a thread, so that the answers being streamed meanwhile do not stall
+    result = await asyncio.to_thread(request.app.state.projects.add, project.id, extracted)
     result = Added(result.added, result.replaced, skipped + result.skipped)
     return {**describe_added(result), "project": _details(request, project)}
 
@@ -275,7 +276,7 @@ async def _sync(request: Request, source: Source) -> Added:
     except (GitHubError, ValueError) as error:
         projects.source_failed(source, str(error))
         raise HTTPException(502 if isinstance(error, GitHubError) else 422, str(error)) from None
-    result = projects.replace_source_files(source, files, skipped, snapshot.commit_sha)
+    result = await asyncio.to_thread(projects.replace_source_files, source, files, skipped, snapshot.commit_sha)
     log.info("%s synced: %d files, %d left out", source.repo, len(result.added), len(result.skipped))
     return result
 

@@ -12,13 +12,14 @@ and Clara reads and searches them with tools (`read_project_file`, `search_proje
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from .compaction import estimate_tokens
+from .compaction import CHARS_PER_TOKEN, estimate_tokens
 from .ingest import ExtractedFile, Skipped
-from .memory import Memory
+from .memory import Memory, escape_like
 
 MAX_NAME = 100
 MAX_DESCRIPTION = 2_000
@@ -30,7 +31,6 @@ READ_MAX_CHARS = 40_000  # ...and characters
 SEARCH_MAX_MATCHES = 60
 SEARCH_LINE = 240  # characters of a matching line shown
 LIST_MAX = 500  # paths list_project_files gives at once
-PROJECT_TOOLS = frozenset({"list_project_files", "read_project_file", "search_project"})
 
 
 class ProjectError(ValueError):
@@ -98,7 +98,7 @@ class ProjectContext:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _one_line(text: str) -> str:
@@ -165,8 +165,8 @@ def matching_lines(path: str, content: str, pattern: re.Pattern, room: int) -> l
 
 
 def file_tokens(path: str, size: int) -> int:
-    """What a file weighs in a prompt: its text, and its <document> wrapping."""
-    return estimate_tokens("x" * size) + estimate_tokens(path) + 12
+    """What a file weighs in a prompt: its text (`size` characters), and its <document> wrapping."""
+    return math.ceil(size / CHARS_PER_TOKEN) + estimate_tokens(path) + 12
 
 
 class Projects:
@@ -346,7 +346,7 @@ class Projects:
         path = path.strip("/")
         with self._lock, self._db:
             if folder:
-                pattern = path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "/%"
+                pattern = escape_like(path) + "/%"
                 removed = self._db.execute(
                     "DELETE FROM project_files WHERE project_id = ? AND (path LIKE ? ESCAPE '\\' OR ? = '')",
                     (project_id, pattern, path),
@@ -532,7 +532,7 @@ class Projects:
         params: list = [project_id]
         if folder:
             sql += " AND path LIKE ? ESCAPE '\\'"
-            params.append(folder.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "/%")
+            params.append(escape_like(folder) + "/%")
         if not regex and query.isascii():  # SQLite's lower() only knows ASCII: other words are matched below only
             sql += " AND instr(lower(content), lower(?)) > 0"
             params.append(query)
@@ -542,15 +542,13 @@ class Projects:
         matches: list[str] = []
         files = 0
         for row in rows:
-            hit = False
-            for number, line in enumerate(row["content"].splitlines(), 1):
-                if pattern.search(line):
-                    hit = True
-                    if len(matches) < SEARCH_MAX_MATCHES:
-                        text = line.strip()
-                        if len(text) > SEARCH_LINE:
-                            text = text[: SEARCH_LINE - 1] + "…"
-                        matches.append(f"{row['path']}:{number}: {text}")
+            room = SEARCH_MAX_MATCHES - len(matches)
+            if room > 0:
+                found = matching_lines(row["path"], row["content"], pattern, room)
+                matches += found
+                hit = bool(found)
+            else:  # the list is full: only whether the file matches still counts, its first match is enough
+                hit = any(pattern.search(line) for line in row["content"].splitlines())
             files += hit
         if not matches:
             return f"No match for {query!r}."

@@ -21,16 +21,17 @@ the person decides: done, or remind me again).
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone, tzinfo
-from typing import Any, Awaitable, Callable, Iterable
+from datetime import UTC, datetime, timedelta, tzinfo
+from typing import Any
 
+from .dueloop import DueLoop
 from .memory import Memory, Person
 from .notifications import MAX_TITLE as MAX_NOTIFICATION_TITLE
 from .notifications import NotificationError, Notifier, clean_targets
-from .reminders import MAX_SLEEP, AnnounceFailed, ReminderError, _offset_name, _tzinfo, parse_moment
+from .reminders import AnnounceFailed, ReminderError, _offset_name, _tzinfo, parse_moment
 from .taskstore import DONE, OPEN, STATUSES, Task, TaskStore
 
 log = logging.getLogger(__name__)
@@ -71,14 +72,14 @@ Follower = Callable[[Task, datetime], Awaitable["Followup | None"]]
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def clock_of(zone: str) -> tzinfo:
     """The clock a task shows its times in: its timezone, or the server's own."""
     if zone:
         return _tzinfo(zone)
-    return datetime.now().astimezone().tzinfo or timezone.utc
+    return datetime.now().astimezone().tzinfo or UTC
 
 
 def local_text(moment: datetime, zone: str) -> str:
@@ -104,7 +105,7 @@ def default_reminders(due: datetime | None, now: datetime, zone: str) -> list[da
     morning = _morning(local)
     if morning <= local + timedelta(hours=2):
         morning = _morning(local + timedelta(days=1))
-    return [morning.astimezone(timezone.utc)]
+    return [morning.astimezone(UTC)]
 
 
 def default_follow_up(task: Task, now: datetime) -> list[datetime]:
@@ -118,12 +119,12 @@ def default_follow_up(task: Task, now: datetime) -> list[datetime]:
     overdue = task.due_at is not None
     days = 1 if overdue else min(2 ** max(task.reminders_sent, 0), 7)
     local = now.astimezone(clock_of(task.timezone))
-    return [_morning(local + timedelta(days=days)).astimezone(timezone.utc)]
+    return [_morning(local + timedelta(days=days)).astimezone(UTC)]
 
 
 def valid_reminders(moments: Iterable[datetime], now: datetime) -> list[datetime]:
     """The moments that can be reminders: in the future, not too far, each once, soonest first, at most MAX_QUEUE."""
-    kept = {m.astimezone(timezone.utc) for m in moments if now + timedelta(seconds=30) < m <= now + HORIZON}
+    kept = {m.astimezone(UTC) for m in moments if now + timedelta(seconds=30) < m <= now + HORIZON}
     return sorted(kept)[:MAX_QUEUE]
 
 
@@ -186,7 +187,7 @@ def task_detail(task: Task, subtasks: Iterable[str] = (), limit: str = "", count
     return "\n".join(lines)
 
 
-class TaskService:
+class TaskService(DueLoop):
     def __init__(
         self,
         memory: Memory,
@@ -537,7 +538,7 @@ class TaskService:
         except AnnounceFailed as error:
             log.warning("task %s: Clara could not pick the reminders (%s)", task.id, error)
             return task
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.warning("task %s: Clara took more than %g seconds to pick the reminders", task.id, self.plan_timeout)
             return task
         except Exception:
@@ -626,17 +627,5 @@ class TaskService:
             text += f"\n{task.description}"
         return text
 
-    async def run(self) -> None:
-        """The scheduler loop; runs for the life of the server."""
-        while True:
-            self._wake.clear()  # before looking: a task changed meanwhile wakes the next wait at once
-            try:
-                if not self.stopping:
-                    await self.fire_due()
-            except Exception:
-                log.exception("tasks: could not fire the due ones")
-            upcoming = self.store.next_due()
-            delay = MAX_SLEEP if upcoming is None or self.stopping else (upcoming - self._clock()).total_seconds()
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(self._wake.wait(), max(0.0, min(delay, MAX_SLEEP)))
-
+    def next_due(self) -> datetime | None:
+        return self.store.next_due()

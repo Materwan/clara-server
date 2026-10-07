@@ -6,7 +6,8 @@ import zipfile
 import pytest
 
 from clara.ingest import IngestError, docx_text, expand, extract, ignored, unpack
-from clara.projects import PROJECT_TOOLS, ProjectError, Projects
+from clara.projects import ProjectError, Projects
+from clara.tools import PROJECT_TOOLS
 
 
 def make_zip(files: dict[str, bytes | str]) -> bytes:

@@ -1,6 +1,6 @@
 import asyncio
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -155,10 +155,9 @@ async def test_consecutive_turns_share_the_system_prompt_and_the_replayed_histor
 
 
 async def test_the_timezone_of_the_client_sets_the_date_and_time(memory, tmp_path):
-    from datetime import timezone
 
     def clock(name):
-        return datetime(2026, 10, 2, 23, 30, tzinfo=timezone.utc).astimezone(ZoneInfo(name)) if name else None
+        return datetime(2026, 10, 2, 23, 30, tzinfo=UTC).astimezone(ZoneInfo(name)) if name else None
 
     backend = FakeBackend(say("ok"))
     agent = make_agent(memory, tmp_path, backend, clock=clock)

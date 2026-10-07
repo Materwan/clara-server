@@ -13,9 +13,9 @@ import os
 import re
 import sys
 import threading
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta
-from typing import Iterator
 
 import httpx
 from dotenv import load_dotenv

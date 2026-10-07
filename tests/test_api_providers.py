@@ -235,3 +235,15 @@ async def test_reasoning_and_signatures_go_back_with_the_calls_now_and_in_later_
     assert replayed[0]["thinking"] == "Look first."
     assert replayed[0]["tool_calls"][0]["extra_content"] == {"sig": "1"}
     assert untimed(fake.calls[2][0][-1]["content"]) == "and now?"
+
+
+async def test_one_connection_pool_serves_every_request_and_is_closed_at_the_end():
+    models = httpx.Response(200, json={"data": [{"id": "a"}]})
+    recorder = Recorder(models, httpx.Response(200, json={"data": [{"id": "a"}]}))
+    made = backend(recorder)
+    await made.list_models()
+    first = made._http.get()
+    await made.list_models()
+    assert made._http.get() is first and len(recorder.requests) == 2
+    await made.aclose()
+    assert first.is_closed

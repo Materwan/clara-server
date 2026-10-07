@@ -4,7 +4,7 @@ ones that were away."""
 import asyncio
 import json
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -23,7 +23,7 @@ from clara.tools import ToolContext, default_toolbox
 
 AUTH = {"Authorization": "Bearer secret-cli"}
 ME = {"surface": "cli", "user_id": "erwan"}
-NOW = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
 
 
 class Clock:
@@ -62,19 +62,19 @@ def at(**delta) -> str:
 
 def test_a_time_with_an_offset_is_converted_to_utc():
     moment, clock = parse_moment("2026-10-05T09:00+02:00", None)
-    assert moment == datetime(2026, 10, 5, 7, 0, tzinfo=timezone.utc)
+    assert moment == datetime(2026, 10, 5, 7, 0, tzinfo=UTC)
     assert clock == "+02:00"
 
 
 def test_a_time_without_offset_is_read_in_the_given_zone():
     moment, clock = parse_moment("2026-10-05T09:00", "Europe/Paris")  # summer time: UTC+2
-    assert moment == datetime(2026, 10, 5, 7, 0, tzinfo=timezone.utc)
+    assert moment == datetime(2026, 10, 5, 7, 0, tzinfo=UTC)
     assert clock == "Europe/Paris"
 
 
 def test_a_time_without_offset_or_zone_is_read_in_the_servers_zone():
     moment, clock = parse_moment("2026-10-05T09:00", None)
-    assert moment == datetime(2026, 10, 5, 9, 0).astimezone(timezone.utc)
+    assert moment == datetime(2026, 10, 5, 9, 0).astimezone(UTC)
     assert clock[0] in "+-"
 
 
@@ -180,9 +180,9 @@ def test_monthly_on_the_31st_is_the_28th_in_february_and_the_31st_again_after(se
 def test_a_repeat_keeps_the_wall_clock_across_daylight_saving(service, erwan):
     # Paris leaves summer time on 2026-10-25: 09:00 stays 09:00 (07:00 UTC, then 08:00 UTC)
     reminder = service.create(erwan, "Stand-up", "2026-10-24T09:00", "daily", "Europe/Paris")
-    assert reminder.due_at == datetime(2026, 10, 24, 7, 0, tzinfo=timezone.utc)
+    assert reminder.due_at == datetime(2026, 10, 24, 7, 0, tzinfo=UTC)
     after = next_occurrence(reminder, reminder.due_at)
-    assert after == datetime(2026, 10, 25, 8, 0, tzinfo=timezone.utc)
+    assert after == datetime(2026, 10, 25, 8, 0, tzinfo=UTC)
 
 
 # --- delivery to the clients ----------------------------------------------------------
@@ -335,7 +335,7 @@ async def test_the_scheduler_fires_a_reminder_set_while_it_sleeps(memory, erwan)
     stream = real.events(*CLI)
     waiting = asyncio.ensure_future(next_event(stream))
     await asyncio.sleep(0.05)
-    soon = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
+    soon = (datetime.now(UTC) + timedelta(seconds=1)).isoformat()
     real.create(erwan, "Now-ish", soon)
     try:
         assert (await asyncio.wait_for(waiting, 5))["text"] == "Now-ish"
@@ -411,7 +411,7 @@ def body(**fields) -> dict:
 
 
 def future() -> str:
-    return (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    return (datetime.now(UTC) + timedelta(days=1)).isoformat()
 
 
 def test_http_set_list_and_cancel(client):

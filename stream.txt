@@ -1,6 +1,0 @@
-event: server
-data: {"type": "server", "state": "running", "message": "Clara is running"}
-
-event: notification
-data: {"type": "notification", "id": 2, "title": "", "text": "for the app", "sent_at": "2026-10-02T21:56:41+00:00", "source": "t", "targets": ["app"], "conversation": null, "everyone": false}
-

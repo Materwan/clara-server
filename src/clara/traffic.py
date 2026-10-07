@@ -30,9 +30,10 @@ import re
 import threading
 import time
 import uuid
-from datetime import date, datetime, timedelta, timezone
+from collections.abc import AsyncIterator, Awaitable, Callable
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any, AsyncIterator, Awaitable, Callable
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -63,7 +64,7 @@ class TrafficLog:
         directory: Path,
         retention_days: int = 30,
         max_body: int = 100_000,
-        today: Callable[[], date] = lambda: datetime.now(timezone.utc).date(),
+        today: Callable[[], date] = lambda: datetime.now(UTC).date(),
     ):
         self.directory = directory
         self.retention_days = retention_days
@@ -95,7 +96,7 @@ class TrafficLog:
 
     def record(self, entry: dict[str, Any]) -> None:
         """Queue one entry. It is turned into text at once: what it refers to may change afterwards."""
-        stamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+        stamp = datetime.now(UTC).isoformat(timespec="milliseconds")
         try:
             line = json.dumps({"ts": stamp, **entry}, ensure_ascii=False, default=str)
         except (TypeError, ValueError) as error:
@@ -268,7 +269,7 @@ class TrafficMiddleware:
         client = scope.get("client")
         received: list[bytes] = []
         state = {"request_logged": False, "status": None, "sse": False, "events": 0, "tokens": 0, "size": 0}
-        sent: list[bytes] = []
+        sent: list[bytes] = []  # the start of a response body, kept to be logged (state["size"] counts all of it)
         parser = _SseParser()
 
         def log_request() -> None:
@@ -308,7 +309,7 @@ class TrafficMiddleware:
                             continue
                         state["events"] += 1
                         traffic.record({"dir": "out", "kind": "sse", **common, "event": kind, "data": traffic.body(data)})
-                elif sum(len(part) for part in sent) <= 4 * traffic.max_body:  # enough to be cut later
+                elif state["size"] - len(chunk) <= 4 * traffic.max_body:  # what was kept so far: enough to be cut later
                     sent.append(chunk)
             await send(message)
 

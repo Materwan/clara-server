@@ -7,8 +7,9 @@ apply the same rules: an account that is not signed in is refused, chime in is d
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import AsyncIterator, Protocol
+from typing import Protocol
 
 from ..limits import LIMIT_MARK
 

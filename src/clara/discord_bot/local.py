@@ -1,22 +1,24 @@
 """Clara inside this process, for the bot that runs in clara-server: no token, no HTTP.
 
 Each call goes through the same functions as the HTTP routes (the checks of auth.py, clientapi.py and the chat
-route of server.py), with the bot as the client `discord-bot`. Their HTTP errors come back as ClaraError with the
+route of chatapi.py), with the bot as the client `discord-bot`. Their HTTP errors come back as ClaraError with the
 same status, so the bot behaves the same whichever backend it has.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from pydantic import ValidationError
 
 from .. import clientapi
-from ..agent import ModelTimeout, PromptTooLarge, ServerStopping
+from ..apicommon import model_failure
 from ..auth import Caller, require_account, require_conversation
-from ..limits import UsageLimitReached
+from ..chatapi import ChatBody, checked
+from ..notificationapi import recipients
 from .backend import ClaraError, Reply
 
 log = logging.getLogger(__name__)
@@ -148,8 +150,6 @@ class LocalBackend:
         prefix: str = "",
         timezone: str | None = None,
     ) -> Reply:
-        from ..server import ChatBody  # the server module builds the application that holds this backend
-
         fields: dict[str, Any] = {
             "surface": SURFACE, "user_id": str(user_id), "user_name": display_name, "message": message, "mode": mode,
             "quiet": True, "conversation": conversation, "instructions": instructions, "prefix": prefix,
@@ -158,7 +158,7 @@ class LocalBackend:
         if space:
             fields.update(space=space, roster=roster or [], focus=[str(i) for i in focus or []])
         try:
-            request = self.state.check_chat(self.request, self.client, ChatBody(**fields))
+            request = checked(self.request, self.client, ChatBody(**fields))
         except HTTPException as error:
             raise ClaraError(error.status_code, str(error.detail)) from None
         except ValidationError as error:
@@ -167,17 +167,9 @@ class LocalBackend:
         try:
             async for event in self.state.agent.turn(request, self.client):
                 done = event
-        except PromptTooLarge as error:
-            raise ClaraError(413, str(error)) from None
-        except UsageLimitReached as error:
-            raise ClaraError(429, str(error)) from None
-        except ServerStopping as error:
-            raise ClaraError(503, str(error)) from None
-        except ModelTimeout as error:
-            raise ClaraError(504, str(error)) from None
-        except Exception:
-            log.exception("chat failed (client=%s)", self.client)
-            raise ClaraError(502, "The language model failed") from None
+        except Exception as error:  # the same answer as the chat route's
+            refused = model_failure(error, "chat", self.client)
+            raise ClaraError(refused.status_code, str(refused.detail)) from None
         answered = not done.get("observed") and not done.get("passed")
         return Reply(done.get("reply", "") if answered else "", done.get("conversation", ""), answered)
 
@@ -198,7 +190,7 @@ class LocalBackend:
         return await self._guard(clientapi.sync_spaces(body, self.client, self.request))
 
     async def events(self) -> AsyncIterator[dict]:
-        stream = self.state.notifier.surface_events(self.client, SURFACE, self.state.surface_recipients(SURFACE))
+        stream = self.state.notifier.surface_events(self.client, SURFACE, recipients(self.request, SURFACE))
         try:
             async for event in stream:
                 yield event

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import secrets
 import time
-from typing import Callable
+from collections.abc import Callable
 
 CODE_LIFETIME = 600.0  # seconds
 

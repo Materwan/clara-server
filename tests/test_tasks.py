@@ -2,7 +2,7 @@
 
 import asyncio
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from conftest import FakeBackend, fake_providers, say
@@ -32,7 +32,7 @@ from clara.tools import ToolContext, default_toolbox
 
 AUTH = {"Authorization": "Bearer secret-cli"}
 ME = {"surface": "cli", "user_id": "erwan"}
-NOW = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)  # a Friday
+NOW = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)  # a Friday
 ORIGIN = ("cli", "erwan", "cli:erwan")
 
 
@@ -88,13 +88,13 @@ def test_a_near_deadline_leaves_out_the_reminders_already_past():
 
 def test_a_task_without_a_deadline_is_reminded_tomorrow_morning_on_the_persons_clock():
     # 14:00 in Paris: nine o'clock today is behind us (or too close), so tomorrow at 09:00 Paris time (07:00 UTC)
-    assert default_reminders(None, NOW, "Europe/Paris") == [datetime(2026, 10, 3, 7, 0, tzinfo=timezone.utc)]
-    early = datetime(2026, 10, 2, 3, 0, tzinfo=timezone.utc)  # 05:00 in Paris: this morning is still to come
-    assert default_reminders(None, early, "Europe/Paris") == [datetime(2026, 10, 2, 7, 0, tzinfo=timezone.utc)]
+    assert default_reminders(None, NOW, "Europe/Paris") == [datetime(2026, 10, 3, 7, 0, tzinfo=UTC)]
+    early = datetime(2026, 10, 2, 3, 0, tzinfo=UTC)  # 05:00 in Paris: this morning is still to come
+    assert default_reminders(None, early, "Europe/Paris") == [datetime(2026, 10, 2, 7, 0, tzinfo=UTC)]
 
 
 def test_a_deadline_already_past_is_ignored_by_the_default_rule():
-    assert default_reminders(NOW - timedelta(days=1), NOW, "+00:00") == [datetime(2026, 10, 3, 9, 0, tzinfo=timezone.utc)]
+    assert default_reminders(NOW - timedelta(days=1), NOW, "+00:00") == [datetime(2026, 10, 3, 9, 0, tzinfo=UTC)]
 
 
 def _task(**changes):
@@ -113,7 +113,7 @@ def test_the_rules_go_halfway_to_the_deadline_then_to_the_deadline():
 
 def test_the_rules_come_back_each_morning_once_the_deadline_is_past():
     late = _task(due_at=NOW - timedelta(hours=1), reminders_sent=3)
-    assert default_follow_up(late, NOW) == [datetime(2026, 10, 3, 9, 0, tzinfo=timezone.utc)]
+    assert default_follow_up(late, NOW) == [datetime(2026, 10, 3, 9, 0, tzinfo=UTC)]
 
 
 def test_the_rules_wait_longer_each_time_when_there_is_no_deadline():
@@ -176,7 +176,7 @@ async def test_the_rules_stay_when_clara_cannot_pick(service, erwan, failure):
 
     service.planner, service.plan_timeout = planner, 0.1
     task = await service.create(erwan, "Water the plants", zone="Europe/Paris")
-    assert task.next == (datetime(2026, 10, 3, 7, 0, tzinfo=timezone.utc),)  # tomorrow 09:00 in Paris: the rules'
+    assert task.next == (datetime(2026, 10, 3, 7, 0, tzinfo=UTC),)  # tomorrow 09:00 in Paris: the rules'
 
 
 @pytest.mark.parametrize(
@@ -210,7 +210,7 @@ async def test_a_person_cannot_open_tasks_without_limit(service, erwan):
 
 async def test_a_time_without_offset_is_read_on_the_persons_clock(service, erwan):
     task = await service.create(erwan, "Meeting", due="2026-10-05T18:00", zone="Europe/Paris")
-    assert task.due_at == datetime(2026, 10, 5, 16, 0, tzinfo=timezone.utc)
+    assert task.due_at == datetime(2026, 10, 5, 16, 0, tzinfo=UTC)
     assert task.timezone == "Europe/Paris"
     assert "due 2026-10-05T18:00+02:00" in task_line(task)
 
@@ -531,7 +531,7 @@ async def test_clara_reads_the_reminders_she_picks_as_local_times(memory, tmp_pa
     task = await a_task(service, erwan)
     found = await plan(agent_with(memory, tmp_path, backend), task, NOW, 5)
     # read on the clock of the task (Paris, UTC+2), what cannot be read left out
-    assert found == [datetime(2026, 10, 3, 7, 0, tzinfo=timezone.utc), datetime(2026, 10, 4, 6, 0, tzinfo=timezone.utc)]
+    assert found == [datetime(2026, 10, 3, 7, 0, tzinfo=UTC), datetime(2026, 10, 4, 6, 0, tzinfo=UTC)]
     messages, tools = backend.calls[0]
     text = "\n".join(m["content"] for m in messages)
     assert "Task: Dentist" in text and "Description: Bring the card" in text and "Deadline: 2026-10-04T14:00+02:00" in text
@@ -542,7 +542,7 @@ async def test_she_may_wrap_the_json_in_a_fence_or_words(memory, tmp_path, servi
     task = await a_task(service, erwan)
     for answer in ('```json\n{"reminders": ["2026-10-03T09:00"]}\n```', 'Sure! {"reminders": ["2026-10-03T09:00"]} Done.'):
         found = await plan(agent_with(memory, tmp_path, FakeBackend(say(answer))), task, NOW, 5)
-        assert found == [datetime(2026, 10, 3, 7, 0, tzinfo=timezone.utc)]
+        assert found == [datetime(2026, 10, 3, 7, 0, tzinfo=UTC)]
     assert await plan(agent_with(memory, tmp_path, FakeBackend(say("no idea"))), task, NOW, 5) is None
 
 
@@ -551,7 +551,7 @@ async def test_the_follow_up_gives_clara_the_task_and_the_number_of_reminders_se
     task = await a_task(service, erwan, reminders=[at(hours=1), at(hours=6)])
     task = replace(task, reminders_sent=2)
     decision = await follow(agent_with(memory, tmp_path, backend), task, NOW + timedelta(hours=1), 5, 10)
-    assert decision == Followup("Your dentist is in 2 days, bring the card!", [datetime(2026, 10, 3, 16, 0, tzinfo=timezone.utc)])
+    assert decision == Followup("Your dentist is in 2 days, bring the card!", [datetime(2026, 10, 3, 16, 0, tzinfo=UTC)])
     text = "\n".join(m["content"] for m in backend.calls[0][0])
     assert "This is reminder number 3 of at most 10." in text and "Reminders sent before this one: 2" in text
     assert "Task: Dentist" in text and "Description: Bring the card" in text
@@ -631,7 +631,7 @@ async def test_the_whole_follow_up_through_the_scheduler(memory, tmp_path, servi
     await service.fire_due()
     [event] = sent(memory)
     assert event.text == "Dentist in two days!" and event.title == "Task: Dentist"
-    assert service.get(erwan, task.id).next == (datetime(2026, 10, 3, 8, 0, tzinfo=timezone.utc),)
+    assert service.get(erwan, task.id).next == (datetime(2026, 10, 3, 8, 0, tzinfo=UTC),)
 
 
 # --- the model's tools (natural language) -----------------------------------------------------------
@@ -657,7 +657,7 @@ async def test_the_model_adds_a_task_with_reminders_it_chose(memory, service, er
     assert "next reminder 2026-10-05T09:00+02:00" in out
     [task] = service.tasks(erwan)
     assert (task.surface, task.conversation, task.timezone) == ("cli", "cli:erwan", "Europe/Paris")
-    assert task.next == (datetime(2026, 10, 5, 7, 0, tzinfo=timezone.utc), datetime(2026, 10, 5, 14, 0, tzinfo=timezone.utc))
+    assert task.next == (datetime(2026, 10, 5, 7, 0, tzinfo=UTC), datetime(2026, 10, 5, 14, 0, tzinfo=UTC))
 
 
 async def test_the_model_may_leave_the_reminders_to_the_server(memory, service, erwan, toolbox):
@@ -712,7 +712,7 @@ async def test_the_model_is_told_about_a_surface_the_person_does_not_use(memory,
 # --- the routes -------------------------------------------------------------------------------------
 
 
-PLANNED = (datetime.now(timezone.utc) + timedelta(days=2)).strftime("%Y-%m-%dT09:00")  # within a year, on the real clock
+PLANNED = (datetime.now(UTC) + timedelta(days=2)).strftime("%Y-%m-%dT09:00")  # within a year, on the real clock
 
 
 @pytest.fixture

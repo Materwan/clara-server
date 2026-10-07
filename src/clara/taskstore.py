@@ -7,9 +7,9 @@ Only storage lives here: what a task is, which reminders are queued for it, how 
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Iterable
+from datetime import UTC, datetime
 
 from .memory import Memory, join_targets, split_targets
 
@@ -45,7 +45,7 @@ class Task:
 
 def _stamp(moment: datetime) -> str:
     """ISO text in UTC: these strings sort in time order."""
-    return moment.astimezone(timezone.utc).isoformat(timespec="seconds")
+    return moment.astimezone(UTC).isoformat(timespec="seconds")
 
 
 def _moment(text: str | None) -> datetime | None:
@@ -112,7 +112,7 @@ class TaskStore:
                     "SELECT * FROM tasks WHERE person_id = ? AND status = ?", (person_id, status)
                 ).fetchall()
             found = self._tasks(rows)
-        far = datetime.max.replace(tzinfo=timezone.utc)
+        far = datetime.max.replace(tzinfo=UTC)
         return sorted(
             found,
             key=lambda t: (t.status != OPEN, t.next_reminder or t.due_at or far, t.due_at or far, t.id),

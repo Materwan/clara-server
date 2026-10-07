@@ -45,7 +45,7 @@ import sqlite3
 import threading
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .qcm import forms_in
@@ -91,6 +91,7 @@ CREATE TABLE IF NOT EXISTS messages (
     tool_name    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages (conversation, id);
+CREATE INDEX IF NOT EXISTS idx_messages_person ON messages (person_id);
 CREATE TABLE IF NOT EXISTS conversation_state (
     conversation   TEXT PRIMARY KEY,
     summary        TEXT NOT NULL DEFAULT '',
@@ -115,6 +116,7 @@ CREATE TABLE IF NOT EXISTS reminder_events (
     due_at    TEXT NOT NULL,
     fired_at  TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_reminder_events_fired ON reminder_events (fired_at);
 CREATE TABLE IF NOT EXISTS reminder_cursors (
     client        TEXT PRIMARY KEY,
     last_event_id INTEGER NOT NULL
@@ -207,6 +209,7 @@ CREATE TABLE IF NOT EXISTS project_files (
     added_at   TEXT NOT NULL,
     UNIQUE (project_id, path)
 );
+CREATE INDEX IF NOT EXISTS idx_project_files_source ON project_files (source_id);
 CREATE TABLE IF NOT EXISTS usage (
     person_id INTEGER NOT NULL REFERENCES people (id) ON DELETE CASCADE,
     day       TEXT NOT NULL,
@@ -412,6 +415,12 @@ _ADDED_COLUMNS = {
 }
 
 
+# Indexes on columns of _ADDED_COLUMNS: created after them (an older database does not have the column at first)
+_INDEXES_ON_ADDED_COLUMNS = (
+    "CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations (project_id)",
+)
+
+
 class MergeRefused(ValueError):
     """Both people already have facts or history: merging them is irreversible."""
 
@@ -567,7 +576,7 @@ class ConversationState:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def join_targets(targets: tuple[str, ...] | list[str]) -> str:
@@ -578,9 +587,14 @@ def split_targets(stored: str) -> tuple[str, ...]:
     return tuple(part for part in (stored or "").split("|") if part)
 
 
+def escape_like(text: str) -> str:
+    """`text` for a LIKE pattern, its own %, _ and \\ taken literally (with ESCAPE '\\')."""
+    return re.sub(r"([\\%_])", r"\\\1", text)
+
+
 def _like(text: str) -> str:
-    """A LIKE pattern matching `text` anywhere, its own % and _ taken literally (with ESCAPE '\\')."""
-    return "%" + re.sub(r"([\\%_])", r"\\\1", text) + "%"
+    """A LIKE pattern matching `text` anywhere."""
+    return f"%{escape_like(text)}%"
 
 
 def _one_line(text: str) -> str:
@@ -608,6 +622,8 @@ class Memory:
                 if column not in present:
                     self._db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
         self._migrate_fact_keys()
+        for statement in _INDEXES_ON_ADDED_COLUMNS:
+            self._db.execute(statement)
         self._db.commit()
 
     def _migrate_fact_keys(self) -> None:
@@ -753,28 +769,27 @@ class Memory:
         alone: list[str] = []
         shared: list[str] = []
         for row in self._db.execute(
-            "SELECT DISTINCT conversation FROM messages WHERE person_id = ?", (person_id,)
+            "SELECT c.conversation, EXISTS (SELECT 1 FROM messages o WHERE o.conversation = c.conversation"
+            " AND o.role = 'user' AND o.person_id IS NOT ?) AS others"
+            " FROM (SELECT DISTINCT conversation FROM messages WHERE person_id = ?) c",
+            (person_id, person_id),
         ).fetchall():
-            others = self._db.execute(
-                "SELECT 1 FROM messages WHERE conversation = ? AND role = 'user' AND person_id IS NOT ?"
-                " LIMIT 1",
-                (row["conversation"], person_id),
-            ).fetchone()
-            (shared if others else alone).append(row["conversation"])
+            (shared if row["others"] else alone).append(row["conversation"])
         return alone, shared
 
     def footprint(self, person_id: int) -> Footprint:
         with self._lock:
             alone, shared = self._conversations_of(person_id)
-            messages = sum(
-                self._db.execute("SELECT COUNT(*) FROM messages WHERE conversation = ?", (c,)).fetchone()[0]
-                for c in alone
-            ) + sum(
-                self._db.execute(
-                    "SELECT COUNT(*) FROM messages WHERE conversation = ? AND person_id = ?", (c, person_id)
-                ).fetchone()[0]
-                for c in shared
-            )
+            # every message of the conversations they were alone in, only their own in the shared ones
+            messages = self._db.execute(
+                "SELECT COUNT(*) FROM messages m JOIN (SELECT value AS conversation FROM json_each(?)) a"
+                " ON a.conversation = m.conversation",
+                (json.dumps(alone),),
+            ).fetchone()[0] + self._db.execute(
+                "SELECT COUNT(*) FROM messages m JOIN (SELECT value AS conversation FROM json_each(?)) s"
+                " ON s.conversation = m.conversation WHERE m.person_id = ?",
+                (json.dumps(shared), person_id),
+            ).fetchone()[0]
             return Footprint(
                 len(self.accounts_of(person_id)), self.fact_count(person_id), messages, len(alone) + len(shared)
             )
@@ -919,12 +934,16 @@ class Memory:
 
     def set_notify_after(self, person_id: int, seconds: int | None) -> int | None:
         """Set it (0: never; at most MAX_NOTIFY_AFTER), or go back to the server's default (None)."""
+        return self._set_delay("notify_after", person_id, seconds)
+
+    def _set_delay(self, column: str, person_id: int, seconds: int | None) -> int | None:
+        """Store one of a person's delays (`column` is ours: notify_after or approval_notify_after)."""
         if seconds is not None:
             seconds = int(seconds)
             if not 0 <= seconds <= MAX_NOTIFY_AFTER:
                 raise ValueError(f"A delay is 0 (never) to {MAX_NOTIFY_AFTER} seconds.")
         with self._lock, self._db:
-            self._db.execute("UPDATE people SET notify_after = ? WHERE id = ?", (seconds, person_id))
+            self._db.execute(f"UPDATE people SET {column} = ? WHERE id = ?", (seconds, person_id))
         return seconds
 
     def approval_notify_after(self, person_id: int) -> int | None:
@@ -937,13 +956,7 @@ class Memory:
         return row["approval_notify_after"] if row else None
 
     def set_approval_notify_after(self, person_id: int, seconds: int | None) -> int | None:
-        if seconds is not None:
-            seconds = int(seconds)
-            if not 0 <= seconds <= MAX_NOTIFY_AFTER:
-                raise ValueError(f"A delay is 0 (never) to {MAX_NOTIFY_AFTER} seconds.")
-        with self._lock, self._db:
-            self._db.execute("UPDATE people SET approval_notify_after = ? WHERE id = ?", (seconds, person_id))
-        return seconds
+        return self._set_delay("approval_notify_after", person_id, seconds)
 
     # ------------------------------------------------------------------
     # Spaces (the group places of a client) and run-time options
@@ -1090,7 +1103,7 @@ class Memory:
     @staticmethod
     def _stamp(moment: datetime) -> str:
         """ISO text in UTC: these strings sort in time order."""
-        return moment.astimezone(timezone.utc).isoformat(timespec="seconds")
+        return moment.astimezone(UTC).isoformat(timespec="seconds")
 
     @staticmethod
     def _reminder(row: sqlite3.Row) -> Reminder:
@@ -1194,18 +1207,16 @@ class Memory:
                 "SELECT name FROM people WHERE id = ?", (reminder.person_id,)
             ).fetchone()
         return ReminderEvent(
-            cursor.lastrowid,
-            reminder.text,
-            self._stamp(reminder.due_at),
-            self._stamp(now),
-            author["name"] if author else None,
-            message,
-            "reminder",
-            "",
-            reminder.targets,
-            "",
-            reminder.person_id,
-            reminder.conversation,
+            id=cursor.lastrowid,
+            text=reminder.text,
+            due_at=self._stamp(reminder.due_at),
+            fired_at=self._stamp(now),
+            author=author["name"] if author else None,
+            message=message,
+            kind="reminder",
+            targets=reminder.targets,
+            person_id=reminder.person_id,
+            conversation=reminder.conversation,
         )
 
     def add_notification(
@@ -1365,6 +1376,23 @@ class Memory:
                 (conversation, after_id),
             ).fetchall()
         return [self._stored(row) for row in rows]
+
+    def message_count(self, conversation: str, after_id: int = 0) -> int:
+        """How many messages (of every role) a conversation has after `after_id`."""
+        with self._lock:
+            return self._db.execute(
+                "SELECT COUNT(*) FROM messages WHERE conversation = ? AND id > ?", (conversation, after_id)
+            ).fetchone()[0]
+
+    def first_exchange(self, conversation: str) -> tuple[str, str]:
+        """The first question of a conversation still stored, and the first answer that has text ("": none)."""
+        first = (
+            "SELECT content FROM messages WHERE conversation = ? AND role = ? AND content != '' ORDER BY id LIMIT 1"
+        )
+        with self._lock:
+            question = self._db.execute(first, (conversation, "user")).fetchone()
+            answer = self._db.execute(first, (conversation, "assistant")).fetchone()
+        return (question[0] if question else "", answer[0] if answer else "")
 
     def last_message_id(self, conversation: str) -> int:
         with self._lock:

@@ -3,7 +3,7 @@
 import asyncio
 import time
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -18,7 +18,7 @@ from clara.server import create_app
 from clara.tools import NOTIFY_PER_TURN, ToolContext, default_toolbox
 
 AUTH = {"Authorization": "Bearer secret-cli"}
-NOW = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
 
 
 @pytest.fixture
@@ -336,3 +336,16 @@ async def test_the_model_notifies_through_a_turn(memory, tmp_path, notifier):
     final = await talk(agent, "Tell me when ready")
     assert final["tools"] == ["notify"]
     assert [event.text for event in notifications(memory)] == ["Ready!"]
+
+
+def test_old_events_are_deleted_at_most_once_an_hour(memory, erwan, monkeypatch):
+    now = [datetime(2026, 10, 1, 9, 0, tzinfo=UTC)]
+    notifier = Notifier(memory, clock=lambda: now[0])
+    pruned: list = []
+    monkeypatch.setattr(memory, "prune_reminder_events", lambda before: pruned.append(before) or 0)
+    notifier.notify(erwan.id, "one", limited=False)
+    notifier.notify(erwan.id, "two", limited=False)
+    assert len(pruned) == 1  # not one delete per notification
+    now[0] = now[0].replace(hour=10)
+    notifier.notify(erwan.id, "three", limited=False)
+    assert len(pruned) == 2

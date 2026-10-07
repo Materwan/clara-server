@@ -13,7 +13,8 @@ import contextlib
 import importlib.util
 import logging
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -210,7 +211,7 @@ class DiscordService:
                 await bot.close()
             try:
                 await asyncio.wait_for(asyncio.shield(task), 15)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 task.cancel()
                 with contextlib.suppress(BaseException):
                     await task

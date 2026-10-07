@@ -17,8 +17,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 
 from ..memory import Memory
 from ..notifications import SERVER, NotificationError, Notifier
@@ -56,7 +56,7 @@ class Approvals:
         self.notifier = notifier
         self.default_notify_after = notify_after
         self.expire_after = expire_after
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
         self.followup: FollowUp | None = None  # runs the follow-up turn (set by the server, which has the agent)
         self.followup_delay = FOLLOWUP_DELAY
         self._scheduled: set[str] = set()

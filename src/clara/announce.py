@@ -45,11 +45,11 @@ async def compose(agent: Agent, reminder: Reminder, timeout: float) -> str | Non
     if not (reminder.surface and reminder.user_id):  # set before the place was kept
         return None
     request = ChatRequest(
-        reminder.surface,
-        reminder.user_id,
-        None,
-        f"[Reminder due] {reminder.text}",
-        reminder.conversation or None,
+        surface=reminder.surface,
+        user_id=reminder.user_id,
+        user_name=None,
+        message=f"[Reminder due] {reminder.text}",
+        conversation=reminder.conversation or None,
         instructions=INSTRUCTIONS,
         timezone=_iana(reminder.timezone),
         no_tools=True,
@@ -65,7 +65,7 @@ async def compose(agent: Agent, reminder: Reminder, timeout: float) -> str | Non
 
     try:
         message = (await asyncio.wait_for(write(), timeout)).strip()
-    except asyncio.TimeoutError:
+    except TimeoutError:
         log.warning("reminder %s: Clara took more than %g seconds to write it", reminder.id, timeout)
         raise AnnounceFailed(f"the model took more than {timeout:g} seconds") from None
     except Exception as error:

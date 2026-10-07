@@ -13,8 +13,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Awaitable, Callable
 
 log = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ async def run_command(args: list[str], timeout: float) -> CommandOutput:
     try:
         try:
             out, _ = await asyncio.wait_for(process.communicate(), timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             process.kill()
             out, _ = await process.communicate()
             return CommandOutput(None, out.decode(errors="replace").strip())

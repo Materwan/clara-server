@@ -104,3 +104,6 @@ class Connector:
         if handler is None:
             raise ConnectorError(f"{target.label} does not support {op}.")
         return await handler(target, args)
+
+    async def aclose(self) -> None:
+        """Close what the connector keeps open (its HTTP client), when the server stops."""

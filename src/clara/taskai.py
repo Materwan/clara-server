@@ -102,8 +102,8 @@ async def _ask(agent: Agent, task: Task, message: str, instructions: str, timeou
     if person is None or person.id != task.person_id:  # no account to ask on, or it is somebody else's now
         raise AnnounceFailed("the account the task was set from is gone")
     request = ChatRequest(
-        task.surface, task.user_id, None, message, None, instructions=instructions, ephemeral=True, quiet=True,
-        timezone=_iana(task.timezone),
+        surface=task.surface, user_id=task.user_id, user_name=None, message=message, instructions=instructions,
+        ephemeral=True, quiet=True, timezone=_iana(task.timezone),
     )
 
     async def write() -> str:
@@ -115,7 +115,7 @@ async def _ask(agent: Agent, task: Task, message: str, instructions: str, timeou
 
     try:
         answer = (await asyncio.wait_for(write(), timeout)).strip()
-    except asyncio.TimeoutError:
+    except TimeoutError:
         raise AnnounceFailed(f"the model took more than {timeout:g} seconds") from None
     except Exception as error:
         raise AnnounceFailed(f"the model failed: {type(error).__name__}") from None

@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Callable
 
 from ...ingest import IGNORED_DIRS, IngestError, decode_text, extract, ignored
 from ...projects import SEARCH_MAX_MATCHES, matching_lines, read_lines, search_pattern

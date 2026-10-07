@@ -137,7 +137,7 @@ def backend():
 def app(settings, backend, google):
     configured = replace(settings, google_client_id="client-id", google_client_secret="client-secret", public_url=PUBLIC)
     app = create_app(configured, fake_providers(configured, backend))
-    app.state.integrations.connectors["gdrive"]._transport = httpx.MockTransport(google.handler)
+    app.state.integrations.connectors["gdrive"]._http.transport = httpx.MockTransport(google.handler)
     return app
 
 

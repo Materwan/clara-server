@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import ipaddress
 import time
-from typing import Callable
+from collections.abc import Callable
 
 WINDOW_SECONDS = 60.0
 MAX_TRACKED = 10_000  # addresses remembered at most; an attack from many addresses must not fill the memory

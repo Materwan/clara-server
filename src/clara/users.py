@@ -16,9 +16,9 @@ import hashlib
 import hmac
 import re
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Callable
+from datetime import UTC, datetime, timedelta
 
 from .memory import Memory, Person
 
@@ -57,7 +57,7 @@ class Session:
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _stamp(moment: datetime) -> str:

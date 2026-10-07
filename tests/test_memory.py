@@ -73,3 +73,24 @@ def test_history_is_per_conversation_and_ordered(memory):
     assert memory.clear_conversation("a") == 4
     assert memory.history("a", 10) == []
     assert len(memory.history("b", 10)) == 2
+
+
+def test_counting_and_the_first_exchange_read_only_what_they_need(memory):
+    erwan = memory.resolve("cli", "erwan", "Erwan")
+    assert memory.message_count("cli:erwan") == 0 and memory.first_exchange("cli:erwan") == ("", "")
+    memory.add_exchange("cli:erwan", erwan.id, "First question", "First answer")
+    memory.add_exchange("cli:erwan", erwan.id, "Second question", "Second answer")
+    assert memory.message_count("cli:erwan") == 4
+    first_id = memory.messages_after("cli:erwan")[1].id
+    assert memory.message_count("cli:erwan", after_id=first_id) == 2
+    assert memory.first_exchange("cli:erwan") == ("First question", "First answer")
+
+
+def test_the_footprint_counts_a_conversation_alone_whole_and_a_shared_one_in_part(memory):
+    erwan = memory.resolve("cli", "erwan", "Erwan")
+    paul = memory.resolve("cli", "paul", "Paul")
+    memory.add_exchange("cli:erwan", erwan.id, "mine", "answer")  # alone: 2 messages
+    memory.add_exchange("group", erwan.id, "hello", "hi")  # shared: only erwan's own message counts
+    memory.add_exchange("group", paul.id, "hey", "hey you")
+    found = memory.footprint(erwan.id)
+    assert (found.messages, found.conversations) == (3, 2)

@@ -2,7 +2,7 @@
 
 import asyncio
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -38,7 +38,7 @@ def test_a_time_of_day_is_today_if_it_is_ahead_and_tomorrow_if_it_has_passed():
 def test_tomorrow_and_a_full_date():
     assert parse_remind("tomorrow 9:05 Dentist", NOW)[0] == datetime(2026, 10, 3, 9, 5, tzinfo=PARIS)
     due, _, text = parse_remind("2026-12-24 20:00 Gifts", NOW)
-    assert due.astimezone(timezone.utc).replace(tzinfo=None) == datetime(2026, 12, 24, 20, 0) - due.utcoffset()
+    assert due.astimezone(UTC).replace(tzinfo=None) == datetime(2026, 12, 24, 20, 0) - due.utcoffset()
     assert text == "Gifts"
 
 
@@ -77,13 +77,13 @@ def event(**fields) -> dict:
 
 
 def test_a_reminder_that_just_fired_is_shown_plainly():
-    shown = format_reminder(event(), datetime(2026, 10, 2, 10, 0, 5, tzinfo=timezone.utc))
+    shown = format_reminder(event(), datetime(2026, 10, 2, 10, 0, 5, tzinfo=UTC))
     assert "Dentist" in shown
     assert "missed" not in shown
 
 
 def test_a_reminder_that_fired_while_away_says_so():
-    shown = format_reminder(event(), datetime(2026, 10, 2, 15, 0, tzinfo=timezone.utc))
+    shown = format_reminder(event(), datetime(2026, 10, 2, 15, 0, tzinfo=UTC))
     assert "missed, it was due" in shown
 
 
@@ -116,9 +116,9 @@ def notification(**fields) -> dict:
 
 
 def test_a_notification_shows_its_title_and_text():
-    shown = format_event(notification(), datetime(2026, 10, 2, 10, 0, 5, tzinfo=timezone.utc))
+    shown = format_event(notification(), datetime(2026, 10, 2, 10, 0, 5, tzinfo=UTC))
     assert "Answer ready: Clara has finished." in shown and "sent" not in shown
-    late = format_event(notification(title=""), datetime(2026, 10, 2, 15, 0, tzinfo=timezone.utc))
+    late = format_event(notification(title=""), datetime(2026, 10, 2, 15, 0, tzinfo=UTC))
     assert "🔔 Clara has finished.  (sent " in late
 
 
@@ -144,7 +144,7 @@ def test_the_client_receives_a_reminder_from_a_real_server(live):
     api.cancel_reminder(created["id"])
     assert api.reminders() == []
 
-    app.state.memory.add_reminder(person.id, "Announced", datetime.now(timezone.utc))
+    app.state.memory.add_reminder(person.id, "Announced", datetime.now(UTC))
     asyncio.run(app.state.reminders.fire_due())
     sent = api.notify("Build finished", targets=["cli"])
     assert sent["targets"] == ["cli"]
@@ -185,7 +185,7 @@ def test_a_notification_delay_that_is_not_seconds_is_refused(text):
 
 
 def test_the_message_clara_wrote_is_shown_instead_of_the_reminder_name():
-    shown = format_reminder(event(message="Erwan, your dentist is waiting!"), datetime(2026, 10, 2, 10, 0, 5, tzinfo=timezone.utc))
+    shown = format_reminder(event(message="Erwan, your dentist is waiting!"), datetime(2026, 10, 2, 10, 0, 5, tzinfo=UTC))
     assert "your dentist is waiting" in shown and "Dentist" not in shown
 
 

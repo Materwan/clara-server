@@ -22,6 +22,7 @@ from urllib.parse import urlencode
 
 import httpx
 
+from ...httpclient import SharedClient
 from ...ingest import IngestError, extract
 from ...projects import read_lines
 from ..permissions import DESTRUCTIVE, GDRIVE, WRITE
@@ -74,14 +75,16 @@ class GoogleDrive(Connector):
     def __init__(self, client_id: str, client_secret: str, transport: httpx.AsyncBaseTransport | None = None):
         self.client_id = client_id
         self.client_secret = client_secret
-        self._transport = transport  # tests answer from here
+        self._http = SharedClient(timeout=TIMEOUT, follow_redirects=True, transport=transport)  # transport: tests
         self._access: dict[str, tuple[str, float]] = {}  # refresh token -> (access token, expires at)
+
+    async def aclose(self) -> None:
+        await self._http.aclose()
 
     # -- talking to Google ----------------------------------------------------------------------- #
     async def _send(self, method: str, url: str, headers: dict, **options: Any) -> httpx.Response:
         try:
-            async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True, transport=self._transport) as client:
-                return await client.request(method, url, headers=headers, **options)
+            return await self._http.get().request(method, url, headers=headers, **options)
         except httpx.HTTPError as error:
             raise ConnectorError(f"Google could not be reached: {error}") from None
 
@@ -343,7 +346,7 @@ class GoogleDrive(Connector):
         body = (
             f"--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{json.dumps(metadata)}\r\n"
             f"--{boundary}\r\nContent-Type: {mime}\r\n\r\n{content}\r\n--{boundary}--"
-        ).encode("utf-8")
+        ).encode()
         url = f"{UPLOAD}/files/{file_id}" if file_id else f"{UPLOAD}/files"
         response = await self.request(
             target.token, "PATCH" if file_id else "POST", url,

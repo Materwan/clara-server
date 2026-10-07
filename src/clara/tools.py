@@ -13,18 +13,19 @@ from __future__ import annotations
 import inspect
 import logging
 import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from .markdownfiles import READ_MAX_CHARS as MARKDOWN_READ_CHARS
 from .markdownfiles import SURFACES as MARKDOWN_SURFACES
-from .markdownfiles import MarkdownError, MarkdownFile, MarkdownFiles
+from .markdownfiles import MarkdownFile, MarkdownFiles
 from .memory import Memory, Person
-from .notifications import CLARA, NotificationError, Notifier
+from .notifications import CLARA, Notifier
 from .projects import READ_MAX_LINES, Projects
 from .qcm import MAX_OPTION, MAX_OPTIONS, MAX_QUESTION, MAX_QUESTIONS, MIN_OPTIONS, TYPES, build_form
-from .reminders import REPEATS, ReminderError, ReminderService
-from .tasks import NO_DUE, TaskError, TaskService
+from .reminders import REPEATS, ReminderService
+from .tasks import NO_DUE, TaskService
 from .taskstore import DONE, OPEN, STATUSES
 from .web import WebClient, WebError
 
@@ -38,13 +39,6 @@ NOTIFY_PER_TURN = 3  # notifications the model may send in one turn
 RELATION_STEP_UP = 10  # the most one answer may move a relationship, up and down
 RELATION_STEP_DOWN = -25
 ABOUT_PERSON = "about_person"  # only offered when other people with an account are here
-MARKDOWN_TOOLS = frozenset(
-    {"create_markdown_file", "edit_markdown_file", "append_markdown_file", "read_markdown_file", "list_markdown_files"}
-)  # the tools of markdown_tools(): hidden from a turn that has no files to write (agent.py)
-INTEGRATION_TOOLS = frozenset(
-    {"resources", "res_list", "res_read", "res_search", "res_write", "res_delete", "res_move", "github_branch",
-     "github_pr", "github_issue"}
-)  # the tools of integration_tools(): hidden from a turn that has nothing connected (agent.py)
 ABOUT_LIMIT = 30  # facts about_person gives without a query (the newest)
 QCM = "qcm"  # only offered to the clients that can show a form (see qcm.SURFACES)
 
@@ -121,6 +115,8 @@ class Tool:
     function: Callable[..., str]
     parameters: dict[str, dict]
     required: tuple[str, ...] = ()
+    # It only reads, over the network: several calls of it in one round run at the same time (agent.py)
+    parallel: bool = False
 
     @property
     def schema(self) -> dict:
@@ -146,6 +142,11 @@ class Toolbox:
     @property
     def names(self) -> frozenset[str]:
         return frozenset(self._tools)
+
+    def parallel(self, name: str) -> bool:
+        """May calls of this tool run at the same time as others of the same kind?"""
+        tool = self._tools.get(name)
+        return tool is not None and tool.parallel
 
     def schemas_without(self, names: set[str]) -> list[dict]:
         """The schemas, but for the tools named (those that make no sense in this turn)."""
@@ -180,6 +181,14 @@ class Toolbox:
             return "Error: the tool failed."
 
 
+def _whole_number(value: Any, problem: str) -> int:
+    """`value` as an int (the model may send "12"); ValueError(`problem`) if it is not one."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ValueError(problem) from None
+
+
 def _remember(context: ToolContext, fact: str) -> str:
     stored = context.memory.add_fact(context.person.id, str(fact))
     if stored is None:
@@ -188,10 +197,7 @@ def _remember(context: ToolContext, fact: str) -> str:
 
 
 def _forget(context: ToolContext, fact_id: Any) -> str:
-    try:
-        number = int(fact_id)
-    except (TypeError, ValueError):
-        raise ValueError("fact_id must be the number shown in brackets.") from None
+    number = _whole_number(fact_id, "fact_id must be the number shown in brackets.")
     if context.memory.delete_fact(context.person.id, number):
         return "Forgotten."
     return "No such fact for this person."
@@ -207,13 +213,9 @@ def _recall_facts(context: ToolContext, query: str) -> str:
 def _remind(context: ToolContext, text: str, when: str, repeat: str = "", targets: Any = None) -> str:
     if context.reminders is None:
         raise ValueError("Reminders are not available.")
-    try:
-        reminder = context.reminders.create(
-            context.person, str(text), str(when), str(repeat or ""), context.timezone, context.origin,
-            _targets(targets),
-        )
-    except ReminderError as error:
-        raise ValueError(str(error)) from None
+    reminder = context.reminders.create(
+        context.person, str(text), str(when), str(repeat or ""), context.timezone, context.origin, _targets(targets)
+    )
     again = f", then {reminder.repeat}" if reminder.repeat else ""
     return (
         f"Reminder {reminder.id} set for {reminder.due_at.isoformat(timespec='seconds')} (UTC){again}, "
@@ -240,12 +242,9 @@ def _notify(context: ToolContext, text: str, title: str = "", targets: Any = Non
     sent = context.counts.get("notify", 0)
     if sent >= NOTIFY_PER_TURN:
         raise ValueError(f"At most {NOTIFY_PER_TURN} notifications per answer.")
-    try:
-        event = context.notifier.notify(
-            context.person.id, str(text), str(title or ""), _targets(targets), CLARA, context.conversation
-        )
-    except NotificationError as error:
-        raise ValueError(str(error)) from None
+    event = context.notifier.notify(
+        context.person.id, str(text), str(title or ""), _targets(targets), CLARA, context.conversation
+    )
     context.counts["notify"] = sent + 1
     return f"Notification {event.id} sent{_where(context, event.targets)}."
 
@@ -267,10 +266,7 @@ def _qcm(context: ToolContext, questions: Any, title: str = "") -> str:
 def _cancel_reminder(context: ToolContext, reminder_id: Any) -> str:
     if context.reminders is None:
         raise ValueError("Reminders are not available.")
-    try:
-        number = int(reminder_id)
-    except (TypeError, ValueError):
-        raise ValueError("reminder_id must be the number shown in brackets.") from None
+    number = _whole_number(reminder_id, "reminder_id must be the number shown in brackets.")
     return "Cancelled." if context.reminders.cancel(context.person, number) else "No such reminder of yours."
 
 
@@ -298,10 +294,7 @@ def _texts(value: Any) -> list[str]:
 
 
 def _task_number(task_id: Any) -> int:
-    try:
-        return int(task_id)
-    except (TypeError, ValueError):
-        raise ValueError("task_id must be the number shown in brackets.") from None
+    return _whole_number(task_id, "task_id must be the number shown in brackets.")
 
 
 async def _add_task(
@@ -309,26 +302,20 @@ async def _add_task(
     parent_id: Any = None,
 ) -> str:
     service = _task_service(context)
-    try:
-        task = await service.create(
-            context.person, str(title), str(description or ""), str(due) if due else None, _texts(reminders),
-            context.timezone, context.origin, _targets(targets),
-            None if parent_id in (None, "") else _task_number(parent_id),
-        )
-    except TaskError as error:
-        raise ValueError(str(error)) from None
+    task = await service.create(
+        context.person, str(title), str(description or ""), str(due) if due else None, _texts(reminders),
+        context.timezone, context.origin, _targets(targets),
+        None if parent_id in (None, "") else _task_number(parent_id),
+    )
     shown = f"\nReminders are shown{_where(context, task.targets)}." if task.targets else ""
     return f"{'Sub task' if task.parent_id else 'Task'} added.\n{service.detail(task)}{shown}"
 
 
 def _list_tasks(context: ToolContext, task_id: Any = None, status: str = OPEN) -> str:
     tasks = _task_service(context)
-    try:
-        if task_id not in (None, ""):
-            return tasks.detail(tasks.get(context.person, _task_number(task_id)))
-        found = tasks.tasks(context.person, None if status == "all" else status)
-    except TaskError as error:
-        raise ValueError(str(error)) from None
+    if task_id not in (None, ""):
+        return tasks.detail(tasks.get(context.person, _task_number(task_id)))
+    found = tasks.tasks(context.person, None if status == "all" else status)
     if not found:
         return "No task." if status == "all" else f"No {status} task."
     return "\n".join(tasks.line(task) for task in found)
@@ -347,25 +334,24 @@ async def _update_task(
     number = _task_number(task_id)
     if status not in (None, *STATUSES):
         raise ValueError("status must be open or done.")
-    try:
-        was_open = tasks.get(context.person, number).status == OPEN
-        times = None if reminders is None else _texts(reminders)
-        if status == DONE and times:
-            raise TaskError("A task that is done is not reminded: reopen it to set reminders.")
-        settling = status is not None and (status == OPEN) != was_open
-        if any(v is not None for v in (title, description, times)) and not (settling and times) or due is not NO_DUE:
-            tasks.update(
-                context.person, number, None if title is None else str(title),
-                None if description is None else str(description), due if due is NO_DUE or not due else str(due),
-                None if settling else times, None, context.timezone,
-            )
-        if settling and status == DONE:
-            tasks.complete(context.person, number)
-        elif settling:
-            await tasks.reopen(context.person, number, times, context.timezone)
-        return f"Task updated.\n{tasks.detail(tasks.get(context.person, number))}"
-    except TaskError as error:
-        raise ValueError(str(error)) from None
+    was_open = tasks.get(context.person, number).status == OPEN
+    times = None if reminders is None else _texts(reminders)
+    if status == DONE and times:
+        raise ValueError("A task that is done is not reminded: reopen it to set reminders.")
+    settling = status is not None and (status == OPEN) != was_open  # it is done, or opened again
+    # Reopening sets the reminders itself: `times` alone is no reason to update a task being reopened
+    edits_fields = any(value is not None for value in (title, description, times)) and not (settling and times)
+    if edits_fields or due is not NO_DUE:
+        tasks.update(
+            context.person, number, None if title is None else str(title),
+            None if description is None else str(description), due if due is NO_DUE or not due else str(due),
+            None if settling else times, None, context.timezone,
+        )
+    if settling and status == DONE:
+        tasks.complete(context.person, number)
+    elif settling:
+        await tasks.reopen(context.person, number, times, context.timezone)
+    return f"Task updated.\n{tasks.detail(tasks.get(context.person, number))}"
 
 
 def _delete_task(context: ToolContext, task_id: Any) -> str:
@@ -375,10 +361,7 @@ def _delete_task(context: ToolContext, task_id: Any) -> str:
 def _adjust_relation(context: ToolContext, change: Any, reason: str = "") -> str:
     if context.counts.get("adjust_relation", 0):
         raise ValueError("The relationship was already adjusted in this answer.")
-    try:
-        step = int(change)
-    except (TypeError, ValueError):
-        raise ValueError("change must be a whole number.") from None
+    step = _whole_number(change, "change must be a whole number.")
     step = max(RELATION_STEP_DOWN, min(RELATION_STEP_UP, step))
     if step == 0:
         return "Nothing changed."
@@ -437,10 +420,7 @@ def _flag(value: Any) -> bool:
 
 
 def _create_markdown_file(context: ToolContext, name: str, content: str, overwrite: Any = False) -> str:
-    try:
-        file, new = _markdown(context).create(context.person.id, str(name), str(content), _flag(overwrite))
-    except MarkdownError as error:
-        raise ValueError(str(error)) from None
+    file, new = _markdown(context).create(context.person.id, str(name), str(content), _flag(overwrite))
     _shown(context, "created" if new else "replaced", file)
     seen = (
         "The person sees it as a file they can open and download"
@@ -454,28 +434,19 @@ def _create_markdown_file(context: ToolContext, name: str, content: str, overwri
 
 
 def _edit_markdown_file(context: ToolContext, name: str, old_text: str, new_text: str, replace_all: Any = False) -> str:
-    try:
-        file, count = _markdown(context).edit(context.person.id, str(name), old_text, new_text, _flag(replace_all))
-    except MarkdownError as error:
-        raise ValueError(str(error)) from None
+    file, count = _markdown(context).edit(context.person.id, str(name), old_text, new_text, _flag(replace_all))
     _shown(context, "updated", file)
     return f"Changed {count} place{'s' if count != 1 else ''} in {file.name} (now {file.size:,} characters)."
 
 
 def _append_markdown_file(context: ToolContext, name: str, text: str) -> str:
-    try:
-        file = _markdown(context).append(context.person.id, str(name), str(text))
-    except MarkdownError as error:
-        raise ValueError(str(error)) from None
+    file = _markdown(context).append(context.person.id, str(name), str(text))
     _shown(context, "updated", file)
     return f"Added to the end of {file.name} (now {file.size:,} characters)."
 
 
 def _read_markdown_file(context: ToolContext, name: str, start_line: Any = 1) -> str:
-    try:
-        file, content = _markdown(context).read(context.person.id, str(name))
-    except MarkdownError as error:
-        raise ValueError(str(error)) from None
+    file, content = _markdown(context).read(context.person.id, str(name))
     lines = content.splitlines(keepends=True)
     start = max(1, _number(start_line, "start_line") or 1)
     if start > len(lines):
@@ -506,12 +477,8 @@ def _project(context: ToolContext) -> tuple[Projects, int]:
 
 
 def _number(value: Any, name: str) -> int | None:
-    if value is None or value == "":
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        raise ValueError(f"{name} must be a line number.") from None
+    """A line number, or None when it is not given."""
+    return None if value is None or value == "" else _whole_number(value, f"{name} must be a line number.")
 
 
 def _list_project_files(context: ToolContext, folder: str = "") -> str:
@@ -526,7 +493,7 @@ def _read_project_file(context: ToolContext, path: str, start_line: Any = 1, end
 
 def _search_project(context: ToolContext, query: str, folder: str = "", regex: Any = False) -> str:
     projects, project_id = _project(context)
-    return projects.search(project_id, str(query), str(folder or ""), regex is True or str(regex).lower() == "true")
+    return projects.search(project_id, str(query), str(folder or ""), _flag(regex))
 
 
 def project_tools() -> list[Tool]:
@@ -669,12 +636,14 @@ def integration_tools() -> list[Tool]:
             name="resources",
             description="List what is connected to this conversation (GitHub, Google Drive, folders) and what you may do.",
             function=_resources,
+            parallel=True,
             parameters={},
         ),
         Tool(
             name="res_list",
             description="List the files and folders at a path of a connected resource (empty path: its top).",
             function=_res_list,
+            parallel=True,
             parameters={
                 "resource": _RESOURCE,
                 "path": {"type": "string", "description": "Folder inside the resource."},
@@ -689,6 +658,7 @@ def integration_tools() -> list[Tool]:
                 "start_line). Look before you change something."
             ),
             function=_res_read,
+            parallel=True,
             parameters={
                 "resource": _RESOURCE,
                 "path": {"type": "string", "description": "File inside the resource."},
@@ -702,6 +672,7 @@ def integration_tools() -> list[Tool]:
             name="res_search",
             description="Find words in the files of a connected resource (case ignored): each match with path and line.",
             function=_res_search,
+            parallel=True,
             parameters={
                 "resource": _RESOURCE,
                 "query": {"type": "string"},
@@ -890,6 +861,7 @@ def web_tools(web: WebClient) -> list[Tool]:
                 "Returns titles, URLs and excerpts; read a page in full with web_fetch. Cite the URLs you use."
             ),
             function=search,
+            parallel=True,
             parameters={
                 "query": {"type": "string", "description": "What to search for, as you would type it in a search engine."},
                 "max_results": {"type": "integer", "description": "1 to 10 (default 5)."},
@@ -900,6 +872,7 @@ def web_tools(web: WebClient) -> list[Tool]:
             name="web_fetch",
             description="Read a web page (an http or https URL): its title, its text (cut when long) and its links.",
             function=fetch,
+            parallel=True,
             parameters={"url": {"type": "string", "description": "The full URL."}},
             required=("url",),
         ),
@@ -1135,3 +1108,9 @@ def default_toolbox(web: WebClient | None = None) -> Toolbox:
         + project_tools()
         + integration_tools()
     )
+
+
+# The tools of each group, hidden from a turn that has no use for them (agent.py): taken from the lists themselves
+MARKDOWN_TOOLS = frozenset(tool.name for tool in markdown_tools())  # no files to write
+PROJECT_TOOLS = frozenset(tool.name for tool in project_tools())  # the project's files are all in the prompt
+INTEGRATION_TOOLS = frozenset(tool.name for tool in integration_tools())  # nothing connected

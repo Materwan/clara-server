@@ -8,14 +8,15 @@ are never pinged (the client's allowed mentions refuse them too).
 from __future__ import annotations
 
 import re
-from typing import Iterable, Protocol
+from collections.abc import Iterable
+from typing import Protocol
 
 DISCORD_LIMIT = 2000
 MAX_PINGS_PER_REPLY = 10  # beyond this, "@Name" stays plain text (no mass pings)
 MAX_NAME_WORDS = 3
 
 # "@Paul" or "@Jean Pierre Dupont" (up to 3 words) not already inside "<@...>"
-_PING_RE = re.compile(r"(?<![<\w])@(\w[\w'.-]*(?: \w[\w'.-]*){0,%d})" % (MAX_NAME_WORDS - 1))
+_PING_RE = re.compile(rf"(?<![<\w])@(\w[\w'.-]*(?: \w[\w'.-]*){{0,{MAX_NAME_WORDS - 1}}})")
 _USER_RE = re.compile(r"<@!?(\d+)>")
 _ROLE_RE = re.compile(r"<@&(\d+)>")
 _CHANNEL_RE = re.compile(r"<#(\d+)>")

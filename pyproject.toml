@@ -40,10 +40,11 @@ line-length = 120
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B"]  # pycodestyle, pyflakes, import order, bugbear
+select = ["E", "F", "I", "B", "UP"]  # pycodestyle, pyflakes, import order, bugbear, pyupgrade
 ignore = [
     "E501",  # long lines are left to the author's judgement
     "B905",  # zip() without strict=
+    "UP042",  # (str, Enum) -> StrEnum would change what str() of a member gives
 ]
 
 [tool.pytest.ini_options]

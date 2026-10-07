@@ -115,7 +115,7 @@ def backend():
 @pytest.fixture
 def app(settings, backend, github):
     app = create_app(settings, fake_providers(settings, backend))
-    app.state.integrations.connectors["github"]._transport = httpx.MockTransport(github.handler)
+    app.state.integrations.connectors["github"]._http.transport = httpx.MockTransport(github.handler)
     return app
 
 

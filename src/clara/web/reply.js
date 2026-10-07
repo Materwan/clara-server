@@ -77,10 +77,13 @@ export function addCall(reply, note, state) {
   part.calls.push({ ...note, state });
 }
 
-/** A call ended: it is the first one still running with that name (or a new one, for a server that did not announce it). */
+/** A call ended: it is the first one still running with that name (or a new one, for a server that did not announce
+ * it). Several calls of a round may run at once, and end after something else was shown (a QCM): every run is looked in. */
 export function endCall(reply, note) {
-  const part = last(reply);
-  const call = part?.kind === "run" && part.calls.find((c) => c.state === "running" && c.name === note.name);
+  const call = reply.parts
+    .filter((part) => part.kind === "run")
+    .flatMap((part) => part.calls)
+    .find((c) => c.state === "running" && c.name === note.name);
   if (call) Object.assign(call, note, { state: "done" });
   else addCall(reply, note, "done");
 }
@@ -160,14 +163,34 @@ function partView(reply, part, submit) {
   if (part.kind === "text") {
     const node = h("div", { class: "text" });
     const caret = () => Boolean(reply.live) && part === last(reply);
-    return {
-      node,
-      paint: once(() => `${part.text.length}|${caret()}`, () => {
-        const md = renderMarkdown(part.text);
-        if (caret()) placeCaret(md);
-        clear(node).append(md);
-      }),
+    let cost = 0; // milliseconds the last drawing took
+    let drawnAt = 0;
+    let later = 0; // a drawing planned for when the wait is over
+    const draw = once(() => `${part.text.length}|${caret()}`, () => {
+      const started = performance.now();
+      const md = renderMarkdown(part.text);
+      if (caret()) placeCaret(md);
+      clear(node).append(md);
+      drawnAt = performance.now();
+      cost = drawnAt - started;
+    });
+    // The whole text is drawn again as it streams: a long answer waits 4× what drawing it took before the next
+    // drawing, so that it never takes more than a fifth of the time (a short one, a fraction of a frame, never waits)
+    const paint = () => {
+      const wait = reply.live ? 4 * cost - (performance.now() - drawnAt) : 0;
+      if (wait > 0) {
+        if (!later) later = setTimeout(() => {
+          later = 0;
+          paint();
+          node.dispatchEvent(new Event("repainted", { bubbles: true })); // drawn outside a frame: the page may scroll
+        }, wait);
+        return;
+      }
+      clearTimeout(later);
+      later = 0;
+      draw();
     };
+    return { node, paint };
   }
   // a run of calls: alone it is a line of its own, with several it is one line that opens on one line per call
   const summaryText = h("span", { class: "run-summary" });

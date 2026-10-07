@@ -436,6 +436,7 @@ export function mountChat(container, user, { slot, fresh = false, project = null
   function scrollDown(force) {
     if (force || state.stick) messagesBox.scrollTop = messagesBox.scrollHeight;
   }
+  messagesBox.addEventListener("repainted", () => scrollDown()); // a long reply drawn later than its frame (reply.js)
   messagesBox.addEventListener("scroll", () => {
     state.stick = messagesBox.scrollHeight - messagesBox.scrollTop - messagesBox.clientHeight < 80;
   });

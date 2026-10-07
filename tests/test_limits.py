@@ -1,7 +1,7 @@
 """Daily credit limits: who has one, how credits are counted, what happens at the limit, how an administrator sets it."""
 
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -22,7 +22,7 @@ TURN = 13  # what say() reports: 10 prompt tokens and 3 completion tokens
 
 class Clock:
     def __init__(self):
-        self.now = datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)
+        self.now = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
 
     def __call__(self):
         return self.now

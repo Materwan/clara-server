@@ -22,9 +22,10 @@ import re
 import time
 import uuid
 import weakref
-from dataclasses import dataclass, replace
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import TYPE_CHECKING, AsyncIterator, Callable
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .compaction import (
@@ -37,18 +38,18 @@ from .compaction import (
     transcript_budget,
 )
 from .limits import UsageLimitReached, UsageLimits
-from .llm import LlmBackend, LlmChunk
+from .llm import LlmBackend, LlmChunk, ToolCall
 from .markdownfiles import MarkdownFiles
 from .memory import ConversationState, Fact, Memory, Person, StoredMessage, TurnRow
 from .models import Chosen, ModelCatalog
 from .notifications import SERVER, SURFACE_RE, NotificationError, Notifier
-from .projects import PROJECT_TOOLS, Projects
+from .projects import Projects
 from .prompt import SystemPrompt
 from .qcm import SURFACES as QCM_SURFACES
 from .reminders import ReminderService
 from .retry import delay_before, retryable
 from .tasks import TaskService
-from .tools import ABOUT_PERSON, INTEGRATION_TOOLS, MARKDOWN_TOOLS, QCM, Toolbox, ToolContext
+from .tools import ABOUT_PERSON, INTEGRATION_TOOLS, MARKDOWN_TOOLS, PROJECT_TOOLS, QCM, Toolbox, ToolContext
 
 if TYPE_CHECKING:
     from .integrations.broker import Broker
@@ -148,7 +149,7 @@ async def with_idle_timeout(
                 chunk = await asyncio.wait_for(iterator.__anext__(), wait)
             except StopAsyncIteration:
                 return
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 what = "to start answering" if wait == first else "between two pieces of its answer"
                 raise ModelTimeout(f"The model took more than {wait:g} seconds {what}.") from None
             wait = idle
@@ -197,6 +198,27 @@ class ChatRequest:
 
 
 @dataclass
+class _Round:
+    """What one model round produced (see Agent._model_round)."""
+
+    text_parts: list[str] = field(default_factory=list)
+    thinking_parts: list[str] = field(default_factory=list)
+    calls: list[ToolCall] = field(default_factory=list)
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    credits: int = 0  # what it cost the person
+    separator: str = ""  # put before its text: it follows a round that wrote something
+
+    @property
+    def text(self) -> str:
+        return "".join(self.text_parts)
+
+    @property
+    def thinking(self) -> str:
+        return "".join(self.thinking_parts)
+
+
+@dataclass
 class _Pending:
     owner: str
     expected: frozenset[str]
@@ -210,6 +232,7 @@ class Agent:
         backend: LlmBackend,
         toolbox: Toolbox,
         prompt: SystemPrompt,
+        *,  # the rest by name only: there are many, and two of the same type are easily swapped
         history_turns: int = 20,
         max_concurrent_llm: int = 2,
         max_tool_rounds: int = MAX_TOOL_ROUNDS,
@@ -328,7 +351,7 @@ class Agent:
         pending = self._pending[turn_id]
         try:
             return await asyncio.wait_for(pending.future, self.tool_timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             raise ClientToolTimeout("The client did not return its tool results in time.") from None
         finally:
             self._pending.pop(turn_id, None)
@@ -517,9 +540,7 @@ class Agent:
         threshold = self.notify_threshold(done["person"]["id"])
         if not threshold or seconds < threshold:
             return
-        reply = " ".join(done["reply"].split())
-        if len(reply) > NOTIFIED_REPLY:
-            reply = reply[: NOTIFIED_REPLY - 1] + "…"
+        reply = _shorten(" ".join(done["reply"].split()), NOTIFIED_REPLY)
         minutes, rest = divmod(int(seconds), 60)
         took = f"{minutes} min {rest:02d} s" if minutes else f"{rest} s"
         text = f"Clara has finished answering in {done['conversation']} (it took {took})."
@@ -611,78 +632,46 @@ class Agent:
             reply_parts: list[str] = []
             tools_used: list[str] = []
             prompt_tokens = completion_tokens = context_tokens = credits = 0
-            text_parts: list[str] = []  # what the model wrote in the round in progress
-            round_open = False  # that text is not in `rows` yet
+            current = _Round()  # the round in progress: its text is not in `rows` until it ends
+            round_open = False
+            spoke = False  # a round wrote something: the next one that writes starts a new paragraph
             finished = False
             reason = "the connection to the client was lost"
             try:
                 for round_number in range(self.max_tool_rounds + 1):
                     offer_tools = round_number < self.max_tool_rounds  # the last round must answer
-                    async for event in self._fit(
-                        request, person, messages, schemas if offer_tools else None,
-                        compact=round_number == 0, chosen=chosen,
-                    ):
+                    tools = schemas if offer_tools else None
+                    async for event in self._fit(request, person, messages, tools, compact=round_number == 0, chosen=chosen):
                         yield event
-                    text_parts = []
-                    thinking_parts: list[str] = []
+                    current = _Round()
                     round_open = True
-                    calls = []
-                    round_prompt = round_completion = 0
-                    # a round that follows one that said something starts a new paragraph
-                    separate = bool("".join(reply_parts).strip())
-                    # aclosing: if the client goes away at a yield, the model task stops now
-                    try:
-                        async with contextlib.aclosing(
-                            self._model(messages, schemas if offer_tools else None, chosen.ref)
-                        ) as model:
-                            async for chunk in model:
-                                if chunk.notice:  # the model is busy and is asked again: say so
-                                    yield {"type": "retrying", "message": chunk.notice}
-                                    continue
-                                round_prompt += chunk.prompt_tokens
-                                round_completion += chunk.completion_tokens
-                                calls.extend(chunk.tool_calls)
-                                if chunk.thinking:  # shown to the client; kept only with tool calls (see below)
-                                    thinking_parts.append(chunk.thinking)
-                                    yield {"type": "thinking", "text": chunk.thinking}
-                                if chunk.text:
-                                    if separate and chunk.text.strip():
-                                        separate = False
-                                        reply_parts.append(ROUND_SEPARATOR)
-                                        yield {"type": "token", "text": ROUND_SEPARATOR}
-                                    text_parts.append(chunk.text)
-                                    yield {"type": "token", "text": chunk.text}
-                    except BaseException as error:
-                        # The client left: what the model did is still counted against the person's day (a model
-                        # that failed costs them nothing)
-                        if isinstance(error, (GeneratorExit, asyncio.CancelledError)):
-                            credits += self._count_usage(
-                                person, round_prompt + round_completion, messages,
-                                schemas if offer_tools else None, text_parts, chosen.weight,
-                            )
-                        raise
-                    else:
-                        credits += self._count_usage(
-                            person, round_prompt + round_completion, messages,
-                            schemas if offer_tools else None, text_parts, chosen.weight,
-                        )
-                    prompt_tokens += round_prompt
-                    completion_tokens += round_completion
-                    text = "".join(text_parts)
-                    reported = round_prompt + round_completion
-                    estimated = estimate_prompt_tokens(messages, schemas if offer_tools else None) + estimate_tokens(text)
+                    # aclosing, here and below: a client that leaves closes the round now (its usage counted, its
+                    # wait for the client's tools ended), not whenever the garbage collector gets to it
+                    async with contextlib.aclosing(
+                        self._model_round(current, messages, tools, chosen, person, separate=spoke)
+                    ) as events:
+                        async for event in events:
+                            yield event
+                    credits += current.credits
+                    prompt_tokens += current.prompt_tokens
+                    completion_tokens += current.completion_tokens
+                    text = current.text
+                    reported = current.prompt_tokens + current.completion_tokens
+                    estimated = estimate_prompt_tokens(messages, tools) + estimate_tokens(text)
                     log.debug("context of %s: model reported %d tokens, estimated %d", conversation, reported, estimated)
                     # With a prompt cache the model may report only what it evaluated this time
                     context_tokens = max(reported, estimated)
-                    yield {"type": "usage", "prompt_tokens": round_prompt, "completion_tokens": round_completion}
-                    reply_parts.append(text)
+                    yield {"type": "usage", "prompt_tokens": current.prompt_tokens, "completion_tokens": current.completion_tokens}
+                    reply_parts.append(current.separator + text)
+                    spoke = spoke or bool(text.strip())
 
-                    if not (offer_tools and calls):
+                    if not (offer_tools and current.calls):
                         if text.strip():
                             rows.append(TurnRow("assistant", text))
                         round_open = False
                         break
 
+                    calls = current.calls
                     ids = [f"call_{round_number}_{index}" for index in range(len(calls))]
                     call_dicts = [
                         {"function": {"name": c.name, "arguments": c.arguments}}
@@ -690,50 +679,20 @@ class Agent:
                         for c in calls
                     ]
                     # The reasoning that led to the calls goes back with them (DeepSeek refuses them without it)
-                    thinking = "".join(thinking_parts)
                     assistant = {"role": "assistant", "content": text, "tool_calls": call_dicts}
-                    if thinking:
-                        assistant["thinking"] = thinking
+                    if current.thinking:
+                        assistant["thinking"] = current.thinking
                     messages.append(assistant)
-                    rows.append(TurnRow("assistant", text, call_dicts, thinking=thinking))
+                    rows.append(TurnRow("assistant", text, call_dicts, thinking=current.thinking))
                     round_open = False
 
+                    tools_used += [call.name for call in calls]
                     results: dict[str, str] = {}
-                    remote = []
-                    for call_id, call in zip(ids, calls):
-                        tools_used.append(call.name)
-                        if call.name in client_tools:
-                            remote.append((call_id, call))
-                        else:
-                            # the client shows the call while it runs; `tool` follows with its result
-                            yield {"type": "tool_start", "name": call.name, "arguments": call.arguments}
-                            results[call_id] = await self.toolbox.arun(call.name, context, call.arguments)
-                            yield {
-                                "type": "tool",
-                                "name": call.name,
-                                "arguments": call.arguments,
-                                "result": _shorten(results[call_id], TOOL_EVENT_RESULT),
-                            }
-                            for extra in context.events:  # what the tool asks the client to show (a QCM)
-                                yield extra
-                            context.events.clear()
-                    if remote:
-                        self._pending[turn_id] = _Pending(
-                            owner, frozenset(call_id for call_id, _ in remote),
-                            asyncio.get_running_loop().create_future(),
-                        )
-                        try:
-                            yield {
-                                "type": "tool_requests",
-                                "turn": turn_id,
-                                "calls": [
-                                    {"id": call_id, "name": call.name, "arguments": call.arguments}
-                                    for call_id, call in remote
-                                ],
-                            }
-                            results.update(await self._wait_for_client(turn_id))
-                        finally:
-                            self._pending.pop(turn_id, None)
+                    async with contextlib.aclosing(
+                        self._run_tools(list(zip(ids, calls)), context, client_tools, results, turn_id, owner)
+                    ) as events:
+                        async for event in events:
+                            yield event
                     for call_id, call in zip(ids, calls):
                         messages.append({"role": "tool", "tool_name": call.name, "content": results[call_id]})
                         rows.append(TurnRow("tool", results[call_id], tool_name=call.name))
@@ -745,7 +704,7 @@ class Agent:
             finally:
                 if not finished and not ephemeral and request.mode == "answer":
                     # What was done stays known: the files a client tool changed are changed for good
-                    self._keep_interrupted(request, person, rows, "".join(text_parts) if round_open else "", reason)
+                    self._keep_interrupted(request, person, rows, current.text if round_open else "", reason)
 
             if news and self.integrations is not None:
                 self.integrations.told(news)
@@ -779,6 +738,92 @@ class Agent:
             "passed": declined,  # a "maybe" message Clara chose not to answer (reply is "")
             "quota": self.limits.quota(person.id).describe() if self.limits is not None else None,
         }
+
+    async def _model_round(
+        self, current: _Round, messages: list[dict], tools: list[dict] | None, chosen: Chosen, person: Person,
+        separate: bool,
+    ) -> AsyncIterator[dict]:
+        """One model round, filling `current` as the chunks come: text, reasoning, tool calls, tokens and what they
+        cost the person. `separate`: an earlier round wrote something, so this one's text starts a new paragraph."""
+        model_failed = False
+        try:
+            # aclosing: if the client goes away at a yield, the model task stops now
+            async with contextlib.aclosing(self._model(messages, tools, chosen.ref)) as model:
+                async for chunk in model:
+                    if chunk.notice:  # the model is busy and is asked again: say so
+                        yield {"type": "retrying", "message": chunk.notice}
+                        continue
+                    current.prompt_tokens += chunk.prompt_tokens
+                    current.completion_tokens += chunk.completion_tokens
+                    current.calls.extend(chunk.tool_calls)
+                    if chunk.thinking:  # shown to the client; kept only with tool calls (see _turn)
+                        current.thinking_parts.append(chunk.thinking)
+                        yield {"type": "thinking", "text": chunk.thinking}
+                    if chunk.text:
+                        if separate and chunk.text.strip():
+                            separate = False
+                            current.separator = ROUND_SEPARATOR
+                            yield {"type": "token", "text": ROUND_SEPARATOR}
+                        current.text_parts.append(chunk.text)
+                        yield {"type": "token", "text": chunk.text}
+        except Exception:
+            model_failed = True  # a model that failed costs the person nothing
+            raise
+        finally:
+            # also when the client left (GeneratorExit, cancelled): what the model did counts against their day
+            if not model_failed:
+                current.credits = self._count_usage(
+                    person, current.prompt_tokens + current.completion_tokens, messages, tools, current.text_parts,
+                    chosen.weight,
+                )
+
+    async def _run_tools(
+        self, calls: list[tuple[str, ToolCall]], context: ToolContext, client_tools: set[str], results: dict[str, str],
+        turn_id: str, owner: str,
+    ) -> AsyncIterator[dict]:
+        """Run the tool calls of a round, putting their outputs in `results` (by call id). The server's tools run
+        here, in order, except that consecutive calls of tools that only read over the network run at the same time;
+        the client's are sent to it in one `tool_requests` event, and waited for."""
+        remote = [(call_id, call) for call_id, call in calls if call.name in client_tools]
+        local = [(call_id, call) for call_id, call in calls if call.name not in client_tools]
+        for batch in self._batches(local):
+            # the client shows each call while it runs; `tool` follows with its result
+            for _, call in batch:
+                yield {"type": "tool_start", "name": call.name, "arguments": call.arguments}
+            own = [replace(context, events=[]) for _ in batch]  # each call's events (a QCM to show) apart
+            outputs = await asyncio.gather(
+                *(self.toolbox.arun(call.name, call_context, call.arguments) for (_, call), call_context in zip(batch, own))
+            )
+            for (call_id, call), output, call_context in zip(batch, outputs, own):
+                results[call_id] = output
+                yield {"type": "tool", "name": call.name, "arguments": call.arguments, "result": _shorten(output, TOOL_EVENT_RESULT)}
+                for extra in call_context.events:  # what the tool asks the client to show (a QCM)
+                    yield extra
+        if not remote:
+            return
+        self._pending[turn_id] = _Pending(
+            owner, frozenset(call_id for call_id, _ in remote), asyncio.get_running_loop().create_future()
+        )
+        try:
+            yield {
+                "type": "tool_requests",
+                "turn": turn_id,
+                "calls": [{"id": call_id, "name": call.name, "arguments": call.arguments} for call_id, call in remote],
+            }
+            results.update(await self._wait_for_client(turn_id))
+        finally:
+            self._pending.pop(turn_id, None)
+
+    def _batches(self, calls: list[tuple[str, ToolCall]]) -> list[list[tuple[str, ToolCall]]]:
+        """The calls in order, those of `parallel` tools that follow each other grouped (they run together); any
+        other call is a batch of its own, so what writes runs in the order the model asked."""
+        batches: list[list[tuple[str, ToolCall]]] = []
+        for item in calls:
+            if batches and self.toolbox.parallel(item[1].name) and self.toolbox.parallel(batches[-1][-1][1].name):
+                batches[-1].append(item)
+            else:
+                batches.append([item])
+        return batches
 
     def _model_fields(self, chosen: Chosen) -> dict:
         """What a `done` event says of the model: its name, its provider, and (with a catalogue) its reference
@@ -982,7 +1027,7 @@ class Agent:
         return {
             "conversation": conversation,
             "summary": state.summary,
-            "messages": len(self.memory.messages_after(conversation, state.upto_id)),
+            "messages": self.memory.message_count(conversation, state.upto_id),
             **self._context_info(state.context_tokens, self._chosen_for(conversation).window),
         }
 
@@ -1011,9 +1056,7 @@ class Agent:
             return info.title
         if not self.accepting:
             raise ServerStopping("The server is stopping and takes no new request.")
-        shown, _ = self.memory.transcript(conversation, limit=1_000_000)
-        question = next((m.content for m in shown if m.role == "user"), "")
-        answer = next((m.content for m in shown if m.role == "assistant"), "")
+        question, answer = self.memory.first_exchange(conversation)
         if question:
             excerpt = f"Question: {question[:TITLE_EXCERPT]}"
             excerpt += f"\n\nAnswer: {answer[:TITLE_EXCERPT]}" if answer else ""

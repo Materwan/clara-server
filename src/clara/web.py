@@ -13,6 +13,8 @@ from typing import Any
 
 import httpx
 
+from .httpclient import SharedClient
+
 DEFAULT_HOST = "https://ollama.com"
 TIMEOUT = 30.0
 MAX_RESULTS = 10
@@ -35,13 +37,15 @@ class WebClient:
     def __init__(self, api_key: str, host: str = DEFAULT_HOST, transport: httpx.AsyncBaseTransport | None = None):
         self._api_key = api_key
         self._host = host.rstrip("/")
-        self._transport = transport  # tests replace the network
+        self._http = SharedClient(timeout=TIMEOUT, transport=transport)  # transport: tests replace the network
+
+    async def aclose(self) -> None:
+        await self._http.aclose()
 
     async def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         headers = {"Authorization": f"Bearer {self._api_key}"}
         try:
-            async with httpx.AsyncClient(timeout=TIMEOUT, transport=self._transport) as http:
-                response = await http.post(f"{self._host}{path}", json=body, headers=headers)
+            response = await self._http.get().post(f"{self._host}{path}", json=body, headers=headers)
         except httpx.HTTPError as error:
             raise WebError(f"the web API could not be reached ({type(error).__name__})") from None
         if response.status_code in (401, 403):

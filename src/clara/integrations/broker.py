@@ -242,7 +242,7 @@ class Broker:
             result, outcome = f"Error: {error}", FAILED
             if error.reconnect and target.account_id:
                 self.store.update_account(target.account_id, status="needs_reconnect")
-        except asyncio.TimeoutError:
+        except TimeoutError:
             result, outcome = f"Error: {target.label} did not answer in {RUN_TIMEOUT:g} seconds.", FAILED
         except Exception:
             log.exception("integration %s on %s crashed", op, target.label)

@@ -19,9 +19,10 @@ import asyncio
 import json
 import logging
 import os
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterator, Awaitable, Callable, TypeVar
+from typing import TypeVar
 
 from .llm import LlmBackend, LlmChunk, OllamaBackend, OpenAIBackend, OpenAIFlavor
 from .settings import Settings
@@ -162,8 +163,9 @@ class ProviderManager:
         self.traffic: TrafficLog | None = None  # where the calls to the provider are logged
         self._models = {name: config.default_model for name, config in configs.items()}
         self.active = default
+        self._built: list[LlmBackend] = []  # every backend made, closed when the server stops (aclose)
         self._load_state()
-        self._backend = self._factory(self.config, self.model)
+        self._backend = self._build(self.config, self.model)
         self._others: dict[str, LlmBackend] = {}  # the models somebody chose that are not the server's own
 
     @classmethod
@@ -247,8 +249,24 @@ class ProviderManager:
         self._rebuild()
 
     def _rebuild(self) -> None:
-        self._backend = self._factory(self.config, self.model)
+        self._backend = self._build(self.config, self.model)
         self._save_state()
+
+    def _build(self, config: ProviderConfig, model: str) -> LlmBackend:
+        backend = self._factory(config, model)
+        self._built.append(backend)
+        return backend
+
+    async def aclose(self) -> None:
+        """Close the connections the backends keep open (the server is stopping)."""
+        for backend in self._built:
+            close = getattr(backend, "aclose", None)
+            if close is not None:
+                try:
+                    await close()
+                except Exception as error:  # closing is best effort: the process is ending
+                    log.warning("could not close a model backend: %s", error)
+        self._built.clear()
 
     # ------------------------------------------------------------------
     # LlmBackend: delegate to the active provider
@@ -294,7 +312,7 @@ class ProviderManager:
         if not config.usable:
             raise ProviderError(f"{config.label} needs {config.key_name} in the server environment.")
         if ref not in self._others:
-            self._others[ref] = self._factory(config, model)
+            self._others[ref] = self._build(config, model)
         return self._others[ref]
 
     def stream_ref(self, ref: str, messages: list[dict], tools: list[dict] | None) -> AsyncIterator[LlmChunk]:
@@ -341,7 +359,7 @@ class ProviderManager:
         """None if the active provider is usable (reachable, key accepted), else a short reason."""
         try:
             await asyncio.wait_for(self._logged("verify", self._backend.verify()), CHECK_TIMEOUT)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return "no answer"
         except Exception as error:
             return f"{type(error).__name__}: {str(error)[:200]}"

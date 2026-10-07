@@ -2,7 +2,7 @@
 
 import asyncio
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -17,7 +17,7 @@ from clara.reminders import ReminderService
 from clara.server import create_app
 from clara.tools import ToolContext, default_toolbox
 
-NOW = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
 ORIGIN = ("cli", "erwan", "cli:erwan")
 
 
@@ -201,7 +201,7 @@ def test_the_model_tool_remembers_the_conversation(memory):
 
 def test_the_http_route_remembers_where_it_was_set(settings):
     with TestClient(create_app(settings, fake_providers(settings, FakeBackend()))) as client:
-        when = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+        when = (datetime.now(UTC) + timedelta(days=1)).isoformat()
         headers = {"Authorization": "Bearer secret-cli"}
         body = {"surface": "cli", "user_id": "erwan", "user_name": "Erwan", "text": "Dentist", "at": when}
         assert client.post("/v1/reminders", json=body, headers=headers).status_code == 201

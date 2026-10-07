@@ -4,8 +4,8 @@ import importlib.util
 import re
 import threading
 import time
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import AsyncIterator
 
 import pytest
 import uvicorn

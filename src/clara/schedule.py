@@ -15,18 +15,19 @@ from __future__ import annotations
 
 import asyncio
 import calendar
-import contextlib
 import json
 import logging
 import re
 import secrets
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from .agent import Agent, ChatRequest, ServerStopping
 from .announce import _iana
+from .dueloop import DueLoop
 from .memory import Memory, Person
 from .notifications import SERVER, NotificationError, Notifier
 from .reminders import ReminderError, _tzinfo, parse_moment
@@ -40,7 +41,6 @@ MAX_DOCUMENTS_CHARS = 150_000  # the same limit as a message of the web chat
 MAX_PER_PERSON = 50
 LATE_SECONDS = 3600  # a run later than this (the server was off) is skipped
 MAX_SUMMARY = 700
-MAX_SLEEP = 30.0
 OWNER = "schedule"
 NOTIFY_TARGETS = ("discord",)
 
@@ -82,11 +82,11 @@ class Schedule:
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _stamp(moment: datetime | None) -> str | None:
-    return moment.astimezone(timezone.utc).isoformat(timespec="seconds") if moment else None
+    return moment.astimezone(UTC).isoformat(timespec="seconds") if moment else None
 
 
 def _moment(text: str | None) -> datetime | None:
@@ -105,7 +105,7 @@ def next_run(start: datetime, zone: str, repeat: str, days: tuple[int, ...], aft
             or (repeat == "weekly" and day.weekday() in days)
             or (repeat == "monthly" and day.day == min(first.day, calendar.monthrange(day.year, day.month)[1]))
         ):
-            moment = datetime.combine(day, first.time(), tz).astimezone(timezone.utc)
+            moment = datetime.combine(day, first.time(), tz).astimezone(UTC)
             if moment > after:
                 return moment
         day += timedelta(days=1)
@@ -171,7 +171,21 @@ class ScheduleStore:
         with self._lock:
             return [self._schedule(row) for row in self._db.execute(sql, values).fetchall()]
 
+    # The columns add() and set() may write: their names go into the SQL, so only these
+    _COLUMNS = frozenset({
+        "person_id", "name", "prompt", "documents", "surface", "user_id", "conversation", "project_id", "repeat",
+        "days", "start_at", "timezone", "next_at", "enabled", "runs", "last_at", "last_status", "last_summary",
+        "created_at",
+    })
+
+    @classmethod
+    def _checked(cls, columns: dict[str, Any]) -> None:
+        unknown = set(columns) - cls._COLUMNS
+        if unknown:
+            raise ValueError(f"Unknown schedule columns: {', '.join(sorted(unknown))}")
+
     def add(self, **columns: Any) -> int:
+        self._checked(columns)
         marks = ",".join("?" * len(columns))
         with self._lock, self._db:
             cursor = self._db.execute(
@@ -204,6 +218,7 @@ class ScheduleStore:
         return _moment(row[0])
 
     def set(self, schedule_id: int, **columns: Any) -> None:
+        self._checked(columns)
         sets = ", ".join(f"{name} = ?" for name in columns)
         with self._lock, self._db:
             self._db.execute(f"UPDATE schedules SET {sets} WHERE id = ?", [*columns.values(), schedule_id])
@@ -223,7 +238,7 @@ class ScheduleStore:
             ).rowcount > 0
 
 
-class ScheduleService:
+class ScheduleService(DueLoop):
     def __init__(self, memory: Memory, notifier: Notifier, clock: Callable[[], datetime] = _utc_now):
         self.memory = memory
         self.notifier = notifier
@@ -420,8 +435,8 @@ class ScheduleService:
         if self.agent is None:
             raise ScheduleError("Clara cannot answer now.")
         request = ChatRequest(
-            schedule.surface, schedule.user_id, None, message_of(schedule), schedule.conversation,
-            instructions=INSTRUCTIONS, prefix=f"[Scheduled task “{schedule.name}”, run {schedule.runs + 1}]",
+            surface=schedule.surface, user_id=schedule.user_id, user_name=None, message=message_of(schedule),
+            conversation=schedule.conversation, instructions=INSTRUCTIONS, prefix=f"[Scheduled task “{schedule.name}”, run {schedule.runs + 1}]",
             timezone=_iana(schedule.timezone), quiet=True, project=schedule.project_id,
         )
         reply = ""
@@ -458,16 +473,5 @@ class ScheduleService:
         except NotificationError:
             log.exception("schedule %s: could not tell the person", schedule.id)
 
-    async def run(self) -> None:
-        """The scheduler loop; runs for the life of the server."""
-        while True:
-            self._wake.clear()
-            try:
-                if not self.stopping:
-                    self.fire_due()
-            except Exception:
-                log.exception("schedule: could not start the due ones")
-            upcoming = self.store.next_due()
-            delay = MAX_SLEEP if upcoming is None or self.stopping else (upcoming - self._clock()).total_seconds()
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(self._wake.wait(), max(0.0, min(delay, MAX_SLEEP)))
+    def next_due(self) -> datetime | None:
+        return self.store.next_due()

@@ -20,6 +20,7 @@ from urllib.parse import quote
 
 import httpx
 
+from ...httpclient import SharedClient
 from ...ingest import IngestError, extract
 from ...projects import read_lines
 from ..permissions import DESTRUCTIVE, GITHUB, READ, WRITE
@@ -62,7 +63,10 @@ class GitHubLive(Connector):
     ops = frozenset({"list", "read", "search", "write", "delete", "branch", "pr", "issue"})
 
     def __init__(self, transport: httpx.AsyncBaseTransport | None = None):
-        self._transport = transport  # tests answer from here
+        self._http = SharedClient(timeout=TIMEOUT, follow_redirects=True, transport=transport)  # transport: tests
+
+    async def aclose(self) -> None:
+        await self._http.aclose()
 
     # -- talking to GitHub ----------------------------------------------------------------------- #
     async def request(
@@ -73,10 +77,7 @@ class GitHubLive(Connector):
             "Authorization": f"Bearer {token}",
         }
         try:
-            async with httpx.AsyncClient(
-                headers=headers, timeout=TIMEOUT, follow_redirects=True, transport=self._transport
-            ) as client:
-                response = await client.request(method, f"{API}{url}", **options)
+            response = await self._http.get().request(method, f"{API}{url}", headers=headers, **options)
         except httpx.HTTPError as error:
             raise ConnectorError(f"GitHub could not be reached: {error}") from None
         if response.is_error:

@@ -1,6 +1,6 @@
 """Sub tasks: a task divided into tasks of its own, none of them later than the deadline of the tasks it is part of."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from conftest import FakeBackend, fake_providers, say
@@ -14,7 +14,7 @@ from clara.tools import ToolContext, default_toolbox
 
 AUTH = {"Authorization": "Bearer secret-cli"}
 ME = {"surface": "cli", "user_id": "erwan"}
-NOW = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
 
 
 class Clock:

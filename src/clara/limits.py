@@ -20,10 +20,10 @@ The limit is checked when an answer starts: the answer that crosses it is finish
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Callable
 
 from .memory import Memory
 
@@ -59,7 +59,7 @@ class Quota:
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def parse_limit(text: str) -> int:
@@ -142,7 +142,7 @@ class UsageLimits:
 
     def _tomorrow(self) -> datetime:
         now = self._clock()
-        return datetime(now.year, now.month, now.day, tzinfo=timezone.utc) + timedelta(days=1)
+        return datetime(now.year, now.month, now.day, tzinfo=UTC) + timedelta(days=1)
 
     def used(self, person_id: int, day: str | None = None) -> int:
         with self._memory.lock:

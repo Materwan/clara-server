@@ -14,9 +14,9 @@ import socket
 import sqlite3
 import sys
 import tempfile
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Awaitable, Callable
 
 from .providers import ProviderManager
 from .settings import Settings
