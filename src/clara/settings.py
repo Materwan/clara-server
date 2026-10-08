@@ -183,6 +183,7 @@ class Settings:
     client_surfaces: dict[str, frozenset[str]]
     history_turns: int
     max_concurrent_llm: int
+    max_turns_per_user: int  # answers one user may have running at once (0: no limit)
     max_tool_rounds: int
     tool_timeout: int  # seconds a client may take to run its tools (it may ask the user first)
     llm_first_token_timeout: int  # seconds the model may take to start answering
@@ -205,10 +206,11 @@ class Settings:
     cloud_context_window: int
     ollama_api_key: str | None = field(repr=False)
     web_tools: bool = True  # web_search and web_fetch (they need ollama_api_key)
+    web_fetch_any_url: bool = False  # web_fetch may read any address (else: only those the person wrote or a search found)
     notify_long_turn: int = 120  # a turn this long (seconds) notifies its person when done (0: never)
     # The traffic log (traffic.py): every request in and out, in data/logs
     traffic_log: bool = True
-    traffic_log_days: int = 30  # files older than this are deleted
+    traffic_log_days: int = 7  # files older than this are deleted
     traffic_log_max_body: int = 100_000  # characters kept of each body
     # Tailscale (tailscale.py): off | serve (your tailnet) | funnel (the internet), on an HTTPS port
     tailscale: str = "off"
@@ -220,9 +222,13 @@ class Settings:
     # Users who log in with a password (users.py): days a token lasts without being used (0: for ever), and
     # the surfaces a login may be made on (a user token is bound to one of them)
     session_days: int = 90
+    session_max_days: int = 365  # a token never lasts longer than this, however often it is used (0: no limit)
     user_surfaces: frozenset[str] = frozenset({"web", "app", "cli", "console"})
     # Whether anybody who reaches the web site may make their own user there (off: administrators make them)
     web_signup: bool = False
+    # Whether somebody who made their own user (the web site's sign-up, a Discord /register) may connect GitHub, Google
+    # Drive and folders at once. Off: an administrator switches the integrations on for them, one person at a time.
+    signup_integrations: bool = False
     # Surfaces where a client signs its people in (POST /v1/accounts/login or register): there, an account that
     # is not signed in as a user cannot talk to Clara
     login_surfaces: frozenset[str] = frozenset({"discord"})
@@ -240,6 +246,9 @@ class Settings:
     project_max_files: int = 5_000
     project_inline_percent: int = 40
     github_token: str | None = field(default=None, repr=False)
+    # Whether every user's project downloads may use github_token (the operator's own access, private repositories
+    # included). Off: only administrators; the others use their own GitHub account (Integrations page) or public repos.
+    github_token_shared: bool = False
     # Tokens a day a user may use when an administrator set no limit for them (limits.py); 0: no limit.
     # Administrators have none. `/limit default` changes it while the server runs.
     default_daily_tokens: int = 0
@@ -362,6 +371,7 @@ class Settings:
             client_surfaces=client_surfaces,
             history_turns=_positive_int(env, "CLARA_HISTORY_TURNS", 20),
             max_concurrent_llm=_positive_int(env, "CLARA_MAX_CONCURRENT_LLM", 2),
+            max_turns_per_user=_non_negative_int(env, "CLARA_MAX_TURNS_PER_USER", 2),
             max_tool_rounds=_positive_int(env, "CLARA_MAX_TOOL_ROUNDS", 40),
             tool_timeout=_positive_int(env, "CLARA_TOOL_TIMEOUT", 900),
             llm_first_token_timeout=_positive_int(env, "CLARA_LLM_FIRST_TOKEN_TIMEOUT", 300),
@@ -383,9 +393,10 @@ class Settings:
             cloud_context_window=_positive_int(env, "CLARA_CLOUD_CONTEXT_WINDOW", 131_072),
             ollama_api_key=api_key,
             web_tools=_flag(env, "CLARA_WEB_TOOLS", default=True),
+            web_fetch_any_url=_flag(env, "CLARA_WEB_FETCH_ANY_URL"),
             notify_long_turn=_non_negative_int(env, "CLARA_NOTIFY_LONG_TURN", 120),
             traffic_log=_flag(env, "CLARA_TRAFFIC_LOG", default=True),
-            traffic_log_days=_positive_int(env, "CLARA_TRAFFIC_LOG_DAYS", 30),
+            traffic_log_days=_positive_int(env, "CLARA_TRAFFIC_LOG_DAYS", 7),
             traffic_log_max_body=_positive_int(env, "CLARA_TRAFFIC_LOG_MAX_BODY", 100_000),
             tailscale=tailscale,
             tailscale_port=tailscale_port,
@@ -393,8 +404,10 @@ class Settings:
             auth_max_failures=_non_negative_int(env, "CLARA_AUTH_MAX_FAILURES", 10),
             auth_block_seconds=_positive_int(env, "CLARA_AUTH_BLOCK_SECONDS", 300),
             session_days=_non_negative_int(env, "CLARA_SESSION_DAYS", 90),
+            session_max_days=_non_negative_int(env, "CLARA_SESSION_MAX_DAYS", 365),
             user_surfaces=parse_user_surfaces(text("CLARA_USER_SURFACES", "web,app,cli,console")),
             web_signup=_flag(env, "CLARA_WEB_SIGNUP"),
+            signup_integrations=_flag(env, "CLARA_SIGNUP_INTEGRATIONS"),
             login_surfaces=parse_login_surfaces(text("CLARA_LOGIN_SURFACES", "discord")),
             discord_token=text("DISCORD_BOT_TOKEN") or None,
             discord_auto_start=_flag(env, "AUTO_START_DISCORD_BOT"),
@@ -405,6 +418,7 @@ class Settings:
             project_max_files=_positive_int(env, "CLARA_PROJECT_MAX_FILES", 5_000),
             project_inline_percent=inline_percent,
             github_token=text("GITHUB_TOKEN") or None,
+            github_token_shared=_flag(env, "CLARA_GITHUB_TOKEN_SHARED"),
             default_daily_tokens=_token_limit(env, "CLARA_DEFAULT_DAILY_TOKENS"),
             weight_reference_b=_positive_number(env, "CLARA_WEIGHT_REFERENCE_B", 8.0),
             task_max_reminders=_positive_int(env, "CLARA_TASK_MAX_REMINDERS", 10),

@@ -156,7 +156,7 @@ All routes except `/health` need `Authorization: Bearer <token>`.
 | `DELETE /v1/reminders/{id}?surface=&user_id=` | cancel one of the person's own reminders |
 | `POST /v1/tasks` | `{surface, user_id, user_name?, title, description?, due?, reminders?, timezone?, conversation?, targets?, parent_id?}` → the task: add one to the person's to-do list (see *Tasks*); `due` and `reminders` are ISO 8601 (a time without offset is read in `timezone`); **without `reminders` Clara picks them**; 422 for a past time or a bad field |
 | `GET /v1/tasks?surface=&user_id=&status=` | the person's tasks (`status`: `open` by default, `done` or `all`): each with `reminders_sent`, `next_reminder`, `reminders` (all those to come), `max_reminders`, `parent_id`, `subtasks` (`{total, done}`) and `due_limit` (see *Sub tasks*); `GET /v1/tasks/{id}` one task |
-| `PATCH /v1/tasks/{id}` | `{surface, user_id, title?, description?, due?, reminders?, targets?, status?}`: only what is given changes; `due: null` removes the deadline, `reminders` replaces those to come (`[]`: stop reminding), `status` `done` or `open` closes or reopens it; `DELETE /v1/tasks/{id}?surface=&user_id=` deletes it |
+| `PATCH /v1/tasks/{id}` | `{surface, user_id, title?, description?, due?, reminders?, targets?, status?, parent_id?, before_id?}`: only what is given changes; `parent_id` makes it a sub task of that task (`null`: a main task again) and `before_id` puts it before that task among those with the same parent (`null`: last), see *Sub tasks*; `due: null` removes the deadline, `reminders` replaces those to come (`[]`: stop reminding), `status` `done` or `open` closes or reopens it; `DELETE /v1/tasks/{id}?surface=&user_id=` deletes it |
 | `POST /v1/notifications` | `{surface, user_id, user_name?, text, title?, targets?, conversation?}` → `{id, sent_at, targets}`: notify that person now (see *Notifications*); 429 when too many |
 | `GET /v1/settings?surface=&user_id=` | the person's settings: `{notify_after, notify_after_default, notify_after_effective}`, the seconds a task takes before it notifies them when done (see *Notifications*); `notify_after` is `null` while they have not set one |
 | `PATCH /v1/settings` | `{surface, user_id, user_name?, notify_after}`: `notify_after` is 0 (never) to 604800 seconds, or `null` for the server's default; 422 out of range |
@@ -169,8 +169,9 @@ All routes except `/health` need `Authorization: Bearer <token>`.
 | `POST /v1/accounts/link` | `{surface, user_id, code, to_surface, to_user_id}`; 403 bad code, 409 both accounts have memories |
 | `DELETE /v1/conversations/{id}?surface=&user_id=` | forget a thread, keep the facts; with an account, only one its person started (404 otherwise) |
 | `POST /v1/auth/login` | `{username, password, surface?, device?}` → `{token, user, surface}`; with the header `X-Clara-Web: 1` (the web site) the token goes in an HttpOnly cookie instead; 401 wrong, 403 surface not allowed, 409 accounts cannot be merged, 429 too many tries (see *Users*) |
-| `GET /v1/auth/signup`, `POST /v1/auth/register` | `{open}`: whether the web site lets people make their own user; `{username, password}` makes a user (never an administrator) and logs them in on `web`, as login does. 403 when `CLARA_WEB_SIGNUP` is off, 409 name taken, 422 rules, 429 too many (see *Users*) |
+| `GET /v1/auth/signup`, `POST /v1/auth/register` | `{open, privacy}`: whether the web site lets people make their own user, and what it does with their words; `{username, password}` makes a user (never an administrator) and logs them in on `web`, as login does. 403 when `CLARA_WEB_SIGNUP` is off, 409 name taken, 422 rules, 429 too many (see *Users*) |
 | `POST /v1/auth/logout`, `GET /v1/auth/me`, `POST /v1/auth/password` `{current_password, new_password}`, `GET /v1/auth/sessions`, `DELETE /v1/auth/sessions/{id}` | the signed-in user's own account and devices |
+| `GET /v1/auth/export`, `POST /v1/auth/delete-account` `{password}` | download everything the server keeps about me; erase my user, my memories and my lines of the traffic log |
 | `POST /v1/documents/extract` | the bytes of a PDF as the body → `{text, pages, truncated}` |
 | `GET /health` | no auth; shows the active provider and model, and `restarted`: the id of the restart that started this server (see *Restarting the server*) |
 | `GET /v1/admin/commands`, `POST /v1/admin/command` | `{line}` → `{output, quit}`; an **admin token** or an administrator user (used by `clara-admin`) |
@@ -244,7 +245,7 @@ A client tool may have changed files before the turn stopped: the model must kno
 the model had not started.
 
 Other events of the stream: `tool_start` (`{name, arguments}`) says a server tool is about to run and `tool` that it ran
-(`{name, arguments, result}`, the result cut to 500 characters), and `thinking` carries the reasoning of the models that show it apart (it is never stored nor sent
+(`{name, arguments, result, truncated}`, the result cut to 8000 characters: `truncated` says so), and `thinking` carries the reasoning of the models that show it apart (it is never stored nor sent
 back to the model).
 
 The system prompt only holds the date, and the time of day is added to the newest user message (not
@@ -460,7 +461,7 @@ remind me about the taxes?", "I did the taxes"). Only its person can see or chan
   the rules or Clara pick are cut at the limit, and a follow-up never queues one after it. **Completion goes both
   ways**: finishing a task finishes its open sub tasks, finishing the last open sub task finishes the task it is
   part of (and so on up; so does deleting the last open one), reopening a sub task reopens the done tasks above it,
-  and a done task takes no new sub task. Deleting a task deletes its sub tasks. At most 50 sub tasks directly under
+  and a done task takes no new sub task. Deleting a task deletes its sub tasks. **Moving**: an open task, with its sub tasks, can be moved under another open task (or back to a main task) and put in an order (`position`; the web page does it by dragging, the tool `update_task` has `parent_id`, the consoles `/task move <id> <parent-id>|none`): nothing of it or of its sub tasks may be after the deadline of the tasks it is then part of, and the task it leaves is done if all that is left of it is. At most 50 sub tasks directly under
   one task; they count in the 100 / 500 limits. There is no way to move a task under another one yet.
 - **Receiving them** is the event stream of *Notifications*: a task reminder is a `notification` titled
   `Task: <title>`, with the source `tasks`, for the surfaces the task names (`targets`, empty: all of the
@@ -579,7 +580,10 @@ desktop app also show and continue each other's conversations (the terminal's an
 administrator, and always a **new person**: unlike `/user add`, it does not take over the memories of an account that
 has their name (anyone could claim `discord:1234` otherwise), so a name an account already uses is refused. An
 address (other than this machine) may make 5 users a minute, then none for an hour. Leave it off on a server that
-strangers can reach (Tailscale Funnel).
+strangers can reach (Tailscale Funnel); if you turn it on there anyway: such a user starts with every integration
+(GitHub, Google Drive, folders) **off** until an administrator allows them (`CLARA_SIGNUP_INTEGRATIONS=true` allows
+them at once), names that pass for the operator's (`admin`, `root`, `clara`...) are refused, one user may have
+`CLARA_MAX_TURNS_PER_USER` (2) answers running at once, and each has the daily credits of `/limit default`.
 
 The same things are on the web site's *Admin* page, where a password can also be typed instead of generated. A user
 changes their own password on the *Account* page, which signs out their other devices. A device that logs in
@@ -591,8 +595,8 @@ A user takes over the memories of accounts that already have their name: `/user 
 already have memories, signing in is refused (409) and an operator merges them with `/link`.
 
 **Tokens.** Signing in returns a random token (`clu_...`). The server keeps its hash only, and it works until it is
-revoked (sign out, a new password, the user being disabled or removed) or has been unused for `CLARA_SESSION_DAYS`
-days (90; `0` = never). Programs keep the token, not the password: `clara-chat` and `clara-admin` ask for the password
+revoked (sign out, a new password, the user being disabled or removed), has been unused for `CLARA_SESSION_DAYS`
+days (90; `0` = never) or is `CLARA_SESSION_MAX_DAYS` old (365; `0` = no limit), used or not. Programs keep the token, not the password: `clara-chat` and `clara-admin` ask for the password
 once and save the token (`%APPDATA%\clara\sessions.json`, or `~/.config/clara/`; `clara-chat --logout` forgets it);
 the desktop app asks in its settings; `custom-console` signs in by itself with `CLARA_USER` / `CLARA_PASSWORD`.
 Wrong passwords are limited per address (see *Security*).
@@ -610,9 +614,11 @@ desktop app both manage them).
   package), `.zip` archives (unpacked into a folder named after them), whole folders (the clients send their text
   files), and **GitHub repositories**: the server downloads a snapshot of a branch, tag or commit (the archive
   GitHub makes, no git needed) into a folder named after the repository; *Sync* downloads it again. Public
-  repositories need nothing; private ones need `GITHUB_TOKEN` (a fine-grained token with read access to their
-  contents) in the server's `.env`, and it never leaves the server. (To let Clara *change* a repository, see
-  *Integrations*: each person connects their own GitHub account.)
+  repositories need nothing; a private one is downloaded with the GitHub account the person connected (*Integrations*),
+  or, for **administrators only**, with `GITHUB_TOKEN` (a fine-grained token with read access to their contents) in the
+  server's `.env`: it is the operator's own access, so it is not lent to other users unless
+  `CLARA_GITHUB_TOKEN_SHARED=true`. It never leaves the server. A branch, tag or commit is a name (letters, digits,
+  `._+@-` and `/`, never `..`).
 - **What is left out**: anything that is not text (images, programs, fonts, archives inside archives), dependencies
   and build output (`node_modules`, `.venv`, `.git`, `dist`, `build`, `target`…), lock files and minified files, and
   any file of more than 1 million characters of text. Each one left out is listed with the reason.
@@ -760,7 +766,7 @@ provider that has its key works at the same time. A model is named `provider:mod
 
 | | |
 | --- | --- |
-| `GET /v1/models` | `?surface=&user_id=`: `models` the person may choose (`ref`, `name`, `provider_label`, `weight`), the server's `default`, their `choices` by surface, the model `current`ly used on that surface |
+| `GET /v1/models` | `?surface=&user_id=`: `models` the person may choose (`ref`, `name`, `provider_label`, `weight`), `personal` (every model of the providers they brought an API key for, `weight` 0), the server's `default`, their `choices` by surface, the model `current`ly used on that surface |
 | `PUT /v1/models/choice` | `{surface, user_id, model, for_surface?}`: choose a model for a surface (null: the server's); not for Discord |
 | `GET /v1/admin/catalog` | `?refresh=true`: every model of every usable provider, with `enabled`, `weight`, `size_b`, the model of `discord`, the providers that did not answer (`problems`) |
 | `PATCH /v1/admin/catalog` | `{refs, enabled?, weight?, auto_weight?}` (a weight for one model at a time) |
@@ -797,6 +803,35 @@ credit limit…*, *Default limit*) or the API. Credits are written `500000`, `50
 | `GET /v1/admin/users` | each user has `usage: {used, limit, remaining, resets_at, own_limit, default_limit}` (also in `GET /v1/auth/me`) |
 | `PATCH /v1/admin/users/{name}` | `{token_limit}` (0: none) or `{follow_default_limit: true}` |
 | `GET /v1/admin/limits`, `PUT /v1/admin/limits/default` | `{default}`; `{tokens}` (0: none) |
+
+## Usage statistics
+
+Every answer is written to a **usage log** (one row per answer, the model rounds of a tool loop added up): when, who
+asked, the surface, the conversation, the model that answered, the **tokens in and out** (as the model reported them;
+estimated, and marked `~` on the web site, when it reported nothing) and the credits it cost. Answers Clara gives on
+her own (reminders, scheduled tasks, task helpers) are logged as `scheduled`, and so are the server's own
+**compactions** and **titles** (`compaction`, `title`; they cost no credit and go to the one person who wrote in the
+conversation, or to nobody when several did). No message text is kept in the log. It is a record only: the daily
+credit limit (*Usage limits*) is counted apart and does not read it. A person's rows go when they are erased, and
+follow them when two accounts are linked.
+
+**Discord is kept apart from every other surface** everywhere: two totals for the server, and for each person a
+Discord column and an "other surfaces" column (the web site, the app, the terminal and so on, detailed per surface).
+
+For administrators, on the web site, *Admin, Usage*: totals of Discord and of the rest, a table per person (answers,
+tokens in and out, Discord, other surfaces, **preferred models**: the three they use most, last use) over a period
+(24 hours to all time), and the **history** of every call, filtered by person, surface (Discord or not) and kind.
+
+Everybody else has a **Usage** page of their own (the avatar menu, next to *Account*): the same figures about
+themselves only: Discord and the other surfaces, their tokens in and out per surface, their preferred models, today's
+credits against their limit, and the history of their own calls.
+
+| | |
+| --- | --- |
+| `GET /v1/me/usage`, `GET /v1/me/usage/history` | the same, for the signed-in user only (all their accounts: the web site, the app, Discord once linked): `{days, usage, quota}` (`usage` is the person's entry above, `null` before their first call; `quota` is today's credits) and `{calls, next, totals}` with the same filters but `person` |
+| `GET /v1/me/api-keys`, `PUT /v1/me/api-keys/{provider}`, `DELETE /v1/me/api-keys/{provider}`, `GET /v1/me/api-keys/history` | the user's own API keys (Usage page): the providers that take one (`cloud`, `gemini`, `deepseek`, `mistral`) with `saved` and a `hint` (the last 4 characters; the key is never given back), `PUT {api_key}` checks the key with the provider and keeps it encrypted (`CLARA_SECRET_KEY`), and the tokens used on those keys, counted apart from the server's. A user with a key for a provider is answered by every model of it on their key (web, app, terminal, console; never Discord): no credits are counted and the daily limit does not stop them |
+| `GET /v1/admin/usage` | `?days=` (0: ever): `{users: [{person, user, is_admin, answers, prompt_tokens, completion_tokens, credits, discord, other, surfaces, models, first_at, last_at}], totals: {discord, other}}` |
+| `GET /v1/admin/usage/history` | `?person=&group=discord\|other&surface=&kind=message\|scheduled\|compaction\|title&model=&days=&before=&limit=`: `{calls: [{id, at, kind, surface, group, conversation, person, user, model_ref, model, provider, prompt_tokens, completion_tokens, credits, rounds, estimated}], next, totals}`, newest first; pass `next` as `before` for the following page |
 
 ## Markdown files
 
@@ -902,11 +937,13 @@ one JSON object per line). Entries of one exchange share an `id`:
 
 Never written: the bearer tokens (only the client's name), the API key, and the values of fields called
 `code`, `token`, `password`, `api_key`... (a link code, for instance). Bodies are cut at
-`CLARA_TRAFFIC_LOG_MAX_BODY` characters (100 000). Files older than `CLARA_TRAFFIC_LOG_DAYS` (30) are deleted;
+`CLARA_TRAFFIC_LOG_MAX_BODY` characters (100 000). Files older than `CLARA_TRAFFIC_LOG_DAYS` (7) are deleted;
 `CLARA_TRAFFIC_LOG=false` turns the log off. The writing happens in a background thread.
 
-**Mind that** the log holds everything people say and, through the prompts, what Clara knows about them:
-`/forget-person` does **not** erase it. Read it with any JSON tool, e.g.
+**Mind that** the log holds everything people say and, through the prompts, what Clara knows about them. The files and
+the data directory are readable by the account that runs the server only (`rw-------`, set each time it starts).
+`/forget-person` and a person's own *Erase my account* delete their lines from the log too (the lines of their
+accounts, their conversations and the prompts that name them). Read it with any JSON tool, e.g.
 `jq 'select(.kind=="llm_response") | .text' data/logs/traffic-2026-10-02.jsonl`.
 
 ## Stopping the server
@@ -979,14 +1016,28 @@ stays silent (`CLARA_LLM_FIRST_TOKEN_TIMEOUT`) and a refused key are not retried
 - A model slot is held only while the model works: a client that reads its stream slowly, or not at
   all, never keeps one busy. A model that stops answering is given up on after
   `CLARA_LLM_FIRST_TOKEN_TIMEOUT` / `CLARA_LLM_IDLE_TIMEOUT` seconds (an `error` event, or 504).
+- One person may have `CLARA_MAX_TURNS_PER_USER` (2) answers running at once (a third is refused with 429), so that one
+  account cannot hold every model slot. The server's own turns (reminders, schedules) are not counted.
+- A request body is refused (413) over 16 MB (90 MB for project files, 31 MB for a PDF), counted as it arrives.
 - Memory is written only by the server process, so clients never conflict.
 
 ## Security
 
 - **Making an account on the web site is off** unless `CLARA_WEB_SIGNUP=true`; turn it on only where everyone who can
   reach the server may use it (it spends your model's tokens). Open sign-ups never inherit another account's memories.
+- **Everything the server keeps is private to the account that runs it**: the data directory is `rwx------` and its
+  files `rw-------` (database, logs, the key of the connected accounts, `.env` backups: only the newest three are
+  kept). `.env` itself should be `chmod 600`.
+- **`web_fetch` only reads addresses the person wrote** (in this conversation) **or that `web_search` returned**: a page
+  or a file Clara reads can tell her to fetch an address that carries what she knows about the person. Set
+  `CLARA_WEB_FETCH_ANY_URL=true` to let her read any address.
+- **A person can take their data and leave**: *Account → Your data* downloads everything the server keeps (JSON,
+  `GET /v1/auth/export`) or erases the user, the person and their traffic-log lines (`POST /v1/auth/delete-account`,
+  password asked again). The sign-up page tells what is stored, which model services read it and how long it is logged.
+- **Limit what client tokens may do**: set `CLARA_CLIENT_SURFACES` (a client with no entry may speak for anybody on any
+  surface; the server warns at start). The Discord bot built into the server needs no token at all.
 - **People sign in with a password** (see *Users*); the server then knows who is speaking, and a token it
-  gives cannot act as anybody else. Passwords are kept only as salted scrypt hashes; the tokens only as
+  gives cannot act as anybody else. Passwords are kept only as salted scrypt hashes (N=2¹⁵, made again at the next login when they were weaker); the tokens only as
   SHA-256 hashes; neither is ever written to the traffic log.
 - Client tokens (`CLARA_TOKENS`) are required; the server refuses to start without any. They are for programs
   (the Discord bot) that speak for several people. Use one token per client so one can be revoked alone.

@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from .agent import Agent
 from .clientapi import DISCORD
 from .discord_bot.service import DiscordService
+from .erasure import erase_person
 from .lifecycle import Lifecycle
 from .limits import UsageLimits, parse_limit, show_limit
 from .memory import Memory, Person
@@ -26,6 +27,7 @@ from .providers import ProviderError, ProviderManager, make_ref
 from .restart import RestartError, RestartService
 from .settings import Settings
 from .tailscale import Tailscale
+from .traffic import TrafficLog
 from .users import UserError, Users, generate_password
 
 log = logging.getLogger(__name__)
@@ -58,6 +60,7 @@ class CommandContext:
     users: Users | None = None  # people who log in with a password
     discord: DiscordService | None = None  # the Discord bot built into the server
     limits: UsageLimits | None = None  # the daily credits of each person
+    traffic: TrafficLog | None = None  # what the server logged: erasing a person erases their lines too
     models: ModelCatalog | None = None  # the models users may choose, and what they cost
     restart: RestartService | None = None  # pull, update and start again
 
@@ -452,9 +455,9 @@ async def forget_person_command(ctx: CommandContext, args: str) -> str:
             f"This would erase {summary}.\nIn a conversation shared with other people only their own "
             f"messages go.\nThere is no undo; to proceed: /forget-person {person.id} confirm"
         )
-    ctx.memory.delete_person(person.id)
+    _, lines = erase_person(ctx.memory, ctx.traffic, person.id)
     log.info("erased person %s (id %s)", person.name, person.id)
-    return f"Erased {summary}."
+    return f"Erased {summary}, and {lines} lines of the traffic log."
 
 
 @registry.command(

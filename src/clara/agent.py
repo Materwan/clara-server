@@ -49,7 +49,8 @@ from .qcm import SURFACES as QCM_SURFACES
 from .reminders import ReminderService
 from .retry import delay_before, retryable
 from .tasks import TaskService
-from .tools import ABOUT_PERSON, INTEGRATION_TOOLS, MARKDOWN_TOOLS, PROJECT_TOOLS, QCM, Toolbox, ToolContext
+from .tools import ABOUT_PERSON, INTEGRATION_TOOLS, MARKDOWN_TOOLS, PROJECT_TOOLS, QCM, Toolbox, ToolContext, urls_in
+from .usagelog import UsageLog
 
 if TYPE_CHECKING:
     from .integrations.broker import Broker
@@ -64,7 +65,7 @@ TOOL_HISTORY_SHARE = 0.25  # ...and only while they fit in this share of the win
 OMITTED = "[output omitted to save context]"
 OMITTED_IN_TURN = "[output omitted to fit the context: run the tool again if you still need it]"
 NOT_RUN = "[not run: the answer was interrupted]"
-TOOL_EVENT_RESULT = 500  # characters of a server tool's result shown to the client
+TOOL_EVENT_RESULT = 8000  # characters of a server tool's result shown to the client (the model gets all of it)
 DEFAULT_CONTEXT_WINDOW = 32_768
 PROMPT_LIMIT = 0.95  # share of the window a prompt may fill; beyond, the model would truncate it silently
 ROUND_SEPARATOR = "\n\n"  # between the texts of two model rounds
@@ -130,6 +131,19 @@ class PromptTooLarge(Exception):
 
 class NothingToTitle(Exception):
     """The conversation is not listed, or has nothing a title could be written from."""
+
+
+class TooManyTurns(UsageLimitReached):
+    """One person already has as many answers running as the server lets them, so they cannot hold every slot."""
+
+    def __init__(self, running: int):
+        super().__init__(
+            f"You already have {running} answers running: wait for one to finish before asking more.", retry_after=5
+        )
+
+
+# The turns the server starts by itself (reminders, schedules, tasks, requests that were on hold): not a person's
+INTERNAL_OWNERS = frozenset({"reminders", "schedule", "tasks", "integrations"})
 
 
 class ServerStopping(Exception):
@@ -207,6 +221,7 @@ class _Round:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     credits: int = 0  # what it cost the person
+    seconds: float = 0.0  # how long the model took, from the request to its last chunk
     separator: str = ""  # put before its text: it follows a round that wrote something
 
     @property
@@ -216,6 +231,17 @@ class _Round:
     @property
     def thinking(self) -> str:
         return "".join(self.thinking_parts)
+
+
+@dataclass
+class _Tally:
+    """What the model rounds of one answer used, added up to be logged once (see Agent._log_usage)."""
+
+    rounds: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    credits: int = 0
+    estimated: bool = False
 
 
 @dataclass
@@ -235,6 +261,8 @@ class Agent:
         *,  # the rest by name only: there are many, and two of the same type are easily swapped
         history_turns: int = 20,
         max_concurrent_llm: int = 2,
+        max_turns_per_user: int = 0,
+        web_fetch_any_url: bool = False,
         max_tool_rounds: int = MAX_TOOL_ROUNDS,
         context_window: int | Callable[[], int] = DEFAULT_CONTEXT_WINDOW,
         compact_percent: int = 80,
@@ -254,6 +282,7 @@ class Agent:
         projects: Projects | None = None,
         markdown: MarkdownFiles | None = None,
         limits: UsageLimits | None = None,
+        usage_log: UsageLog | None = None,
         models: ModelCatalog | None = None,
         tasks: TaskService | None = None,
         integrations: Broker | None = None,
@@ -262,6 +291,7 @@ class Agent:
         self.integrations = integrations  # what people connected (GitHub, Drive, folders), checked and run by the broker
         self.projects = projects  # the files of the conversations that are part of a project
         self.markdown = markdown  # the markdown files Clara writes for a person (the markdown tools)
+        self.usage_log = usage_log  # tokens in and out of every answer, for the administration (usagelog.py)
         self.limits = limits  # the daily credits of each person (limits.py); None: nobody is limited
         self.models = models  # the model each person chose, and what it costs (models.py); None: one backend
         self.reminders = reminders  # lets the model's tools set reminders
@@ -287,6 +317,9 @@ class Agent:
         self._context_window = context_window
         self.stats = AgentStats()
         self.max_concurrent_llm = max_concurrent_llm
+        self.web_fetch_any_url = web_fetch_any_url  # web_fetch may read any address (else: the person's and the search's)
+        self.max_turns_per_user = max_turns_per_user  # answers one person may have running at once (0: no limit)
+        self._running: dict[object, int] = {}  # person (or account, not known yet) -> answers running
         self._llm_slots = asyncio.Semaphore(max_concurrent_llm)
         # One lock per conversation: two messages of the same thread are answered in
         # order, different threads run in parallel. Unused locks are garbage collected.
@@ -359,6 +392,16 @@ class Agent:
     # ------------------------------------------------------------------
     # Prompt
     # ------------------------------------------------------------------
+    def _trusted_urls(self, request: ChatRequest, conversation: str) -> set[str]:
+        """The addresses web_fetch may read this turn: those in this message and in the person's recent ones."""
+        found = urls_in(request.message)
+        if not request.ephemeral:
+            shown, _ = self.memory.transcript(conversation, 30)
+            for message in shown:
+                if message.role == "user":
+                    found |= urls_in(message.content)
+        return found
+
     @staticmethod
     def _user_content(text: str, prefix: str = "", author: str = "") -> str:
         content = f"{prefix}\n\n{text}" if prefix else text
@@ -500,6 +543,12 @@ class Agent:
         """
         if not self.accepting:
             raise ServerStopping("The server is stopping and takes no new question.")
+        who: object = None
+        if self.max_turns_per_user and owner not in INTERNAL_OWNERS and request.mode != "observe":
+            who = self.memory.resolve(request.surface, request.user_id, request.user_name).id  # the same one at every turn
+            if self._running.get(who, 0) >= self.max_turns_per_user:
+                raise TooManyTurns(self._running[who])
+            self._running[who] = self._running.get(who, 0) + 1
         self.stats.active += 1
         self.stats.turns += 1
         started = time.monotonic()
@@ -515,6 +564,10 @@ class Agent:
                     yield event
         finally:
             self.stats.active -= 1
+            if who is not None:
+                self._running[who] -= 1
+                if self._running[who] <= 0:
+                    del self._running[who]
 
     # ------------------------------------------------------------------
     # Notifications of the server's own long work
@@ -578,7 +631,7 @@ class Agent:
         person = self.memory.resolve(request.surface, request.user_id, request.user_name)
         conversation = request.conversation_id
         ephemeral = request.ephemeral
-        if self.limits is not None and request.mode != "observe":
+        if self.limits is not None and request.mode != "observe" and not chosen.own_key:  # their key: no credits
             try:
                 self.limits.check(person.id)
             except UsageLimitReached:
@@ -594,6 +647,7 @@ class Agent:
             self.notifier, roster=tuple(p for p in request.roster if p.id != person.id),
             projects=self.projects, project_id=request.project, markdown=self.markdown, tasks=self.tasks,
             integrations=self.integrations,
+            trusted_urls=None if self.web_fetch_any_url else self._trusted_urls(request, conversation),
         )
         client_tools = {schema["function"]["name"] for schema in request.tools}
         hidden = set() if context.roster else {ABOUT_PERSON}
@@ -632,6 +686,9 @@ class Agent:
             reply_parts: list[str] = []
             tools_used: list[str] = []
             prompt_tokens = completion_tokens = context_tokens = credits = 0
+            generating = 0.0  # seconds the model rounds took, tool runs left out
+            started = time.monotonic()
+            tally = _Tally()
             current = _Round()  # the round in progress: its text is not in `rows` until it ends
             round_open = False
             spoke = False  # a round wrote something: the next one that writes starts a new paragraph
@@ -648,11 +705,12 @@ class Agent:
                     # aclosing, here and below: a client that leaves closes the round now (its usage counted, its
                     # wait for the client's tools ended), not whenever the garbage collector gets to it
                     async with contextlib.aclosing(
-                        self._model_round(current, messages, tools, chosen, person, separate=spoke)
+                        self._model_round(current, messages, tools, chosen, person, separate=spoke, tally=tally)
                     ) as events:
                         async for event in events:
                             yield event
                     credits += current.credits
+                    generating += current.seconds
                     prompt_tokens += current.prompt_tokens
                     completion_tokens += current.completion_tokens
                     text = current.text
@@ -702,6 +760,10 @@ class Agent:
                     reason = str(error) or type(error).__name__
                 raise
             finally:
+                self._log_usage(
+                    "scheduled" if owner in INTERNAL_OWNERS else "message", person.id, request.surface, conversation,
+                    chosen, tally,
+                )
                 if not finished and not ephemeral and request.mode == "answer":
                     # What was done stays known: the files a client tool changed are changed for good
                     self._keep_interrupted(request, person, rows, current.text if round_open else "", reason)
@@ -732,6 +794,8 @@ class Agent:
             "person": {"id": person.id, "name": person.name},
             "tools": tools_used,
             "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens},
+            # total: the whole turn, tools and waits included; generating: the model rounds alone (the speed's base)
+            "timing": {"total": time.monotonic() - started, "generating": generating},
             "context": self._context_info(context_tokens, window),
             **self._model_fields(chosen),  # the model may change between turns (/provider, a person's choice)
             "credits": credits,  # what this turn cost: its tokens times the weight of the model
@@ -741,14 +805,15 @@ class Agent:
 
     async def _model_round(
         self, current: _Round, messages: list[dict], tools: list[dict] | None, chosen: Chosen, person: Person,
-        separate: bool,
+        separate: bool, tally: _Tally,
     ) -> AsyncIterator[dict]:
         """One model round, filling `current` as the chunks come: text, reasoning, tool calls, tokens and what they
         cost the person. `separate`: an earlier round wrote something, so this one's text starts a new paragraph."""
         model_failed = False
+        begun = time.monotonic()
         try:
             # aclosing: if the client goes away at a yield, the model task stops now
-            async with contextlib.aclosing(self._model(messages, tools, chosen.ref)) as model:
+            async with contextlib.aclosing(self._model(messages, tools, chosen.ref, chosen.api_key)) as model:
                 async for chunk in model:
                     if chunk.notice:  # the model is busy and is asked again: say so
                         yield {"type": "retrying", "message": chunk.notice}
@@ -771,11 +836,15 @@ class Agent:
             raise
         finally:
             # also when the client left (GeneratorExit, cancelled): what the model did counts against their day
+            current.seconds = time.monotonic() - begun
             if not model_failed:
-                current.credits = self._count_usage(
-                    person, current.prompt_tokens + current.completion_tokens, messages, tools, current.text_parts,
-                    chosen.weight,
-                )
+                prompt, completion, estimated = self._round_tokens(current, messages, tools)
+                current.credits = 0 if chosen.own_key else self._count_usage(person, prompt + completion, chosen.weight)
+                tally.rounds += 1
+                tally.prompt_tokens += prompt
+                tally.completion_tokens += completion
+                tally.credits += current.credits
+                tally.estimated = tally.estimated or estimated
 
     async def _run_tools(
         self, calls: list[tuple[str, ToolCall]], context: ToolContext, client_tools: set[str], results: dict[str, str],
@@ -796,7 +865,10 @@ class Agent:
             )
             for (call_id, call), output, call_context in zip(batch, outputs, own):
                 results[call_id] = output
-                yield {"type": "tool", "name": call.name, "arguments": call.arguments, "result": _shorten(output, TOOL_EVENT_RESULT)}
+                yield {
+                    "type": "tool", "name": call.name, "arguments": call.arguments,
+                    "result": _shorten(output, TOOL_EVENT_RESULT), "truncated": len(output) > TOOL_EVENT_RESULT,
+                }
                 for extra in call_context.events:  # what the tool asks the client to show (a QCM)
                     yield extra
         if not remote:
@@ -831,21 +903,64 @@ class Agent:
         if chosen.ref is None:
             return {"model": getattr(self.backend, "model", ""), "provider": getattr(self.backend, "active", "")}
         provider, _, model = chosen.ref.partition(":")
-        return {"model": model, "provider": provider, "model_ref": chosen.ref, "weight": chosen.weight}
+        return {
+            "model": model, "provider": provider, "model_ref": chosen.ref, "weight": chosen.weight,
+            "own_key": chosen.own_key,
+        }
 
-    def _count_usage(
-        self, person: Person, reported: int, messages: list[dict], tools: list[dict] | None, text_parts: list[str],
-        weight: float = 1.0,
-    ) -> int:
+    @staticmethod
+    def _round_tokens(
+        current: _Round, messages: list[dict], tools: list[dict] | None
+    ) -> tuple[int, int, bool]:
+        """(tokens in, tokens out, estimated) of a round: what the model reported, else our own estimate."""
+        if current.prompt_tokens + current.completion_tokens:
+            return current.prompt_tokens, current.completion_tokens, False
+        return estimate_prompt_tokens(messages, tools), estimate_tokens("".join(current.text_parts)), True
+
+    def _count_usage(self, person: Person, tokens: int, weight: float = 1.0) -> int:
         """Count what a round cost the person, in credits; returns them."""
         if self.limits is None:
             return 0
-        tokens = reported or estimate_prompt_tokens(messages, tools) + estimate_tokens("".join(text_parts))
         try:
             return self.limits.record(person.id, tokens, weight)
         except Exception:
             log.exception("could not count %d tokens for person %s", tokens, person.id)
             return 0
+
+    def _log_usage(
+        self, kind: str, person_id: int | None, surface: str, conversation: str, chosen: Chosen, tally: _Tally
+    ) -> None:
+        """Keep what an answer (or a compaction, a title) used in the usage log, if there is one."""
+        if self.usage_log is None or not tally.rounds:
+            return
+        fields = self._model_fields(chosen)
+        self.usage_log.record(
+            person_id, kind, surface, conversation, fields.get("model_ref", ""), fields["model"], fields["provider"],
+            tally.prompt_tokens, tally.completion_tokens, tally.credits, tally.rounds, tally.estimated,
+            chosen.own_key,
+        )
+
+    async def _upkeep_model(
+        self, kind: str, conversation: str, messages: list[dict], chosen: Chosen
+    ) -> str:
+        """Run the model for work the server does on its own (a summary, a title): its text, and its tokens logged
+        to the person who wrote in the conversation (nobody, when several did). Not counted against any limit."""
+        parts: list[str] = []
+        tally = _Tally()
+        async with contextlib.aclosing(self._model(messages, None, chosen.ref, chosen.api_key)) as model:
+            async for chunk in model:
+                parts.append(chunk.text)
+                tally.prompt_tokens += chunk.prompt_tokens
+                tally.completion_tokens += chunk.completion_tokens
+        text = "".join(parts)
+        tally.rounds = 1
+        if not tally.prompt_tokens + tally.completion_tokens:
+            tally.prompt_tokens, tally.completion_tokens = estimate_prompt_tokens(messages), estimate_tokens(text)
+            tally.estimated = True
+        people = self.memory.people_in_conversation(conversation)
+        surface = conversation.partition(":")[0]
+        self._log_usage(kind, people[0] if len(people) == 1 else None, surface, conversation, chosen, tally)
+        return text
 
     def _keep_interrupted(
         self, request: ChatRequest, person: Person, rows: list[TurnRow], partial: str, reason: str
@@ -889,9 +1004,10 @@ class Agent:
         }
 
     async def _model(
-        self, messages: list[dict], tools: list[dict] | None, ref: str | None = None
+        self, messages: list[dict], tools: list[dict] | None, ref: str | None = None, api_key: str | None = None
     ) -> AsyncIterator[LlmChunk]:
-        """One model round (of the model `ref`, `provider:model`; by default the backend's own). A task reads
+        """One model round (of the model `ref`, `provider:model`; by default the backend's own; `api_key`: the
+        person's own key for its provider). A task reads
         the model and holds a slot while it works, and passes the chunks on through a queue: a client that
         reads slowly (or not at all) cannot keep a slot busy, and a model that hangs times out."""
         queue: asyncio.Queue = asyncio.Queue()
@@ -905,7 +1021,7 @@ class Agent:
                         stream = (
                             self.backend.stream(messages, tools)
                             if ref is None
-                            else self.backend.stream_ref(ref, messages, tools)
+                            else self.backend.stream_ref(ref, messages, tools, api_key)
                         )
                         async for chunk in with_idle_timeout(stream, self.first_token_timeout, self.idle_timeout):
                             started = True
@@ -1067,23 +1183,19 @@ class Agent:
         messages = [{"role": "system", "content": TITLE_INSTRUCTIONS}, {"role": "user", "content": excerpt}]
         self._compactions += 1  # keeps the server from stopping under it, like a compaction
         try:
-            parts: list[str] = []
-            async with contextlib.aclosing(self._model(messages, None)) as model:
-                async for chunk in model:
-                    parts.append(chunk.text)
+            text = await self._upkeep_model("title", conversation, messages, Chosen(None))
         finally:
             self._compactions -= 1
-        title = clean_title("".join(parts))
+        title = clean_title(text)
         if not title:
             raise RuntimeError("the model returned an empty title")
         return self.memory.title_if_untitled(conversation, title)
 
-    async def _summarise(self, transcript: str, previous: str, focus: str, ref: str | None = None) -> str:
-        parts: list[str] = []
-        async with contextlib.aclosing(self._model(summary_request(transcript, previous, focus), None, ref)) as model:
-            async for chunk in model:
-                parts.append(chunk.text)
-        summary = "".join(parts).strip()
+    async def _summarise(
+        self, transcript: str, previous: str, focus: str, chosen: Chosen, conversation: str
+    ) -> str:
+        messages = summary_request(transcript, previous, focus)
+        summary = (await self._upkeep_model("compaction", conversation, messages, chosen)).strip()
         if not summary:
             raise RuntimeError("the model returned an empty summary")
         return summary
@@ -1116,7 +1228,7 @@ class Agent:
         for chunk in chunk_messages(old, self._transcript_chars or transcript_budget(window)):
             transcript = build_transcript(chunk)
             if transcript:
-                summary = await self._summarise(transcript, summary, focus, chosen.ref)
+                summary = await self._summarise(transcript, summary, focus, chosen, conversation)
             self.memory.set_summary(conversation, summary, chunk[-1].id, state.context_tokens)
 
         # What remains in the context: the fixed part (system prompt, tools), the summary, and the

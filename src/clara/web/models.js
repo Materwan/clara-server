@@ -10,7 +10,12 @@ export const SURFACE_NAMES = { web: "Web site", app: "Desktop app", cli: "Termin
 export const weightText = (weight) => String(Number(Number(weight).toFixed(3)));
 
 /** What a token of a model costs, in words: "0.4 credit per token". */
-export const costText = (weight) => `${weightText(weight)} ${Number(weight) === 1 ? "credit" : "credits"} per token`;
+export const costText = (weight) => Number(weight) === 0 ? "your own API key, no credits" : `${weightText(weight)} ${Number(weight) === 1 ? "credit" : "credits"} per token`;
+
+/** The models of the providers this person brought an API key for (they cost no credits), and the model `ref` among every one. */
+export const personalModels = (info) => info.personal || [];
+export const findModel = (info, ref) => [...info.models, ...personalModels(info)].find((model) => model.ref === ref);
+export const anyModel = (info) => info.models.length + personalModels(info).length > 0;
 
 /** `{models, default, choices, current, surfaces}`: what this person may choose, and what they chose. */
 export const loadModels = (who) => api.get("/v1/models", who);
@@ -26,10 +31,13 @@ export const chooseModel = (who, surface, ref) => api.put("/v1/models/choice", {
  * the server's), `onChange(ref | null)` is called when they pick another.
  */
 export function modelSelect(info, choice, onChange, label = "Model") {
-  const known = info.models.some((model) => model.ref === choice);
+  const known = Boolean(findModel(info, choice));
+  const personal = personalModels(info);
   const select = h("select", { class: "model-select", "aria-label": label },
     h("option", { value: "" }, `Server default: ${info.default.name} (${costText(info.default.weight)})`),
-    info.models.map((model) => h("option", { value: model.ref }, `${modelLabel(model)}, ${costText(model.weight)}`)));
+    info.models.map((model) => h("option", { value: model.ref }, `${modelLabel(model)}, ${costText(model.weight)}`)),
+    personal.length ? h("optgroup", { label: "With your own API key (no credits)" },
+      personal.map((model) => h("option", { value: model.ref }, modelLabel(model)))) : null);
   select.value = known ? choice : "";
   select.addEventListener("change", () => onChange(select.value || null));
   return select;

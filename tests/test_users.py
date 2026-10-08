@@ -335,13 +335,15 @@ def register(http, name="newcomer", password=PASSWORD, **headers):
 
 
 def test_signing_up_is_closed_unless_the_server_allows_it(http):
-    assert http.get("/v1/auth/signup").json() == {"open": False}
+    assert http.get("/v1/auth/signup").json()["open"] is False
     assert register(http).status_code == 403
     assert http.app.state.users.get("newcomer") is None
 
 
 def test_the_sign_in_page_can_ask_whether_signing_up_is_open(open_http):
-    assert open_http.get("/v1/auth/signup").json() == {"open": True}  # no login needed
+    answer = open_http.get("/v1/auth/signup").json()  # no login needed
+    assert answer["open"] is True
+    assert set(answer["privacy"]) == {"model_hosts", "web", "log_days", "kept_until_deleted"}  # what the page tells people
 
 
 def test_signing_up_makes_a_plain_user_who_is_logged_in_on_the_web(open_http):

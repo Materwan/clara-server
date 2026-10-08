@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 
 from .auth import Admin, Client, require_account
 from .models import DISCORD, MAX_WEIGHT, MIN_WEIGHT, ModelCatalog, ModelInfo
-from .providers import ProviderError
+from .providers import ProviderError, make_ref
 
 log = logging.getLogger("clara")
 
@@ -60,6 +60,14 @@ def _label(request: Request, info: ModelInfo) -> dict:
     return info.describe(catalog.provider_label(info.provider))
 
 
+def _current(request: Request, person_id: int | None, surface: str) -> dict:
+    """The model a person is answered by on a surface (`own_key`: on their own key, so it costs no credits)."""
+    catalog: ModelCatalog = request.app.state.models
+    chosen = catalog.choose(surface, person_id)
+    described = _label(request, catalog.info(chosen.ref))
+    return {**described, "weight": chosen.weight, "own_key": chosen.own_key}
+
+
 def _default(request: Request) -> dict:
     state = request.app.state
     providers, catalog = state.providers, state.models
@@ -68,19 +76,35 @@ def _default(request: Request) -> dict:
     return {**_label(request, info), "enabled": info.enabled}
 
 
+async def _personal(request: Request, person_id: int) -> list[dict]:
+    """The models of the providers this person brought a key for: all the provider offers to that key, costing
+    no credits (userkeys.py)."""
+    state = request.app.state
+    keys, catalog = state.user_keys, state.models
+    found = []
+    for provider in keys.saved(person_id):
+        for name in await keys.models(person_id, provider):
+            ref = make_ref(provider, name)
+            found.append({
+                "ref": ref, "provider": provider, "provider_label": catalog.provider_label(provider), "name": name,
+                "weight": 0, "own_key": True,
+            })
+    return found
+
+
 @router.get("/v1/models")
 async def models_of_person(client: Client, request: Request, surface: Surface, user_id: ExternalId) -> dict:
     require_account(request, client, surface, user_id)
     state = request.app.state
     catalog: ModelCatalog = state.models
     person = state.memory.find_person(surface, user_id)
-    current = catalog.effective_ref(surface, person.id if person else None)
     return {
         "surface": surface,
         "models": [_label(request, info) for info in catalog.usable()],
+        "personal": await _personal(request, person.id) if person and surface != DISCORD else [],
         "default": _default(request),
         "choices": catalog.choices_of(person.id) if person else {},
-        "current": _label(request, catalog.info(current)),
+        "current": _current(request, person.id if person else None, surface),
         "chosen_by_admin": surface == DISCORD,  # the model of this surface is not the person's to choose
         "surfaces": sorted(state.settings.user_surfaces),
     }
@@ -102,7 +126,7 @@ async def choose_model(body: ChoiceBody, client: Client, request: Request) -> di
     log.info("%s chose %s for %s", client, body.model or "the server's model", target)
     return {
         "choices": catalog.choices_of(person.id),
-        "current": _label(request, catalog.info(catalog.effective_ref(body.surface, person.id))),
+        "current": _current(request, person.id, body.surface),
     }
 
 

@@ -15,6 +15,7 @@ import { mountProjects } from "./projects.js";
 import { mountRestartBadge, resumeRestart } from "./restart.js";
 import { mountSchedule } from "./schedule.js";
 import { mountTasks } from "./tasks.js";
+import { mountUsage } from "./usage.js";
 import { avatar, clear, h, themeSwitch, toast, toggleRail } from "./ui.js";
 
 const app = document.getElementById("app");
@@ -43,9 +44,26 @@ function authPage(title, lede, form, foot) {
   authFrame(h("h1", {}, title), h("p", { class: "lede" }, lede), form, foot, themeSwitch());
 }
 
-/** Whether this server lets people make their own account; a server that cannot say is taken as closed. */
-async function signupOpen() {
-  try { return (await api.get("/v1/auth/signup")).open === true; } catch { return false; }
+/** Whether this server lets people make their own account (and what it does with their words); a server that cannot say is taken as closed. */
+async function signupInfo() {
+  try {
+    const info = await api.get("/v1/auth/signup");
+    return { open: info.open === true, privacy: info.privacy || null };
+  } catch { return { open: false, privacy: null }; }
+}
+
+/** What a person agrees to by writing to this server, said before they make an account. */
+function privacyNotice(privacy) {
+  if (!privacy) return null;
+  const hosts = privacy.model_hosts.length ? privacy.model_hosts.join(", ") : "the language model the server uses";
+  const items = [
+    `What you write is stored on this server${privacy.kept_until_deleted ? " until you delete it" : ""}, and sent to the language model: ${hosts}. Those services have their own policies.`,
+    privacy.web ? "When Clara searches the web or reads a page, the search or the address goes to ollama.com." : null,
+    privacy.log_days ? `The server also logs requests and prompts, in clear, for ${privacy.log_days} days.` : null,
+    "The person who runs the server can read all of this. Do not write passwords or anything you would not tell them.",
+    "Under Account, Your data, you can download everything or erase it.",
+  ].filter(Boolean);
+  return h("div", { class: "notice small", role: "note" }, h("strong", {}, "Before you start"), h("ul", {}, items.map((item) => h("li", {}, item))));
 }
 
 function showLogin(message = "") {
@@ -81,7 +99,7 @@ function showLogin(message = "") {
   const foot = h("p", { class: "foot" }, "No account yet? Ask the person who runs this server.");
   authPage("Sign in to Clara", "Your conversations, and what Clara remembers about you.", form, foot);
   name.focus();
-  signupOpen().then((open) => {
+  signupInfo().then(({ open }) => {
     if (open && foot.isConnected) clear(foot).append("No account yet? ", h("a", { href: "/", onclick: (event) => { event.preventDefault(); showSignup(); } }, "Create one"), ".");
   });
 }
@@ -96,6 +114,8 @@ function showSignup() {
   const note = h("p", { hidden: true, role: "alert" });
   const button = h("button", { class: "primary", type: "submit" }, "Create my account");
   const warn = (text) => { note.hidden = false; note.className = "notice warn small"; note.textContent = text; };
+  const privacy = h("div", {});
+  signupInfo().then((info) => { const notice = privacyNotice(info.privacy); if (notice && privacy.isConnected) privacy.append(notice); });
   const form = h("form", { class: "stack", onsubmit: async (event) => {
     event.preventDefault();
     note.hidden = true;
@@ -120,6 +140,7 @@ function showSignup() {
     h("span", { class: "hint" }, "Letters a–z, digits, '.', '_' or '-' (up to 32). It cannot be changed later.")),
   h("label", { class: "field" }, "Password", password, h("span", { class: "hint" }, "At least 10 characters.")),
   h("label", { class: "field" }, "Repeat the password", again),
+  privacy,
   note,
   button);
   const foot = h("p", { class: "foot" }, "Already have an account? ",
@@ -137,9 +158,9 @@ events.addEventListener("signed-out", () => { if (user) showLogin("Your session 
 
 // ---- the shell and the pages -----------------------------------------------------------------------------
 
-const PAGES = { chat: ["Chat", "chat"], projects: ["Projects", "folder"], tasks: ["Tasks", "tasks"], schedule: ["Schedule", "clock"], files: ["Files", "file"], memory: ["Memory", "memory"], account: ["Account", "user"], integrations: ["Integrations", "plug"], discord: ["Discord", "bot"], admin: ["Admin", "admin"] };
+const PAGES = { chat: ["Chat", "chat"], projects: ["Projects", "folder"], tasks: ["Tasks", "tasks"], schedule: ["Schedule", "clock"], files: ["Files", "file"], memory: ["Memory", "memory"], account: ["Account", "user"], usage: ["Usage", "bolt"], integrations: ["Integrations", "plug"], discord: ["Discord", "bot"], admin: ["Admin", "admin"] };
 const WORK_PAGES = ["projects", "tasks", "schedule", "files"]; // what you do with Clara: the links of the rail (the chat is the conversations listed below them)
-const SETTINGS_PAGES = ["memory", "account", "integrations", "discord", "admin"]; // reached by your avatar, they share a bar at the top
+const SETTINGS_PAGES = ["memory", "account", "usage", "integrations", "discord", "admin"]; // reached by your avatar, they share a bar at the top
 const ADMIN_PAGES = new Set(["discord", "admin"]);
 
 /** The bar at the top of the settings pages. */
@@ -255,6 +276,7 @@ function route() {
     : name === "files" ? mountFiles(body, user)
     : name === "memory" ? mountMemory(body, user)
     : name === "account" ? mountAccount(body, user, signOut)
+    : name === "usage" ? mountUsage(body)
     : name === "integrations" ? mountIntegrations(body, user)
     : name === "discord" ? mountDiscord(body)
     : mountAdmin(body, user, sub);

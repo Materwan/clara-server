@@ -28,6 +28,7 @@ import asyncio
 import html
 import json
 import logging
+import re
 import secrets
 import time
 from pathlib import Path
@@ -39,7 +40,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, field_validator
 
 from .auth import Admin, Client, require_account, require_conversation
-from .github import GitHubError, parse_repo
+from .github import GitHubError, check_ref, parse_repo
 from .integrations import permissions
 from .integrations.approvals import AlreadyAnswered
 from .integrations.connectors.base import ConnectorError, Target
@@ -364,7 +365,10 @@ async def _check_github_repo(request: Request, person: Person, body: NewResource
         repo, ref = parse_repo(body.repo)
     except GitHubError as error:
         raise HTTPException(422, str(error)) from None
-    ref = body.ref.strip() or ref
+    try:
+        ref = check_ref(body.ref) or ref
+    except GitHubError as error:
+        raise HTTPException(422, str(error)) from None
     connector = _github(request)
     try:
         about = await connector.get_json(token, f"/repos/{repo}")
@@ -379,6 +383,7 @@ async def _check_github_repo(request: Request, person: Person, body: NewResource
 # ----------------------------------------------------------------------
 # Google Drive
 # ----------------------------------------------------------------------
+DRIVE_ID = re.compile(r"^[A-Za-z0-9_-]{1,200}$")  # a file id is put in a path of Google's API: no `/`, no `..`
 STATE_SECONDS = 600  # how long the link that sends a person to Google stays good
 
 
@@ -417,6 +422,15 @@ async def google_start(body: GoogleStart, client: Client, request: Request) -> d
     return {"url": authorize_url(drive.client_id, _redirect_uri(request), state), "redirect_uri": _redirect_uri(request)}
 
 
+# These pages are not part of the web site (no policy of its own): nothing may frame them, as a click on "Connect"
+# would then be one the person did not mean to make.
+PAGE_HEADERS = {
+    "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY",
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'",
+    "X-Content-Type-Options": "nosniff",
+}
+
+
 def _page(title: str, text: str, status: int = 200) -> HTMLResponse:
     body = (
         "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
@@ -424,7 +438,7 @@ def _page(title: str, text: str, status: int = 200) -> HTMLResponse:
         "<body style='font:16px/1.5 system-ui,sans-serif;max-width:32rem;margin:15vh auto;padding:0 1rem'>"
         f"<h1 style='font-size:1.3rem'>{html.escape(title)}</h1><p>{html.escape(text)}</p>"
     )
-    return HTMLResponse(body, status_code=status, headers={"Cache-Control": "no-store"})
+    return HTMLResponse(body, status_code=status, headers=PAGE_HEADERS)
 
 
 def _claims(request: Request, state: str) -> tuple[dict, int, str] | HTMLResponse:
@@ -469,7 +483,7 @@ async def google_callback(request: Request, code: str = "", state: str = "", err
         "<button type=submit style='font:inherit;padding:.5rem 1.2rem'>Connect</button></form>"
         "<p style='color:#555'>If you did not ask for this, close this window: nothing was connected.</p>"
     )
-    return HTMLResponse(body, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+    return HTMLResponse(body, headers=PAGE_HEADERS)
 
 
 @router.post("/v1/integrations/google/confirm", response_class=HTMLResponse)
@@ -515,6 +529,8 @@ async def browse_drive(
 ) -> dict:
     """The folders and files of a Drive folder (or those whose name has `q`), for picking one."""
     person = _own_person(request, client, surface, user_id)
+    if not DRIVE_ID.match(folder):
+        raise HTTPException(422, "Not a Drive folder id")
     found, token = _own_account(request, person, account, "gdrive")
     drive = _drive(request)
     target = Target(0, "Drive", {}, token)
@@ -542,6 +558,8 @@ async def _check_drive_file(request: Request, person: Person, body: NewResource)
     file_id = body.file_id.strip()
     if not file_id:
         raise HTTPException(422, "Say which folder or file")
+    if not DRIVE_ID.match(file_id):
+        raise HTTPException(422, "Not a Drive file id")
     drive = _drive(request)
     try:
         meta = await drive.meta(Target(0, "Drive", {}, token), file_id)

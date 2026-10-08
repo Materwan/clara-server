@@ -2,7 +2,7 @@
 
 import { api } from "./api.js";
 import { mark } from "./icons.js";
-import { SURFACE_NAMES, chooseModel, costText, loadModels, modelSelect } from "./models.js";
+import { SURFACE_NAMES, anyModel, chooseModel, costText, findModel, loadModels, modelSelect } from "./models.js";
 
 /** The surfaces in the order people know them: the known ones first, the others by name. */
 const surfaceOrder = (surfaces) => [...surfaces].sort((a, b) => {
@@ -10,7 +10,7 @@ const surfaceOrder = (surfaces) => [...surfaces].sort((a, b) => {
   const rank = (name) => (known.includes(name) ? known.indexOf(name) : known.length);
   return rank(a) - rank(b) || a.localeCompare(b);
 });
-import { ago, avatar, clear, confirmDialog, dateTime, h, icon, pageHead, secretDialog, themeSwitch, toast, tokenCount, usageBar } from "./ui.js";
+import { ago, avatar, clear, confirmDialog, dateTime, h, icon, pageHead, promptDialog, secretDialog, themeSwitch, toast, tokenCount, usageBar } from "./ui.js";
 
 const who = (user) => ({ surface: "web", user_id: user.name });
 
@@ -127,6 +127,7 @@ export function mountAccount(container, user, onSignOut) {
       passwordCard(),
       devicesCard(devices.sessions),
       linkCard(me),
+      dataCard(me),
     );
   }
 
@@ -156,7 +157,7 @@ export function mountAccount(container, user, onSignOut) {
   function modelsCard(me, models) {
     const head = h("div", { class: "panel-head" }, h("div", {}, h("h3", {}, "Model"),
       h("p", { class: "muted small" }, "Every token Clara reads or writes costs credits: bigger models cost more per token, so a small one lets you talk longer within your daily limit.")));
-    if (!models.models.length) {
+    if (!anyModel(models)) {
       return h("section", { class: "panel" }, head, h("div", { class: "panel-body" },
         h("p", { class: "muted small" }, `Clara answers you with ${models.default.name} (${costText(models.default.weight)}). An administrator has not offered other models yet.`)));
     }
@@ -165,7 +166,7 @@ export function mountAccount(container, user, onSignOut) {
         select.disabled = true;
         try {
           await chooseModel(who(me), surface, ref);
-          toast(ref ? `${SURFACE_NAMES[surface] || surface}: ${models.models.find((m) => m.ref === ref).name}.` : `${SURFACE_NAMES[surface] || surface}: the server's model.`);
+          toast(ref ? `${SURFACE_NAMES[surface] || surface}: ${findModel(models, ref).name}.` : `${SURFACE_NAMES[surface] || surface}: the server's model.`);
         } catch (error) { toast(error.detail, true); }
         draw();
       }, `Model on ${SURFACE_NAMES[surface] || surface}`);
@@ -264,6 +265,38 @@ export function mountAccount(container, user, onSignOut) {
   async function signOut(id, quiet) {
     try { await api.delete(`/v1/auth/sessions/${id}`); } catch (error) { toast(error.detail, true); }
     if (!quiet) { toast("Device signed out."); draw(); }
+  }
+
+  /** What the server keeps about you: take it with you, or have it erased. */
+  function dataCard(me) {
+    return h("section", { class: "panel" },
+      h("div", { class: "panel-head" }, h("div", {}, h("h3", {}, "Your data"),
+        h("p", { class: "muted small" }, "Your conversations, what Clara remembers, your files, tasks and projects are kept on this server. You can download all of it, or erase it."))),
+      h("div", { class: "panel-body stack" },
+        h("div", {}, h("button", { onclick: async (event) => {
+          const button = event.currentTarget;
+          button.disabled = true;
+          try {
+            const data = await api.get("/v1/auth/export");
+            const link = h("a", { href: URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" })), download: `clara-${me.name}.json` });
+            document.body.append(link);
+            link.click();
+            setTimeout(() => { URL.revokeObjectURL(link.href); link.remove(); }, 1000);
+          } catch (error) { toast(error.detail, true); }
+          button.disabled = false;
+        } }, icon("copy", { size: 18 }), "Download my data")),
+        h("div", {},
+          h("p", { class: "muted small" }, "Erasing removes your user, your memories, conversations, files, tasks, projects and connected accounts, and the server's log of what you said. There is no undo."),
+          h("button", { class: "danger sm", onclick: async () => {
+            if (!(await confirmDialog("Erase my account", "Everything Clara keeps about you will be erased for good. Download your data first if you want a copy.", "Continue", true))) return;
+            const password = await promptDialog("Erase my account", "Your password", "", "Erase everything", { type: "password" });
+            if (!password) return;
+            try {
+              await api.post("/v1/auth/delete-account", { password });
+              toast("Your account was erased.");
+              onSignOut();
+            } catch (error) { toast(error.detail, true); }
+          } }, icon("trash", { size: 18 }), "Erase my account"))));
   }
 
   function linkCard(me) {

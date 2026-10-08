@@ -7,6 +7,8 @@ administration of users and people, reading a PDF, and the web site itself (`web
     POST   /v1/auth/logout              sign out of this device
     GET    /v1/auth/me                  who am I, which accounts are mine
     POST   /v1/auth/password            {current_password, new_password}: change it, other devices are signed out
+    GET    /v1/auth/export              everything the server keeps about me, as one JSON file
+    POST   /v1/auth/delete-account      {password}: erase my user, my memories and my lines of the traffic log
     GET    /v1/auth/sessions            my devices
     DELETE /v1/auth/sessions/{id}       sign one out
     POST   /v1/documents/extract        the text of a PDF (body: the bytes)
@@ -18,6 +20,10 @@ administration of users and people, reading a PDF, and the web site itself (`web
     POST   /v1/admin/users/{name}/sign-out
     GET    /v1/admin/limits             {default}: the tokens a day of a user with no limit of their own (null: none)
     PUT    /v1/admin/limits/default     {tokens}: change it (0: no limit); a user's own is set with PATCH /users/{name}
+    GET    /v1/me/usage                 ?days=: your own tokens in and out (Discord apart), your models
+    GET    /v1/me/usage/history         ?group=&surface=&kind=&model=&days=&before=&limit=: your own calls, newest first
+    GET    /v1/admin/usage              ?days=: tokens in and out of each person (Discord apart), their models
+    GET    /v1/admin/usage/history      ?person=&group=&surface=&kind=&model=&days=&before=&limit=: every call, newest first
     GET    /v1/admin/status             provider, model, activity, address
     GET    /v1/admin/restart            {needed, reasons, in_progress, last}: is a restart worth it, and why
     POST   /v1/admin/restart            {now?}: pull, update, stop and start again (202 {id}; /health says `restarted: id`)
@@ -31,10 +37,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import asdict
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import urlsplit
 
-from fastapi import APIRouter, FastAPI, HTTPException, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -42,6 +52,7 @@ from pydantic import BaseModel, Field
 from . import ingest
 from .auth import COOKIE, WEB_HEADER, Admin, Client, LoggedIn
 from .clientapi import DISCORD, DISCORD_ID, announce_discord_sign_in
+from .erasure import erase_person
 from .ingest import IngestError
 from .limits import show_limit
 from .memory import MergeRefused
@@ -187,10 +198,28 @@ def start_session(request: Request, user: User, surface: str, device: str = "", 
     return response
 
 
+def privacy_notice(state) -> dict:
+    """What a person should know before they give this server their words, for the sign-in page: who else reads
+    them, how long the server logs them, how to take them back."""
+    settings = state.settings
+    hosts = []
+    for config in state.providers.configs.values():
+        host = urlsplit(config.host or "").hostname or config.label
+        if config.usable and host and host not in hosts:
+            hosts.append(host)
+    return {
+        "model_hosts": hosts,  # what you write is sent to the language model of one of these
+        "web": bool(state.agent.toolbox.names & {"web_search", "web_fetch"}),  # searches and addresses go to ollama.com
+        "log_days": settings.traffic_log_days if settings.traffic_log else 0,  # the server logs requests and prompts
+        "kept_until_deleted": not settings.purge_summarised,
+    }
+
+
 @router.get("/v1/auth/signup")
 async def signup_open(request: Request) -> dict:
     """Asked by the sign-in page, before anybody is logged in: should it offer to make an account?"""
-    return {"open": request.app.state.settings.web_signup}
+    state = request.app.state
+    return {"open": state.settings.web_signup, "privacy": privacy_notice(state)}
 
 
 @router.post("/v1/auth/register", status_code=201)
@@ -213,6 +242,8 @@ async def register(body: RegisterBody, request: Request) -> JSONResponse:
     except UserError as error:
         raise HTTPException(409 if "already" in str(error) else 422, str(error)) from None
     state.signup_limiter.failed(address)  # counts the users made, not failures
+    if not settings.signup_integrations:
+        state.integrations.store.opt_out(user.person_id)
     response = start_session(request, user, "web", status=201)
     log.info("%s made the user %s on the web site", address, user.name)
     return response
@@ -255,6 +286,82 @@ async def change_password(body: PasswordBody, caller: LoggedIn, request: Request
     return {"signed_out_elsewhere": signed_out}
 
 
+class DeleteAccountBody(BaseModel):
+    password: str = Field(min_length=1, max_length=512)  # named so that the traffic log hides it
+
+
+@router.get("/v1/auth/export")
+async def export_my_data(caller: LoggedIn, request: Request) -> JSONResponse:
+    """Everything the server keeps about the person behind this login, as one file (their right of access and to take
+    their data with them). Passwords, tokens and the secrets of connected accounts are not in it."""
+    state = request.app.state
+    memory, user = state.memory, caller.user
+    person = memory.person_by_id(user.person_id)
+    surfaces = tuple(dict.fromkeys(surface for surface, _ in memory.accounts_of(user.person_id)))
+
+    def build() -> dict[str, Any]:
+        conversations = []
+        for info in memory.conversations_of(user.person_id, surfaces, "", 100_000):
+            shown, _ = memory.transcript(info.conversation, 1_000_000)
+            conversations.append({
+                "id": info.conversation, "title": info.title, "created_at": info.created_at,
+                "updated_at": info.updated_at, "summary": memory.state(info.conversation).summary,
+                "messages": [{"role": m.role, "content": m.content, "at": m.created_at} for m in shown],
+            })
+        files = [
+            {"name": f.name, "created_at": f.created_at, "updated_at": f.updated_at,
+             "content": (state.markdown.get(user.person_id, f.id) or (None, ""))[1]}
+            for f in state.markdown.of(user.person_id)
+        ]
+        projects = [
+            {"name": p.name, "description": p.description, "instructions": p.instructions, "created_at": p.created_at,
+             "files": [{"path": f.path, "size": f.size} for f in state.projects.files(p.id)]}
+            for p in state.projects.of(user.person_id)
+        ]
+        return {
+            "exported_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            "user": {"name": user.name, "created_at": user.created_at, "last_login_at": user.last_login_at,
+                     "is_admin": user.is_admin},
+            "person": {"name": person.name if person else None, "relation": memory.relation(user.person_id)},
+            "accounts": [f"{s}:{e}" for s, e in memory.accounts_of(user.person_id)],
+            "facts": [f.text for f in memory.facts(user.person_id, 100_000)],
+            "conversations": conversations,
+            "tasks": [asdict(t) for t in state.tasks.tasks(person, None)] if person else [],
+            "reminders": [asdict(r) for r in state.reminders.upcoming(person)] if person else [],
+            "markdown_files": files,
+            "projects": projects,  # the text of their files can be read with the project routes
+            "devices": [{"surface": s.surface, "device": s.device, "address": s.address, "created_at": s.created_at,
+                         "last_used_at": s.last_used_at} for s in state.users.sessions_of(user.name)],
+            "connected_accounts": [{"kind": a.kind, "label": a.label} for a in state.integrations.store.accounts_of(user.person_id)],
+        }
+
+    data = await asyncio.to_thread(build)
+    return JSONResponse(
+        jsonable_encoder(data), headers={"Content-Disposition": f'attachment; filename="clara-{user.name}.json"', "Cache-Control": "no-store"}
+    )
+
+
+@router.post("/v1/auth/delete-account")
+async def delete_my_account(body: DeleteAccountBody, caller: LoggedIn, request: Request) -> JSONResponse:
+    """Erase this user, the person behind them and everything they said: facts, conversations, files, tasks, projects,
+    connected accounts, and their lines in the traffic log. The password is asked again. There is no undo."""
+    state = request.app.state
+    address = request.client.host if request.client else None
+    if state.auth_limiter.blocked_for(address):
+        raise HTTPException(429, "Too many wrong passwords from this address: try again later.")
+    if await asyncio.to_thread(state.users.authenticate, caller.user.name, body.password) is None:
+        state.auth_limiter.failed(address)
+        raise HTTPException(403, "The password is wrong")
+    if caller.user.is_admin and state.users.admin_count() <= 1:
+        raise HTTPException(422, "This is the last administrator: make someone else one first.")
+    name, person_id = caller.user.name, caller.user.person_id
+    found, lines = await asyncio.to_thread(erase_person, state.memory, state.traffic, person_id)
+    log.info("%s erased their own account: %d messages, %d lines of the traffic log", name, found.messages, lines)
+    response = JSONResponse({"erased": {"facts": found.facts, "messages": found.messages, "conversations": found.conversations}})
+    response.delete_cookie(COOKIE, path="/")
+    return response
+
+
 @router.get("/v1/auth/sessions")
 async def my_sessions(caller: LoggedIn, request: Request) -> dict:
     return {
@@ -287,12 +394,14 @@ def pdf_text(data: bytes) -> tuple[str, int]:
 
 @router.post("/v1/documents/extract")
 async def extract_document(request: Request, client: Client) -> dict:
-    declared = int(request.headers.get("content-length") or 0)
-    if declared > MAX_PDF_BYTES:
-        raise HTTPException(413, f"A PDF can be {MAX_PDF_BYTES // 1_000_000} MB at most.")
-    data = await request.body()
-    if len(data) > MAX_PDF_BYTES:
-        raise HTTPException(413, f"A PDF can be {MAX_PDF_BYTES // 1_000_000} MB at most.")
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():  # counted as it comes: a body with no Content-Length is not read whole first
+        size += len(chunk)
+        if size > MAX_PDF_BYTES:
+            raise HTTPException(413, f"A PDF can be {MAX_PDF_BYTES // 1_000_000} MB at most.")
+        chunks.append(chunk)
+    data = b"".join(chunks)
     if not data.startswith(b"%PDF"):
         raise HTTPException(422, "This is not a PDF file.")
     text, pages = await asyncio.to_thread(pdf_text, data)
@@ -382,6 +491,40 @@ async def admin_set_default_limit(body: DefaultLimit, admin: Admin, request: Req
     limits.set_default(body.tokens)
     log.info("%s set the default limit to %s", admin, show_limit(limits.default()))
     return {"default": limits.default() or None}
+
+
+@router.get("/v1/me/usage")
+async def my_usage(caller: LoggedIn, request: Request, days: int = Query(0, ge=0, le=3650)) -> dict:
+    """The caller's own statistics: the same figures the administration sees for them, and nobody else's."""
+    usage_log, person_id = request.app.state.usage_log, caller.user.person_id
+    [mine] = usage_log.per_user(days, person_id) or [None]
+    return {"days": days, "usage": mine, "quota": describe_user(request.app, caller.user)["usage"]}
+
+
+@router.get("/v1/me/usage/history")
+async def my_usage_history(
+    caller: LoggedIn, request: Request, group: Literal["", "discord", "other"] = "",
+    surface: str = Query("", max_length=32), kind: Literal["", "message", "scheduled", "compaction", "title"] = "",
+    model: str = Query("", max_length=200), days: int = Query(0, ge=0, le=3650), before: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+) -> dict:
+    return request.app.state.usage_log.history(caller.user.person_id, group, surface, kind, model, days, before, limit)
+
+
+@router.get("/v1/admin/usage")
+async def admin_usage(admin: Admin, request: Request, days: int = Query(0, ge=0, le=3650)) -> dict:
+    usage_log = request.app.state.usage_log
+    return {"days": days, "users": usage_log.per_user(days), "totals": usage_log.totals(days)}
+
+
+@router.get("/v1/admin/usage/history")
+async def admin_usage_history(
+    admin: Admin, request: Request, person: int | None = None,
+    group: Literal["", "discord", "other"] = "", surface: str = Query("", max_length=32),
+    kind: Literal["", "message", "scheduled", "compaction", "title"] = "", model: str = Query("", max_length=200),
+    days: int = Query(0, ge=0, le=3650), before: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=200),
+) -> dict:
+    return request.app.state.usage_log.history(person, group, surface, kind, model, days, before, limit)
 
 
 @router.get("/v1/admin/status")

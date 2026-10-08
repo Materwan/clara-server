@@ -60,6 +60,10 @@ class WebClient:
 
     async def search(self, query: str, max_results: int = 5) -> str:
         """The results as text: one block per result (title, URL, an excerpt)."""
+        return (await self.search_with_urls(query, max_results))[0]
+
+    async def search_with_urls(self, query: str, max_results: int = 5) -> tuple[str, list[str]]:
+        """The results as text, and the URLs of the results (as the search engine gave them: not what an excerpt says)."""
         query = " ".join(str(query).split())
         if not query:
             raise ValueError("The query is empty.")
@@ -67,12 +71,13 @@ class WebClient:
         data = await self._post("/api/web_search", {"query": query, "max_results": count})
         results = [item for item in data.get("results") or [] if isinstance(item, dict)]
         if not results:
-            return f"No result for {query!r}."
+            return f"No result for {query!r}.", []
         blocks = []
         for number, item in enumerate(results, start=1):
             title = str(item.get("title") or "(no title)").strip()
             blocks.append(f"{number}. {title}\n{item.get('url', '')}\n{_clip(str(item.get('content') or ''), RESULT_CHARS, flatten=True)}")
-        return "\n\n".join(blocks) + "\n\nRead a page in full with web_fetch."
+        urls = [str(item["url"]).strip() for item in results if item.get("url")]
+        return "\n\n".join(blocks) + "\n\nRead a page in full with web_fetch.", urls
 
     async def fetch(self, url: str) -> str:
         """The page as text: its title, its content (cut), then its links."""

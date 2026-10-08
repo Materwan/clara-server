@@ -152,6 +152,15 @@ class IntegrationStore:
         self.memory.set_option(POLICY_OPTION, json.dumps(policy, ensure_ascii=False))
         return self.policy()
 
+    def opt_out(self, person_id: int) -> None:
+        """Switch every kind of integration off for this person (an administrator switches them on, one by one,
+        in the administration page). For the people who made their own user: they were not vetted by anybody."""
+        policy = self.policy()
+        for kind in TYPES:
+            if person_id not in policy["disabled_users"][kind]:
+                policy["disabled_users"][kind] = sorted({*policy["disabled_users"][kind], person_id})
+        self.set_policy(policy)
+
     def type_enabled(self, kind_type: str, person_id: int) -> bool:
         policy = self.policy()
         return policy["enabled"].get(kind_type, False) and person_id not in policy["disabled_users"].get(kind_type, [])

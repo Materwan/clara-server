@@ -98,6 +98,9 @@ update_env() {
     fi
     local backup=.env.bak.$(date +%Y%m%d-%H%M%S)
     cp -p .env "$backup"
+    chmod 600 .env "$backup"   # they hold the secrets: for their owner only
+    # keep the newest three backups: an old one holds secrets that may have been changed since
+    ls -1 .env.bak.* 2>/dev/null | sort | head -n -3 | while read -r old; do rm -f -- "$old"; done
     cat "$merged" > .env       # not mv: keeps the permissions of .env
     rm -f "$merged"
     echo "    .env updated, your values kept (previous file: $backup)"

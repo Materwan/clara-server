@@ -62,6 +62,7 @@ from .accountapi import install as install_accounts
 from .agent import Agent, ChatRequest
 from .announce import compose
 from .auth import Admin, peer_of
+from .bodylimit import BodyLimitMiddleware
 from .chatapi import install as install_chat
 from .clientapi import install as install_clients
 from .commands import CommandContext, CommandResult, registry
@@ -72,6 +73,7 @@ from .github import GitHub
 from .integrationapi import install as install_integrations
 from .integrations.service import build as build_integrations
 from .integrations.store import PENDING
+from .keyapi import install as install_keys
 from .lifecycle import Lifecycle
 from .limits import UsageLimits
 from .linking import LinkCodes
@@ -82,6 +84,7 @@ from .modelapi import install as install_models
 from .models import ModelCatalog
 from .notificationapi import install as install_notifications
 from .notifications import Notifier
+from .private import harden_tree, private_dir
 from .projectapi import install as install_projects
 from .projects import Projects
 from .prompt import SystemPrompt
@@ -99,6 +102,8 @@ from .taskapi import install as install_tasks
 from .tasks import TaskService
 from .tools import default_toolbox
 from .traffic import TrafficLog, TrafficMiddleware
+from .usagelog import UsageLog
+from .userkeys import UserKeys
 from .users import Users
 from .web import WebClient
 from .webapi import SIGNUPS, SIGNUPS_BLOCK, install, install_web
@@ -113,7 +118,9 @@ class CommandBody(BaseModel):
 def create_app(
     settings: Settings, providers: ProviderManager | None = None, tailscale: Tailscale | None = None
 ) -> FastAPI:
+    private_dir(settings.data_dir)
     memory = Memory(settings.db_path)
+    harden_tree(settings.data_dir)  # the database, the logs, the key: for the account that runs the server only
     link_codes = LinkCodes()
     for name in settings.unrestricted_clients:
         log.warning(
@@ -136,8 +143,11 @@ def create_app(
     )
     markdown = MarkdownFiles(memory)
     limits = UsageLimits(memory, settings.default_daily_tokens)
+    usage_log = UsageLog(memory)
     models = ModelCatalog(memory, providers, settings.weight_reference_b)
     integrations = build_integrations(memory, settings, notifier)
+    user_keys = UserKeys(memory, integrations.vault, providers)
+    models.user_keys = user_keys
     agent = Agent(
         memory,
         providers,
@@ -145,6 +155,8 @@ def create_app(
         SystemPrompt(settings.system_prompt_file),
         history_turns=settings.history_turns,
         max_concurrent_llm=settings.max_concurrent_llm,
+        max_turns_per_user=settings.max_turns_per_user,
+        web_fetch_any_url=settings.web_fetch_any_url,
         max_tool_rounds=settings.max_tool_rounds,
         context_window=lambda: providers.context_window,
         compact_percent=settings.compact_percent,
@@ -162,6 +174,7 @@ def create_app(
         projects=projects,
         markdown=markdown,
         limits=limits,
+        usage_log=usage_log,
         models=models,
         tasks=tasks,
         integrations=integrations.broker,
@@ -190,7 +203,7 @@ def create_app(
         )
     lifecycle = Lifecycle(agent, reminders, tasks=tasks, schedules=schedules)
     restart = RestartService(settings.data_dir, lifecycle)
-    users = Users(memory, settings.session_days)
+    users = Users(memory, settings.session_days, session_max_days=settings.session_max_days)
     users.prune()
     tailscale = tailscale or Tailscale.from_settings(settings)
     if tailscale.enabled:
@@ -246,6 +259,7 @@ def create_app(
                 traffic.close()
 
     app = FastAPI(title="Clara", lifespan=lifespan)
+    app.add_middleware(BodyLimitMiddleware)  # inside the traffic log: a refused request is logged too
     app.add_middleware(
         TrafficMiddleware, traffic=lambda: traffic, identify=lambda headers: peer_of(settings, app.state.users, headers)
     )
@@ -267,7 +281,9 @@ def create_app(
     app.state.projects = projects
     app.state.markdown = markdown
     app.state.limits = limits
+    app.state.usage_log = usage_log
     app.state.models = models
+    app.state.user_keys = user_keys
     app.state.github = GitHub(settings.github_token)
     app.state.integrations = integrations
     app.state.schedules = schedules
@@ -275,7 +291,7 @@ def create_app(
     app.state.commands = CommandContext(
         settings=settings, memory=memory, agent=agent, providers=providers, started_at=time.monotonic(),
         listen=f"{settings.host}:{settings.port}", lifecycle=lifecycle, notifier=notifier, tailscale=tailscale,
-        users=users, discord=discord_bot, limits=limits, models=models, restart=restart,
+        users=users, discord=discord_bot, limits=limits, models=models, restart=restart, traffic=traffic,
     )
 
     @app.get("/health")
@@ -304,6 +320,7 @@ def create_app(
     install_projects(app)
     install_markdown(app)
     install_models(app)
+    install_keys(app)
     install_tasks(app)
     install_integrations(app)
     install_schedules(app)

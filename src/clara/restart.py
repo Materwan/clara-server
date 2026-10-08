@@ -33,6 +33,7 @@ from typing import Any
 from dotenv import dotenv_values, find_dotenv
 
 from .lifecycle import Lifecycle
+from .private import write_private_text
 
 log = logging.getLogger(__name__)
 
@@ -125,6 +126,18 @@ def merged_env(old: str, example: str) -> str:
     return text
 
 
+KEEP_BACKUPS = 3  # of .env: they hold secrets, and an old one holds secrets that may have been changed since
+
+
+def prune_backups(env: Path, keep: int = KEEP_BACKUPS) -> None:
+    """Delete the oldest `.env.bak.<date>` files, keeping the newest `keep`."""
+    for old in sorted(env.parent.glob(f"{env.name}.bak.*"))[:-keep]:
+        try:
+            old.unlink()
+        except OSError as error:
+            log.warning("cannot delete %s: %s", old, error)
+
+
 def update_env(root: Path = PACKAGE_ROOT, env: Path | None = None) -> Step:
     example = root / ".env.example"
     env = env or root / ".env"
@@ -137,7 +150,8 @@ def update_env(root: Path = PACKAGE_ROOT, env: Path | None = None) -> Step:
     if new.replace("\r", "") == old.replace("\r", ""):
         return Step(".env", True, ".env already up to date")
     backup = env.with_name(f".env.bak.{datetime.now():%Y%m%d-%H%M%S}")
-    backup.write_text(old, encoding="utf-8")
+    write_private_text(backup, old)  # it holds the secrets: for its owner only
+    prune_backups(env)
     env.write_text(new, encoding="utf-8")  # written in place: keeps the permissions of .env
     return Step(".env", True, f".env updated, your values kept (previous file: {backup.name})")
 

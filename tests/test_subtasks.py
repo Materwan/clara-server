@@ -255,3 +255,115 @@ def test_sub_tasks_over_http(api):
     assert api.get(f"/v1/tasks/{parent['id']}", params=ME, headers=AUTH).json()["subtasks"] == {"total": 1, "done": 1}
     assert api.delete(f"/v1/tasks/{parent['id']}", params=ME, headers=AUTH).status_code == 200
     assert api.get("/v1/tasks", params={**ME, "status": "all"}, headers=AUTH).json()["tasks"] == []
+
+
+# --- moving a task under another, and ordering -------------------------------------------------------
+
+
+async def test_a_task_moves_under_another_with_its_sub_tasks_and_back(service, erwan):
+    a = await service.create(erwan, "A", reminders=[at(days=1)])
+    b = await service.create(erwan, "B", reminders=[at(days=2)])
+    part = await service.create(erwan, "Part of B", reminders=[at(days=2)], parent_id=b.id)
+    moved = service.move(erwan, b.id, a.id)
+    assert moved.parent_id == a.id and service.get(erwan, part.id).parent_id == b.id  # its own sub tasks stay with it
+    assert [t.id for t in service.store.children(a.id)] == [b.id]
+    assert service.move(erwan, b.id, None).parent_id is None
+
+
+async def test_a_task_cannot_be_moved_into_itself_or_its_own_sub_tasks(service, erwan):
+    a = await service.create(erwan, "A", reminders=[at(days=1)])
+    deep = await service.create(erwan, "Deep", reminders=[at(days=1)], parent_id=a.id)
+    for target in (a.id, deep.id):
+        with pytest.raises(TaskError, match="part of itself"):
+            service.move(erwan, a.id, target)
+
+
+async def test_done_tasks_do_not_move_and_take_nothing(service, erwan):
+    a = await service.create(erwan, "A", reminders=[at(days=1)])
+    b = await service.create(erwan, "B", reminders=[at(days=1)])
+    service.complete(erwan, a.id)
+    with pytest.raises(TaskError, match="is done: reopen it before moving"):
+        service.move(erwan, a.id, b.id)
+    with pytest.raises(TaskError, match="reopen it before adding a sub task"):
+        service.move(erwan, b.id, a.id)
+
+
+async def test_a_task_cannot_move_under_a_deadline_it_is_later_than(service, erwan):
+    soon = await service.create(erwan, "Soon", due=at(days=2), reminders=[at(days=1)])
+    late_due = await service.create(erwan, "Late deadline", due=at(days=5), reminders=[at(days=1)])
+    late_reminder = await service.create(erwan, "Late reminder", reminders=[at(days=4)])
+    ok = await service.create(erwan, "Fits", due=at(days=1, hours=5), reminders=[at(days=1)])
+    with pytest.raises(TaskError, match="cannot be due after"):
+        service.move(erwan, late_due.id, soon.id)
+    with pytest.raises(TaskError, match="reminder of a sub task cannot be after"):
+        service.move(erwan, late_reminder.id, soon.id)
+    assert service.move(erwan, ok.id, soon.id).parent_id == soon.id
+    # what it holds counts too
+    holder = await service.create(erwan, "Holder", reminders=[at(days=1)])
+    await service.create(erwan, "Inside", due=at(days=6), reminders=[at(days=1)], parent_id=holder.id)
+    with pytest.raises(TaskError, match="cannot be due after"):
+        service.move(erwan, holder.id, soon.id)
+    assert service.get(erwan, holder.id).parent_id is None  # nothing changed
+
+
+async def test_a_task_moved_out_of_the_last_open_one_finishes_the_task_it_was_part_of(service, erwan):
+    parent = await main(service, erwan)
+    done = await service.create(erwan, "Done", parent_id=parent.id)
+    leaving = await service.create(erwan, "Leaving", parent_id=parent.id)
+    service.complete(erwan, done.id)
+    service.move(erwan, leaving.id, None)
+    assert service.get(erwan, parent.id).status == DONE
+
+
+async def test_the_number_of_sub_tasks_under_a_task_is_limited_when_moving_too(service, erwan):
+    parent = await service.create(erwan, "Big", reminders=[at(hours=2)])
+    for number in range(MAX_SUBTASKS):
+        service.store.add(erwan.id, f"s{number}", "", None, "", ("", "", ""), (), NOW, (), parent.id)
+    loose = await service.create(erwan, "Loose", reminders=[at(hours=3)])
+    with pytest.raises(TaskError, match="At most 50 sub tasks"):
+        service.move(erwan, loose.id, parent.id)
+
+
+async def test_tasks_are_put_before_another_and_the_order_is_kept(service, erwan):
+    parent = await main(service, erwan)
+    kids = [await service.create(erwan, name, reminders=[at(days=1)], parent_id=parent.id) for name in "xyz"]
+    assert [t.title for t in service.store.children(parent.id)] == ["x", "y", "z"]  # oldest first until one is chosen
+    service.move(erwan, kids[2].id, before=kids[0].id)
+    assert [t.title for t in service.store.children(parent.id)] == ["z", "x", "y"]
+    service.move(erwan, kids[2].id, before=None)  # last
+    assert [t.title for t in service.store.children(parent.id)] == ["x", "y", "z"]
+    newest = await service.create(erwan, "w", reminders=[at(days=1)], parent_id=parent.id)
+    assert [t.title for t in service.store.children(parent.id)] == ["x", "y", "z", "w"]  # a new one goes last
+    service.move(erwan, newest.id, parent.id, before=kids[1].id)  # same parent: only the place changes
+    assert [t.title for t in service.store.children(parent.id)] == ["x", "w", "y", "z"]
+    assert service.move(erwan, kids[0].id, before=kids[0].id).id == kids[0].id  # before itself: nothing
+    with pytest.raises(TaskError, match="not among the tasks"):
+        service.move(erwan, kids[0].id, before=parent.id)
+
+
+async def test_the_model_moves_a_task_and_the_web_page_asks_for_it_over_http(memory, service, erwan):
+    toolbox, ctx = default_toolbox(), context(memory, service, erwan)
+    a = await service.create(erwan, "A", reminders=[at(days=1)])
+    b = await service.create(erwan, "B", reminders=[at(days=1)])
+    out = await toolbox.arun("update_task", ctx, {"task_id": b.id, "parent_id": a.id})
+    assert out.startswith("Task updated.") and f"sub task of [{a.id}]" in out
+    assert service.get(erwan, b.id).parent_id == a.id
+    await toolbox.arun("update_task", ctx, {"task_id": b.id, "parent_id": 0})
+    assert service.get(erwan, b.id).parent_id is None
+    assert (await toolbox.arun("update_task", ctx, {"task_id": a.id, "parent_id": a.id})).startswith("Error: A task cannot")
+
+
+def test_moving_a_task_over_http(api):
+    ids = [api.post("/v1/tasks", json={**ME, "user_name": "Erwan", "title": name, "reminders": ["2030-01-02T09:00"],
+                                       "timezone": "UTC"}, headers=AUTH).json()["id"] for name in "abc"]
+    a, b, c = ids
+    under = api.patch(f"/v1/tasks/{b}", json={**ME, "parent_id": a}, headers=AUTH)
+    assert under.status_code == 200 and under.json()["parent_id"] == a
+    ahead = api.patch(f"/v1/tasks/{c}", json={**ME, "before_id": a}, headers=AUTH)  # main tasks: c before a
+    assert ahead.status_code == 200 and ahead.json()["position"] == 1
+    listed = {t["id"]: t for t in api.get("/v1/tasks", params={**ME, "status": "all"}, headers=AUTH).json()["tasks"]}
+    assert listed[a]["position"] == 2 and listed[b]["parent_id"] == a
+    out = api.patch(f"/v1/tasks/{b}", json={**ME, "parent_id": None}, headers=AUTH)
+    assert out.status_code == 200 and out.json()["parent_id"] is None
+    assert api.patch(f"/v1/tasks/{a}", json={**ME, "parent_id": a}, headers=AUTH).status_code == 422
+    assert api.patch(f"/v1/tasks/{a}", json={**ME, "title": "A2"}, headers=AUTH).json()["parent_id"] is None  # not asked: kept

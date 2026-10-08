@@ -32,6 +32,13 @@ async def test_streams_tokens_then_done_and_stores_the_exchange(memory, tmp_path
     assert [m.content for m in memory.history("cli:erwan", 10)] == ["hi", "Hello!"]
 
 
+async def test_done_says_how_long_the_turn_and_the_model_took(memory, tmp_path):
+    agent = make_agent(memory, tmp_path, FakeBackend(say("Hello!")))
+    timing = (await run(agent, message="hi"))[-1]["timing"]
+
+    assert 0 <= timing["generating"] <= timing["total"]
+
+
 async def test_tools_run_and_memory_reaches_the_next_prompt(memory, tmp_path):
     backend = FakeBackend(
         call("remember", fact="Has a cat named Miso"),
@@ -43,6 +50,8 @@ async def test_tools_run_and_memory_reaches_the_next_prompt(memory, tmp_path):
     first = await run(agent, message="I have a cat named Miso")
     assert [e["type"] for e in first] == ["turn", "usage", "tool_start", "tool", "token", "usage", "done"]
     assert first[-1]["tools"] == ["remember"]
+    ran = first[3]  # the web page shows what the tool was given and what it gave back
+    assert ran["arguments"] == {"fact": "Has a cat named Miso"} and ran["result"] and ran["truncated"] is False
 
     # Another surface, same person once linked: the fact is in the system prompt
     person = memory.find_person("cli", "erwan")

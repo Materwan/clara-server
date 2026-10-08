@@ -10,9 +10,14 @@
                                      which task it is a sub task of, `subtasks` {total, done} how many it has and
                                      `due_limit` the latest time its dates may have
     GET    /v1/tasks/{id}            ?surface=&user_id=  one task, with its description
-    PATCH  /v1/tasks/{id}            {surface, user_id, title?, description?, due?, reminders?, targets?, status?}:
+    PATCH  /v1/tasks/{id}            {surface, user_id, title?, description?, due?, reminders?, targets?, status?,
+                                     parent_id?, before_id?}:
                                      only what is given changes; `due` null removes the deadline, `reminders` replaces
-                                     those to come ([]: stop reminding), `status` "done" or "open" closes or reopens it
+                                     those to come ([]: stop reminding), `status` "done" or "open" closes or reopens it.
+                                     `parent_id` makes it a sub task of that task (null: a main task again) and
+                                     `before_id` puts it before that task among the tasks with the same parent (null:
+                                     last); an open task moves, with its sub tasks, under an open one, and none of its
+                                     dates may be after the deadline of the tasks it is then part of (422)
     DELETE /v1/tasks/{id}            ?surface=&user_id=  delete it for good
 """
 
@@ -26,7 +31,7 @@ from pydantic import BaseModel, Field
 from .auth import Client, require_account, require_conversation
 from .memory import Memory, Person
 from .notifications import MAX_TARGETS
-from .tasks import MAX_DESCRIPTION, MAX_QUEUE, MAX_TITLE, NO_DUE, TaskError, TaskService
+from .tasks import MAX_DESCRIPTION, MAX_QUEUE, MAX_TITLE, NO_DUE, NO_PARENT, TaskError, TaskService
 
 router = APIRouter()
 
@@ -59,6 +64,8 @@ class TaskPatch(BaseModel):
     timezone: str | None = Field(default=None, max_length=64)
     targets: list[str] | None = Field(default=None, max_length=MAX_TARGETS)
     status: Literal["open", "done"] | None = None
+    parent_id: int | None = Field(default=None, ge=1)  # given as null: a main task again
+    before_id: int | None = Field(default=None, ge=1)  # given as null: last among the tasks with that parent
 
 
 def _tasks(request: Request) -> TaskService:
@@ -131,6 +138,12 @@ async def patch_task(task_id: int, body: TaskPatch, client: Client, request: Req
             tasks.complete(person, task_id)
         elif reopening:
             await tasks.reopen(person, task_id, body.reminders, body.timezone)
+        if "parent_id" in body.model_fields_set or "before_id" in body.model_fields_set:
+            tasks.move(
+                person, task_id,
+                body.parent_id if "parent_id" in body.model_fields_set else NO_PARENT,
+                body.before_id if "before_id" in body.model_fields_set else NO_PARENT,
+            )
         changes = {"title": body.title, "description": body.description, "targets": body.targets}
         due = body.due if "due" in body.model_fields_set else NO_DUE
         reminders = None if reopening or body.status == "done" else body.reminders

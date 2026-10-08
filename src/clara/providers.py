@@ -16,11 +16,13 @@ from the environment. A provider without its key is listed, but cannot be chosen
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TypeVar
 
@@ -33,6 +35,7 @@ log = logging.getLogger(__name__)
 T = TypeVar("T")
 
 CHECK_TIMEOUT = 8.0
+PERSONAL_BACKENDS = 32  # backends kept for people's own keys; the least recently used is closed
 
 
 class ProviderError(Exception):
@@ -167,6 +170,7 @@ class ProviderManager:
         self._load_state()
         self._backend = self._build(self.config, self.model)
         self._others: dict[str, LlmBackend] = {}  # the models somebody chose that are not the server's own
+        self._personal: OrderedDict[tuple[str, str], LlmBackend] = OrderedDict()  # (ref, key) of a person's own key
 
     @classmethod
     def from_settings(
@@ -267,6 +271,18 @@ class ProviderManager:
                 except Exception as error:  # closing is best effort: the process is ending
                     log.warning("could not close a model backend: %s", error)
         self._built.clear()
+        personal, self._personal = list(self._personal.values()), OrderedDict()
+        for backend in personal:
+            await self._close(backend)
+
+    @staticmethod
+    async def _close(backend: LlmBackend) -> None:
+        close = getattr(backend, "aclose", None)
+        if close is not None:
+            try:
+                await close()
+            except Exception as error:  # closing is best effort
+                log.warning("could not close a model backend: %s", error)
 
     # ------------------------------------------------------------------
     # LlmBackend: delegate to the active provider
@@ -302,7 +318,31 @@ class ProviderManager:
         config = self.configs.get(split_ref(ref)[0])
         return config.context_window if config is not None else self.context_window
 
-    def _backend_for(self, ref: str) -> LlmBackend:
+    def _personal_backend(self, ref: str, api_key: str) -> LlmBackend:
+        """The backend of a model run with a person's own key (their key, not the server's)."""
+        provider, model = split_ref(ref)
+        config = self.configs.get(provider)
+        if config is None:
+            raise ProviderError(f"Unknown provider {provider!r}. Choose: {', '.join(self.configs)}.")
+        if not config.needs_key:
+            raise ProviderError(f"{config.label} has no API key to bring.")
+        slot = (ref, hashlib.sha256(api_key.encode()).hexdigest()[:16])
+        if slot in self._personal:
+            self._personal.move_to_end(slot)
+            return self._personal[slot]
+        backend = self._factory(replace(config, api_key=api_key), model)
+        self._personal[slot] = backend
+        while len(self._personal) > PERSONAL_BACKENDS:
+            _, oldest = self._personal.popitem(last=False)
+            try:
+                asyncio.get_running_loop().create_task(self._close(oldest))
+            except RuntimeError:
+                pass  # no loop: the connection is dropped with the object
+        return backend
+
+    def _backend_for(self, ref: str, api_key: str | None = None) -> LlmBackend:
+        if api_key:
+            return self._personal_backend(ref, api_key)
         if ref == self.default_ref:
             return self._backend
         provider, model = split_ref(ref)
@@ -315,15 +355,32 @@ class ProviderManager:
             self._others[ref] = self._build(config, model)
         return self._others[ref]
 
-    def stream_ref(self, ref: str, messages: list[dict], tools: list[dict] | None) -> AsyncIterator[LlmChunk]:
-        """`stream`, for the model `ref` instead of the server's own."""
-        backend = self._backend_for(ref)
+    def stream_ref(
+        self, ref: str, messages: list[dict], tools: list[dict] | None, api_key: str | None = None
+    ) -> AsyncIterator[LlmChunk]:
+        """`stream`, for the model `ref` instead of the server's own (with `api_key`: a person's own key)."""
+        backend = self._backend_for(ref, api_key)
         stream = backend.stream(messages, tools)
         if self.traffic is None:
             return stream
         provider, model = split_ref(ref)
         config = self.configs[provider]
         return self.traffic.model_stream(stream, self._peer_of(config), config.host, model, messages, tools)
+
+    async def verify_key(self, provider: str, api_key: str) -> None:
+        """Raise when the provider refuses this key (or cannot be reached); nothing is kept."""
+        config = self.configs[provider]
+        backend = self._factory(replace(config, api_key=api_key), config.default_model)
+        try:
+            await asyncio.wait_for(self._logged("verify", backend.verify(), config), CHECK_TIMEOUT)
+        finally:
+            await self._close(backend)
+
+    async def list_models_with_key(self, provider: str, api_key: str) -> list[str]:
+        """What the provider offers to this key."""
+        config = self.configs[provider]
+        backend = self._personal_backend(make_ref(provider, self._models[provider]), api_key)
+        return await asyncio.wait_for(self._logged("list_models", backend.list_models(), config), CHECK_TIMEOUT)
 
     async def list_models_of(self, provider: str) -> list[str]:
         """What one provider offers (not only the active one)."""

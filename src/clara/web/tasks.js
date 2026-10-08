@@ -3,6 +3,8 @@
 // and may move the next ones, so the numbers here change by themselves. A task can be divided into sub tasks (and
 // those into sub tasks): each has its own description and reminders, none of them later than the deadline of the
 // tasks it is part of; they are drawn under their task, and a task is done when all its sub tasks are.
+// Tasks are dragged (by the mouse from anywhere on the row, by a finger from the grip): onto a task to become one of
+// its sub tasks, on its upper or lower edge to be put before or after it, onto the bar at the bottom to be a main task.
 
 import { api } from "./api.js";
 import { mark } from "./icons.js";
@@ -49,6 +51,8 @@ export function mountTasks(container, user) {
   let view = "list";
   let month = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
   let selected = dayKey(new Date());
+  let drag = null; // a task being dragged: see "dragging" below
+  let redraw = false; // the list changed while a task was dragged
 
   const count = h("span", { class: "count" });
   const content = h("div", { class: "tasks-content" });
@@ -61,7 +65,10 @@ export function mountTasks(container, user) {
   container.append(root);
 
   const known = () => new Map(tasks.map((task) => [task.id, task]));
-  const kidsOf = (id) => tasks.filter((task) => task.parent_id === id).sort((a, b) => a.id - b.id);
+  const byOrder = (a, b) => a.position - b.position || a.id - b.id; // an order chosen by dragging, else the oldest first
+  const kidsOf = (id) => tasks.filter((task) => task.parent_id === id).sort(byOrder);
+  /** The tasks with that parent (null: the main tasks), in the order they are shown. */
+  const siblingsOf = (id) => (id == null ? tasks.filter((task) => task.parent_id == null).sort((a, b) => a.position - b.position) : kidsOf(id));
   const below = (task) => kidsOf(task.id).flatMap((kid) => [kid, ...below(kid)]); // its sub tasks, theirs, and so on
   const earliest = (...moments) => moments.filter(Boolean).sort((a, b) => parseDate(a) - parseDate(b))[0] || null;
 
@@ -79,7 +86,7 @@ export function mountTasks(container, user) {
       out.push({ task, depth });
       for (const kid of kidsOf(task.id)) walk(kid, depth + 1);
     };
-    for (const task of tasks) if (isRoot(task)) walk(task, 0);
+    for (const task of tasks.filter(isRoot).sort((a, b) => a.position - b.position)) walk(task, 0); // the sort keeps the server's order of those nobody placed
     return out;
   }
 
@@ -91,6 +98,7 @@ export function mountTasks(container, user) {
   }
 
   function draw() {
+    if (drag?.started) { redraw = true; return; } // the rows are in the user's hand: draw them when it is over
     const open = tasks.filter((task) => task.status === "open").length;
     count.textContent = loaded ? plural(open, "open task") : "";
     tabs(filterBox, FILTERS, filter, (id) => { filter = id; draw(); });
@@ -109,6 +117,7 @@ export function mountTasks(container, user) {
 
   function listView() {
     const list = h("ul", { class: "list tasks", "aria-label": "Your tasks" });
+    list.addEventListener("pointerdown", pressed);
     const found = rows();
     if (!found.length) list.append(emptyState());
     for (const { task, depth } of found) list.append(row(task, depth));
@@ -138,7 +147,10 @@ export function mountTasks(container, user) {
 
   function row(task, depth = 0) {
     const done = task.status === "done";
-    return h("li", { class: "task" + (done ? " done" : "") + (depth ? " sub" : ""), style: `--depth: ${depth}` },
+    return h("li", { class: "task" + (done ? " done" : "") + (depth ? " sub" : ""), style: `--depth: ${depth}`, "data-id": task.id },
+      done ? h("span", { class: "grip-space" })
+        : h("button", { class: "grip", type: "button", title: "Drag onto a task to make this a sub task of it, or between tasks to move it",
+          "aria-label": `Drag ${task.title}`, tabindex: "-1" }, icon("grip", { size: 16 })),
       h("button", { class: "check", type: "button", role: "checkbox", "aria-checked": String(done),
         title: done ? "Reopen this task" : "Mark as done", "aria-label": `${done ? "Reopen" : "Mark as done"}: ${task.title}`,
         onclick: (event) => toggle(task, event.currentTarget) }, done && icon("check", { size: 15 })),
@@ -149,6 +161,188 @@ export function mountTasks(container, user) {
         !done && h("button", { class: "ghost icon-btn", title: "Add a sub task", "aria-label": `Add a sub task to ${task.title}`, onclick: () => addTask(task) }, icon("plus", { size: 18 })),
         h("button", { class: "ghost icon-btn", title: "Edit", "aria-label": `Edit ${task.title}`, onclick: () => editTask(task) }, icon("edit", { size: 18 })),
         h("button", { class: "ghost icon-btn danger forget", title: "Delete", "aria-label": `Delete ${task.title}`, onclick: () => remove(task) }, icon("trash", { size: 18 }))));
+  }
+
+  // ---- dragging ---------------------------------------------------------------------------------------
+
+  const dropBar = h("div", { class: "drop-main", hidden: true }, "Drop here to make it a main task");
+  root.append(dropBar);
+  const DRAG_FROM = 5; // pixels the pointer goes before a press becomes a drag (below: a click)
+  const EDGE = 0.28; // the part of a row, at its top and bottom, that means "before" and "after"
+
+  /** Why `task` cannot be part of `parent` (null: a main task), or null when it can. */
+  function refusal(task, parent) {
+    if (parent == null) return null;
+    if (parent.id === task.id || below(task).some((part) => part.id === parent.id)) return "A task cannot be part of itself.";
+    if (parent.status !== "open") return `“${parent.title}” is done: reopen it first.`;
+    const limit = earliest(parent.due_at, parent.due_limit);
+    if (!limit) return null;
+    const latest = parseDate(limit);
+    for (const part of [task, ...below(task)]) {
+      if (part.due_at && parseDate(part.due_at) > latest) return `“${part.title}” is due after ${dateTime(limit)}, the deadline of “${parent.title}”.`;
+      if (part.status === "open" && part.reminders.some((at) => parseDate(at) > latest)) return `A reminder of “${part.title}” is after ${dateTime(limit)}, the deadline of “${parent.title}”.`;
+    }
+    return null;
+  }
+
+  /** Where the task would go if dropped at that point: `{ parent, before, label, bad }`, or null over nothing. */
+  function aim(task, x, y) {
+    const over = document.elementFromPoint(x, y);
+    if (!over) return null;
+    if (over.closest(".drop-main")) {
+      return task.parent_id == null ? { bad: "It is a main task already.", label: "" } : { parent: null, before: null, label: "Make it a main task", bar: true };
+    }
+    const li = over.closest("li.task");
+    const target = li && known().get(Number(li.dataset.id));
+    if (!target) return null;
+    const box = li.getBoundingClientRect();
+    const spot = (y - box.top) / box.height;
+    const zone = target.id === task.id ? "self" : spot < EDGE ? "before" : spot > 1 - EDGE ? "after" : "into";
+    if (zone === "self") return { li, zone, bad: "" };
+    if (below(task).some((part) => part.id === target.id)) return { li, zone, bad: "A task cannot be part of itself." };
+    if (zone === "into") {
+      const bad = refusal(task, target);
+      return { li, zone, parent: target.id, before: null, label: `Sub task of “${target.title}”`, bad };
+    }
+    const parent = target.parent_id == null ? null : known().get(target.parent_id) || null;
+    const others = siblingsOf(target.parent_id ?? null).filter((item) => item.id !== task.id);
+    const first = zone === "after" ? kidsOf(target.id).find((kid) => kid.id !== task.id) : null;
+    if (first) { // under a row that shows its sub tasks, "after" is where they start
+      return { li, zone, parent: target.id, before: first.id, bad: refusal(task, target), label: `First sub task of “${target.title}”` };
+    }
+    const at = others.findIndex((item) => item.id === target.id);
+    return { li, zone, parent: parent?.id ?? null, before: zone === "before" ? target.id : others[at + 1]?.id ?? null, bad: refusal(task, parent),
+      label: `${zone === "before" ? "Before" : "After"} “${target.title}”${parent ? ` in “${parent.title}”` : ""}` };
+  }
+
+  function pressed(event) {
+    if (view !== "list" || drag || (event.pointerType === "mouse" && event.button !== 0)) return;
+    const li = event.target.closest("li.task");
+    const task = li && known().get(Number(li.dataset.id));
+    if (!task || task.status !== "open" || event.target.closest(".check, .actions")) return;
+    if (event.pointerType !== "mouse" && !event.target.closest(".grip")) return; // a finger on the row scrolls the page
+    drag = { task, li, id: event.pointerId, x: event.clientX, y: event.clientY, started: false, aim: null, ghost: null, hint: null, scroller: 0, speed: 0 };
+    document.addEventListener("pointermove", moved);
+    document.addEventListener("pointerup", released);
+    document.addEventListener("pointercancel", cancelled);
+    document.addEventListener("keydown", escaped);
+  }
+
+  function begin() {
+    drag.started = true;
+    getSelection()?.removeAllRanges();
+    drag.hint = h("small", {});
+    drag.ghost = h("div", { class: "drag-ghost", "aria-hidden": "true" }, h("span", {}, drag.task.title), drag.hint);
+    document.body.append(drag.ghost);
+    document.body.classList.add("dragging");
+    drag.li.classList.add("dragging");
+    dropBar.hidden = drag.task.parent_id == null;
+  }
+
+  /** The click that ends a drag is not a click on what is under the pointer. */
+  function swallowClick() {
+    const swallow = (event) => { event.stopPropagation(); event.preventDefault(); };
+    document.addEventListener("click", swallow, true);
+    setTimeout(() => document.removeEventListener("click", swallow, true), 0);
+  }
+
+  function moved(event) {
+    if (!drag || event.pointerId !== drag.id) return;
+    if (!drag.started) {
+      if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < DRAG_FROM) return;
+      begin();
+    }
+    event.preventDefault();
+    drag.x = event.clientX;
+    drag.y = event.clientY;
+    follow();
+  }
+
+  /** Draw where the drag is: the ghost, what it would do, and scroll when it is near an edge of the page. */
+  function follow() {
+    const { ghost, task } = drag;
+    ghost.style.left = `${Math.min(drag.x + 14, innerWidth - ghost.offsetWidth - 8)}px`;
+    ghost.style.top = `${Math.min(drag.y + 14, innerHeight - ghost.offsetHeight - 8)}px`;
+    const found = aim(task, drag.x, drag.y);
+    for (const marked of root.querySelectorAll(".drop-into, .drop-before, .drop-after, .drop-bad")) marked.classList.remove("drop-into", "drop-before", "drop-after", "drop-bad");
+    dropBar.classList.toggle("over", Boolean(found?.bar));
+    drag.aim = found;
+    ghost.classList.toggle("bad", Boolean(found?.bad));
+    drag.hint.textContent = found?.bad || (found?.label ?? "");
+    if (found?.li && found.zone !== "self") found.li.classList.add(found.bad ? "drop-bad" : `drop-${found.zone}`);
+    const scroller = root.querySelector(".scroll");
+    const box = scroller.getBoundingClientRect();
+    const near = 60;
+    drag.speed = drag.y < box.top + near ? -Math.ceil((box.top + near - drag.y) / 4) : drag.y > box.bottom - near ? Math.ceil((drag.y - (box.bottom - near)) / 4) : 0;
+    if (drag.speed && !drag.scroller) {
+      const step = () => {
+        if (!drag?.started || !drag.speed) { if (drag) drag.scroller = 0; return; }
+        scroller.scrollTop += drag.speed;
+        follow();
+        drag.scroller = requestAnimationFrame(step);
+      };
+      drag.scroller = requestAnimationFrame(step);
+    }
+  }
+
+  function over() {
+    const finished = drag;
+    drag = null;
+    document.removeEventListener("pointermove", moved);
+    document.removeEventListener("pointerup", released);
+    document.removeEventListener("pointercancel", cancelled);
+    document.removeEventListener("keydown", escaped);
+    if (finished?.started) {
+      cancelAnimationFrame(finished.scroller);
+      finished.ghost.remove();
+      document.body.classList.remove("dragging");
+      dropBar.hidden = true;
+      dropBar.classList.remove("over");
+      swallowClick();
+    }
+    return finished;
+  }
+
+  function cancelled() {
+    const finished = over();
+    if (finished?.started) { redraw = false; draw(); }
+  }
+  function escaped(event) { if (event.key === "Escape") cancelled(); }
+
+  async function released(event) {
+    if (!drag || event.pointerId !== drag.id) return;
+    const { task, aim: found, started } = drag;
+    over();
+    if (!started) return;
+    redraw = false;
+    draw();
+    if (!found) return; // dropped over nothing
+    if (found.bad) toast(found.bad, true);
+    else if (found.parent !== undefined) await moveTask(task, found.parent, found.before); // (undefined: on itself)
+  }
+
+  /** Put a task under `parent` (null: a main task) before the task `before` (null: last). */
+  async function moveTask(task, parent, before) {
+    const oldParent = known().get(task.parent_id);
+    const order = siblingsOf(parent).filter((item) => item.id !== task.id).map((item) => item.id);
+    const at = before == null ? order.length : order.indexOf(before);
+    order.splice(at, 0, task.id);
+    const same = (task.parent_id ?? null) === parent;
+    if (same && siblingsOf(parent).map((item) => item.id).join() === order.join()) return; // dropped where it is
+    // what is left of the task it was part of may be all done: the server finishes it
+    const finished = oldParent && !same && oldParent.status === "open" && kidsOf(oldParent.id).length > 1
+      && kidsOf(oldParent.id).filter((kid) => kid.id !== task.id).every((kid) => kid.status === "done");
+    try {
+      const moved = await api.patch(`/v1/tasks/${task.id}`, { ...query, parent_id: parent, before_id: before, timezone: browserZone() });
+      await load(); // the order of the others changed too
+      let text = same ? "Moved." : parent == null ? "Now a main task." : `Now a sub task of “${known().get(parent)?.title ?? "that task"}”.`;
+      if (finished) text += ` “${oldParent.title}” is done now: all its sub tasks are.`;
+      toast(text);
+      return moved;
+    } catch (error) {
+      toast(error.detail || String(error), true);
+      load();
+    }
   }
 
   // ---- the calendar -----------------------------------------------------------------------------------

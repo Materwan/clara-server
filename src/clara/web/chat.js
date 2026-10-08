@@ -7,7 +7,7 @@ import { DocumentError, MAX_TOTAL_CHARS, compose, readDocument, splitMessage, to
 import { icon, mark, ring } from "./icons.js";
 import { labelOf, renderGroups } from "./history.js";
 import { connectionCount, openConnections } from "./integrations.js";
-import { chooseModel, costText, loadModels, modelSelect } from "./models.js";
+import { anyModel, chooseModel, costText, loadModels, modelSelect } from "./models.js";
 import { displayAnswers } from "./qcm.js";
 import { addCall, addFile, addForm, addText, endCall, fileNamesIn, messagesFrom, newReply, replyBody, toolNote } from "./reply.js";
 import { chooseProject, listProjects } from "./projects.js";
@@ -521,6 +521,7 @@ export function mountChat(container, user, { slot, fresh = false, project = null
         else if (event.type === "error") { reply.failed = event.message; finished = true; }
         else if (event.type === "done") {
           if (event.reply && !reply.content) addText(reply, event.reply);
+          reply.stats = { ...event.usage, ...event.timing };
           state.context = { ...state.context, ...event.context, messages: (state.context?.messages || 0) + 2 };
           finished = true;
         }
@@ -636,8 +637,8 @@ export function mountChat(container, user, { slot, fresh = false, project = null
     let info;
     try { info = await loadModels(who); } catch { return; } // no picker: Clara answers with the server's model
     clear(modelBox);
-    modelBox.hidden = !info.models.length;
-    if (!info.models.length) return;
+    modelBox.hidden = !anyModel(info);
+    if (!anyModel(info)) return;
     const select = modelSelect(info, info.choices[SURFACE] ?? null, async (ref) => {
       select.disabled = true;
       try {

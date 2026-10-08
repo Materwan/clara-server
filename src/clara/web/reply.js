@@ -6,7 +6,7 @@ import { fileCard } from "./files.js";
 import { icon } from "./icons.js";
 import { renderMarkdown } from "./markdown.js";
 import { qcmNode } from "./qcm.js";
-import { clear, h } from "./ui.js";
+import { clear, h, toast } from "./ui.js";
 
 // What Clara did, in words: [icon, what she did, the argument that says what about].
 const TOOL_NOTES = {
@@ -55,8 +55,14 @@ export function toolNote(event) {
   if (typeof args === "string") {
     try { args = JSON.parse(args); } catch { args = {}; }
   }
-  const raw = key && args && typeof args[key] === "string" ? args[key].trim() : "";
-  return { name, glyph, label, detail: raw.length > 80 ? raw.slice(0, 79) + "…" : raw };
+  if (!args || typeof args !== "object" || Array.isArray(args)) args = {};
+  const raw = key && typeof args[key] === "string" ? args[key].trim() : "";
+  // `args` and `result` are what a click on the call shows: what the tool was given, and what it gave back
+  // (undefined while it runs, or when the conversation was stored before results were kept)
+  return {
+    name, glyph, label, detail: raw.length > 80 ? raw.slice(0, 79) + "…" : raw,
+    args, result: typeof event.result === "string" ? event.result : undefined, truncated: event.truncated === true,
+  };
 }
 
 // ---- the reply as data ------------------------------------------------------------------------------------
@@ -129,9 +135,45 @@ export function messagesFrom(rows, files = new Map()) {
 // ---- drawing it -------------------------------------------------------------------------------------------
 const spinner = () => h("span", { class: "spin", "aria-hidden": "true" });
 
-function callNode(call, working) {
-  return h("div", { class: "note" }, icon(call.glyph, { size: 14 }),
-    h("span", {}, h("b", {}, call.label), call.detail ? ` ${call.detail}` : ""), working && spinner());
+/** What a value of an argument looks like: text as it is, anything else as JSON. */
+const shown = (value) => (typeof value === "string" ? value : JSON.stringify(value, null, 2));
+
+async function copy(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("Copied.");
+  } catch {
+    toast("Could not copy.", true);
+  }
+}
+
+/** What a call was given and gave back: the tool, each argument, the result. */
+function callDetail(call) {
+  const entries = Object.entries(call.args || {});
+  const result = call.result === undefined
+    ? h("p", { class: "call-none" }, call.state === "running" ? "Running…" : "Not kept for this call.")
+    : h("pre", { class: "call-result" }, call.result || "(nothing)");
+  return h("div", { class: "call-detail" },
+    h("div", { class: "call-field" }, h("span", { class: "call-key" }, "Tool"), h("code", {}, call.name)),
+    entries.length
+      ? entries.map(([key, value]) => h("div", { class: "call-field" },
+        h("span", { class: "call-key" }, key), h("pre", { class: "call-value" }, shown(value))))
+      : h("div", { class: "call-field" }, h("span", { class: "call-key" }, "Arguments"), h("span", { class: "call-none" }, "none")),
+    h("div", { class: "call-field" },
+      h("span", { class: "call-key" }, "Result",
+        call.result ? h("button", { type: "button", class: "ghost icon-btn call-copy", title: "Copy the result", "aria-label": "Copy the result", onclick: () => copy(call.result) }, icon("copy", { size: 14 })) : null),
+      result,
+      call.truncated && h("p", { class: "call-none" }, "Cut short: only the start of the result is shown.")));
+}
+
+/** One call: a line that opens on what the tool was given and what it gave back. */
+function callNode(call, working, toggle) {
+  const open = call.open === true;
+  return h("div", { class: "call" + (open ? " open" : "") },
+    h("button", { type: "button", class: "note call-toggle", "aria-expanded": String(open), title: open ? "Hide the details" : "Show the details", onclick: toggle },
+      icon(call.glyph, { size: 14 }),
+      h("span", {}, h("b", {}, call.label), call.detail ? ` ${call.detail}` : ""), working && spinner(), icon("chevron", { size: 12, className: "call-caret" })),
+    open && callDetail(call));
 }
 
 /** "Searched the web ×2, read a page · 3 actions" */
@@ -203,7 +245,7 @@ function partView(reply, part, submit) {
     node,
     paint: once(
       // working: the model is still on it (a call runs, or it reads what the calls gave back)
-      () => JSON.stringify([part.calls.map((c) => [c.state, c.label, c.detail]), part.open, working()]),
+      () => JSON.stringify([part.calls.map((c) => [c.state, c.label, c.detail, c.open === true, c.result?.length, c.truncated]), part.open, working()]),
       () => {
         const many = part.calls.length > 1;
         node.classList.toggle("many", many);
@@ -216,8 +258,9 @@ function partView(reply, part, submit) {
         summaryText.textContent = summary(part.calls);
         clear(list);
         clear(lone);
-        if (many && part.open) list.append(...part.calls.map((call) => callNode(call, call.state === "running" && Boolean(reply.live))));
-        if (!many) lone.append(callNode(part.calls[0], working()));
+        const flip = (call) => () => { call.open = !call.open; view.paint(); };
+        if (many && part.open) list.append(...part.calls.map((call) => callNode(call, call.state === "running" && Boolean(reply.live), flip(call))));
+        if (!many) lone.append(callNode(part.calls[0], working(), flip(part.calls[0])));
       },
     ),
   };
@@ -227,12 +270,25 @@ function partView(reply, part, submit) {
   return view;
 }
 
+const count = new Intl.NumberFormat();
+
+/** "1,204 tokens in · 312 out · 41.8 tok/s · 7.5 s" — what the answer used; null when the server said nothing. */
+export function statsLine(stats) {
+  if (!stats) return null;
+  const { prompt_tokens: inTokens = 0, completion_tokens: outTokens = 0, generating = 0, total = 0 } = stats;
+  const pieces = [`${count.format(inTokens)} in`, `${count.format(outTokens)} out`];
+  if (outTokens && generating > 0) pieces.push(`${(outTokens / generating).toFixed(1)} tok/s`);
+  if (total > 0) pieces.push(total < 10 ? `${total.toFixed(1)} s` : `${Math.round(total)} s`);
+  return pieces.join(" · ");
+}
+
 /** The body of a reply: its parts in order, then the files. `sync()` draws what changed in the reply since the last time. */
 export function replyBody(reply, who, submit) {
   const parts = h("div", { class: "parts" });
   const files = h("div", { class: "cards" });
   const waiting = h("span", { class: "waiting", role: "img", "aria-label": "Clara is writing" });
-  const node = h("div", { class: "body" }, parts, files);
+  const stats = h("div", { class: "reply-stats", title: "Tokens in and out, generation speed, total time" });
+  const node = h("div", { class: "body" }, parts, files, stats);
   const views = new Map();
   let filesDrawn = "";
   return {
@@ -247,6 +303,9 @@ export function replyBody(reply, who, submit) {
         }
       }
       for (const view of views.values()) view.paint();
+      const line = reply.live ? null : statsLine(reply.stats);
+      stats.hidden = !line;
+      stats.textContent = line || "";
       const shown = JSON.stringify(reply.files);
       if (shown !== filesDrawn) {
         filesDrawn = shown;

@@ -28,6 +28,11 @@
                                             the group places a client is in (a Discord server): whether
                                             Clara may answer messages there that were not addressed to her
     options(key, value)                     small settings changed at run time (the default of `chime`)
+    usage_log(id, at, person, kind, surface, model_ref, prompt_tokens, completion_tokens, ...)
+                                            one row per answer (or compaction, title): who, where, which model,
+                                            tokens in and out; for the administration (see usagelog.py)
+    user_api_keys(person, provider, secret, hint)
+                                            the API keys people saved for a provider, encrypted (see userkeys.py)
 
 Facts follow the *person*, history follows the *conversation*: Clara knows you
 are the same human on every surface, but a Discord channel and a terminal
@@ -216,6 +221,32 @@ CREATE TABLE IF NOT EXISTS usage (
     tokens    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (person_id, day)
 );
+CREATE TABLE IF NOT EXISTS usage_log (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    at            TEXT NOT NULL,  -- UTC, ISO 8601
+    person_id     INTEGER REFERENCES people (id) ON DELETE CASCADE,  -- NULL: a conversation of several people
+    kind          TEXT NOT NULL,  -- message, scheduled, compaction, title
+    surface       TEXT NOT NULL,
+    conversation  TEXT NOT NULL DEFAULT '',
+    model_ref     TEXT NOT NULL DEFAULT '',  -- "provider:model" ('' with no catalogue)
+    model         TEXT NOT NULL DEFAULT '',
+    provider      TEXT NOT NULL DEFAULT '',
+    prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    credits       INTEGER NOT NULL DEFAULT 0,  -- what was counted against the daily limit
+    rounds        INTEGER NOT NULL DEFAULT 1,  -- model rounds of the answer (tool loop steps)
+    estimated     INTEGER NOT NULL DEFAULT 0  -- the model reported nothing: the tokens are estimated
+);
+CREATE INDEX IF NOT EXISTS idx_usage_log_person ON usage_log (person_id, at);
+CREATE INDEX IF NOT EXISTS idx_usage_log_at ON usage_log (at);
+CREATE TABLE IF NOT EXISTS user_api_keys (
+    person_id  INTEGER NOT NULL REFERENCES people (id) ON DELETE CASCADE,
+    provider   TEXT NOT NULL,  -- providers.py id: cloud, gemini, deepseek, mistral
+    secret     TEXT NOT NULL,  -- encrypted (integrations/vault.py), never given back
+    hint       TEXT NOT NULL DEFAULT '',  -- the last characters of the key, to recognise it
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (person_id, provider)
+);
 CREATE TABLE IF NOT EXISTS models (
     ref     TEXT PRIMARY KEY,  -- "provider:model", as models.py names it
     enabled INTEGER NOT NULL DEFAULT 0,  -- may users choose it?
@@ -385,6 +416,9 @@ _ADDED_COLUMNS = {
     "conversations": {
         "project_id": "INTEGER",  # the project it belongs to (projects.py), NULL: none
     },
+    "usage_log": {
+        "own_key": "INTEGER NOT NULL DEFAULT 0",  # answered with the person's own API key (userkeys.py): no credits
+    },
     "users": {
         "daily_token_limit": "INTEGER",  # tokens a day (limits.py); NULL: the server's default, 0: no limit
     },
@@ -396,6 +430,7 @@ _ADDED_COLUMNS = {
     },
     "tasks": {
         "parent_id": "INTEGER REFERENCES tasks (id) ON DELETE CASCADE",  # the task it is a sub task of (NULL: a main task)
+        "position": "INTEGER NOT NULL DEFAULT 0",  # its place among the tasks with the same parent (0: no order chosen)
     },
     "reminders": {  # where the reminder was set: the answer that announces it is written there
         "surface": "TEXT NOT NULL DEFAULT ''",
@@ -543,17 +578,21 @@ class ConversationInfo:
     project_id: int | None = None  # the project it belongs to
 
 
-SHOWN_ARGUMENT = 300  # characters of a tool argument given back with a message
+SHOWN_ARGUMENT = 2000  # characters of a tool argument given back with a message
+SHOWN_RESULT = 8000  # characters of what a tool gave back, given back with the message that called it
 
 
-def _shown_call(call: dict) -> dict:
+def _shown_call(call: dict, result: str | None = None) -> dict:
     function = call.get("function") or {}
     arguments = function.get("arguments")
     if isinstance(arguments, dict):
         arguments = {
             key: value[:SHOWN_ARGUMENT] if isinstance(value, str) else value for key, value in arguments.items()
         }
-    return {"name": function.get("name", ""), "arguments": arguments if isinstance(arguments, dict) else {}}
+    shown = {"name": function.get("name", ""), "arguments": arguments if isinstance(arguments, dict) else {}}
+    if result is not None:
+        shown |= {"result": result[:SHOWN_RESULT], "truncated": len(result) > SHOWN_RESULT}
+    return shown
 
 
 @dataclass(frozen=True)
@@ -565,7 +604,7 @@ class ShownMessage:
     content: str
     created_at: str  # ISO, UTC
     forms: tuple[dict, ...] = ()  # QCM the message asked (only when the transcript was read with `forms`)
-    calls: tuple[dict, ...] = ()  # tools it called, `{"name", "arguments"}` (only when read with `calls`)
+    calls: tuple[dict, ...] = ()  # tools it called, `{"name", "arguments", "result", "truncated"}` (only when read with `calls`)
 
 
 @dataclass(frozen=True)
@@ -812,7 +851,9 @@ class Memory:
             self._db.execute("DELETE FROM projects WHERE person_id = ?", (person_id,))  # their files go with them
             self._db.execute("DELETE FROM markdown_files WHERE person_id = ?", (person_id,))
             self._db.execute("DELETE FROM usage WHERE person_id = ?", (person_id,))
+            self._db.execute("DELETE FROM usage_log WHERE person_id = ?", (person_id,))
             self._db.execute("DELETE FROM model_choices WHERE person_id = ?", (person_id,))
+            self._db.execute("DELETE FROM user_api_keys WHERE person_id = ?", (person_id,))
             self._db.execute("DELETE FROM tasks WHERE person_id = ?", (person_id,))  # their reminders go with them
             # their connected accounts, resources and requests go with them (the tables cascade); so does their log
             self._db.execute("DELETE FROM integration_log WHERE person_id = ?", (person_id,))
@@ -863,12 +904,19 @@ class Memory:
             (target, source),
         )
         db.execute("DELETE FROM usage WHERE person_id = ?", (source,))
+        db.execute("UPDATE usage_log SET person_id = ? WHERE person_id = ?", (target, source))
         db.execute(  # the target's own choices win
             "INSERT OR IGNORE INTO model_choices (person_id, surface, model)"
             " SELECT ?, surface, model FROM model_choices WHERE person_id = ?",
             (target, source),
         )
         db.execute("DELETE FROM model_choices WHERE person_id = ?", (source,))
+        db.execute(  # the same for their API keys
+            "INSERT OR IGNORE INTO user_api_keys (person_id, provider, secret, hint, created_at)"
+            " SELECT ?, provider, secret, hint, created_at FROM user_api_keys WHERE person_id = ?",
+            (target, source),
+        )
+        db.execute("DELETE FROM user_api_keys WHERE person_id = ?", (source,))
         for row in db.execute("SELECT id, name FROM markdown_files WHERE person_id = ?", (source,)).fetchall():
             name, number = row["name"], 1
             while db.execute(
@@ -1568,10 +1616,29 @@ class Memory:
         for row in rows[:limit]:
             stored = json.loads(row["tool_calls"]) if row["tool_calls"] else []
             asked = tuple(forms_in(stored)) if forms and stored else ()
-            called = tuple(_shown_call(call) for call in stored) if calls else ()
+            called = tuple(_shown_call(call, result) for call, result in self._results(row["id"], stored)) if calls else ()
             if row["content"] or asked or called:
                 shown.append(ShownMessage(row["id"], row["role"], row["content"], row["created_at"], asked, called))
         return shown[::-1], len(rows) > limit
+
+    def _results(self, message_id: int, stored: list[dict]) -> list[tuple[dict, str | None]]:
+        """The calls of an answer, each with what the tool gave back: the messages that follow the answer, one for
+        each call and in its order (None: not kept, the messages were deleted)."""
+        if not stored:
+            return []
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT role, content FROM messages WHERE id > ? AND conversation ="
+                " (SELECT conversation FROM messages WHERE id = ?) ORDER BY id LIMIT ?",
+                (message_id, message_id, len(stored)),
+            ).fetchall()
+        kept = []
+        for row in rows:
+            if row["role"] != "tool":
+                break
+            kept.append(row["content"])
+        results = kept + [None] * (len(stored) - len(kept))
+        return list(zip(stored, results))
 
     # ------------------------------------------------------------------
     # Summary and size of a conversation

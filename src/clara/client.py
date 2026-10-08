@@ -48,6 +48,8 @@ HELP = """\
                   a sub task of task <id>, with its own description, deadline and reminders: none of them
                   can be after the deadline of that task. A task is done when all its sub tasks are.
 /task done|reopen|delete <id>
+/task move <id> <parent-id>|none
+                  make a task (with its sub tasks) a sub task of another, or a main task again (none)
 /task set <id> title|description|due|remind <value>
                   due and remind take a <when> (remind: several, comma-separated) or `none`
 /notify [@surfaces] <text>
@@ -220,7 +222,7 @@ class ClaraApi:
         return response.json()
 
     def change_task(self, task_id: int, **fields: object) -> dict:
-        """Change a task: `title`, `description`, `due` (None: no deadline), `reminders` (ISO texts), `status`."""
+        """Change a task: `title`, `description`, `due` (None: no deadline), `reminders` (ISO texts), `status`, `parent_id` (the task it becomes a sub task of; None: a main task)."""
         response = self.http.patch(f"/v1/tasks/{task_id}", json={**self.identity(), **fields})
         response.raise_for_status()
         return response.json()
@@ -557,6 +559,12 @@ def task_command(api: ClaraApi, name: str, argument: str) -> bool:
                 print("Deleted.")
             else:
                 print(describe_task(api.change_task(int(rest), status="done" if word == "done" else "open")))
+        elif word == "move":
+            number, _, under = rest.partition(" ")
+            under = under.strip().lower()
+            if not number.isdigit() or not (under.isdigit() or under == "none"):
+                raise ValueError("Usage: /task move <id> <parent-id>|none")
+            print(describe_task(api.change_task(int(number), parent_id=int(under) if under.isdigit() else None)))
         elif word == "set":
             number, _, rest = rest.partition(" ")
             field, _, value = rest.strip().partition(" ")

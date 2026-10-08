@@ -159,6 +159,8 @@ def docx_text(data: bytes) -> str:
     """The text of a Word document: its paragraphs, and its tables as rows of cells separated by `|`."""
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            if archive.getinfo("word/document.xml").file_size > MAX_RAW_BYTES:  # a bomb: it would unpack in memory
+                raise IngestError("This Word document is too big to read.")
             xml = archive.read("word/document.xml")
     except (zipfile.BadZipFile, KeyError, OSError):
         raise IngestError("This file could not be read as a Word document (.docx).") from None

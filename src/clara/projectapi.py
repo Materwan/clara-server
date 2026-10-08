@@ -31,7 +31,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 
 from .auth import Client, require_account
-from .github import GitHubError, parse_repo
+from .github import GitHubError, check_ref, parse_repo
 from .ingest import ExtractedFile, Skipped, expand, unpack
 from .memory import Person
 from .projects import MAX_DESCRIPTION, MAX_INSTRUCTIONS, MAX_NAME, Added, Project, ProjectError, Projects, Source
@@ -227,8 +227,8 @@ def _read_upload(files: list[UploadedFile]) -> tuple[list[ExtractedFile], list[S
 
 @router.post("/v1/projects/{project_id}/files")
 async def upload_files(project_id: int, body: Upload, client: Client, request: Request) -> dict:
-    declared = int(request.headers.get("content-length") or 0)
-    if declared > MAX_UPLOAD_BYTES:
+    declared = request.headers.get("content-length") or "0"
+    if declared.isdigit() and int(declared) > MAX_UPLOAD_BYTES:
         raise HTTPException(413, f"Send at most {MAX_UPLOAD_BYTES // 1_000_000} MB at once.")
     project = own_project(request, client, body.surface, body.user_id, project_id)
     extracted, skipped = await asyncio.to_thread(_read_upload, body.files)
@@ -268,10 +268,34 @@ async def remove_files(
 # ----------------------------------------------------------------------
 # GitHub repositories
 # ----------------------------------------------------------------------
-async def _sync(request: Request, source: Source) -> Added:
+def _download_token(request: Request, client: str, project: Project) -> str:
+    """The token a download for this project may use ("": none, public repositories only). The operator's
+    GITHUB_TOKEN is the operator's: an administrator may use it, everybody else only when the server says so
+    (CLARA_GITHUB_TOKEN_SHARED). Otherwise it is the GitHub account the project's owner connected."""
+    state = request.app.state
+    caller = getattr(client, "user", None)
+    if state.settings.github_token_shared or (caller is not None and caller.is_admin) or getattr(client, "admin_token", False):
+        shared = state.github.server_token
+        if shared:
+            return shared
+    integrations = state.integrations
+    if not integrations.store.type_enabled("github", project.person_id):
+        return ""
+    for account in integrations.store.accounts_of(project.person_id):
+        if account.kind == "github" and account.status == "ok":
+            try:
+                return integrations.vault.open(account.secret)
+            except Exception:  # the key changed: the person connects it again
+                return ""
+    return ""
+
+
+async def _sync(request: Request, client: str, project: Project, source: Source) -> Added:
     projects: Projects = request.app.state.projects
     try:
-        snapshot = await request.app.state.github.snapshot(source.repo, source.ref)
+        snapshot = await request.app.state.github.snapshot(
+            source.repo, source.ref, _download_token(request, client, project)
+        )
         files, skipped = await asyncio.to_thread(unpack, snapshot.archive, source.folder, True)
     except (GitHubError, ValueError) as error:
         projects.source_failed(source, str(error))
@@ -289,13 +313,16 @@ async def add_repository(project_id: int, body: RepoBody, client: Client, reques
         repo, ref = parse_repo(body.repo)
     except GitHubError as error:
         raise HTTPException(422, str(error)) from None
-    ref = body.ref.strip() or ref
+    try:
+        ref = check_ref(body.ref) or ref
+    except GitHubError as error:
+        raise HTTPException(422, str(error)) from None
     try:
         source = projects.add_source(project.id, repo, ref, repo.split("/", 1)[1])
     except ProjectError as error:
         raise HTTPException(409, str(error)) from None
     try:
-        result = await _sync(request, source)
+        result = await _sync(request, client, project, source)
     except HTTPException:
         projects.remove_source(source)  # a repository that never came is not kept
         raise
@@ -312,7 +339,7 @@ def _source_or_404(request: Request, project: Project, source_id: int) -> Source
 @router.post("/v1/projects/{project_id}/sources/{source_id}/sync")
 async def sync_repository(project_id: int, source_id: int, body: _Account, client: Client, request: Request) -> dict:
     project = own_project(request, client, body.surface, body.user_id, project_id)
-    result = await _sync(request, _source_or_404(request, project, source_id))
+    result = await _sync(request, client, project, _source_or_404(request, project, source_id))
     return {**describe_added(result), "project": _details(request, project)}
 
 

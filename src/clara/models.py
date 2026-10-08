@@ -22,10 +22,11 @@ import logging
 import re
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .memory import Memory
 from .providers import ProviderError, ProviderManager, make_ref, split_ref
+from .userkeys import UserKeys
 
 log = logging.getLogger(__name__)
 
@@ -96,6 +97,12 @@ class Chosen:
     ref: str | None  # None: the agent's own backend (no catalogue)
     weight: float = 1.0
     window: int | None = None  # None: the agent's own
+    api_key: str | None = field(default=None, repr=False)  # the person's own key for this provider (userkeys.py)
+
+    @property
+    def own_key(self) -> bool:
+        """Runs on the person's own key: it costs them no credits, and no limit stops it."""
+        return self.api_key is not None
 
 
 class ModelCatalog:
@@ -114,6 +121,7 @@ class ModelCatalog:
         self.problems: dict[str, str] = {}  # provider -> why it could not be listed
         self._fresh_until = 0.0
         self._refresh_lock = asyncio.Lock()
+        self.user_keys: UserKeys | None = None  # the keys people brought (set by the server)
 
     # ------------------------------------------------------------------
     # What is stored
@@ -266,13 +274,27 @@ class ModelCatalog:
         row = self._row(ref)
         return row is not None and bool(row["enabled"]) and self._providers.usable_ref(ref)
 
+    def brings_key(self, person_id: int | None, ref: str) -> bool:
+        """Has this person saved their own key for the provider of this model?"""
+        if person_id is None or self.user_keys is None:
+            return False
+        try:
+            return self.user_keys.has(person_id, split_ref(ref)[0])
+        except ProviderError:
+            return False
+
+    def is_usable_by(self, ref: str, person_id: int | None) -> bool:
+        """May this person choose this model: one an administrator selected, or any model of a provider they
+        brought their own key for."""
+        return self.is_usable(ref) or self.brings_key(person_id, ref)
+
     def choices_of(self, person_id: int) -> dict[str, str]:
         """What a person chose, by surface (a choice that is no longer allowed is not told)."""
         with self._memory.lock:
             rows = self._memory.database.execute(
                 "SELECT surface, model FROM model_choices WHERE person_id = ?", (person_id,)
             ).fetchall()
-        return {row["surface"]: row["model"] for row in rows if self.is_usable(row["model"])}
+        return {row["surface"]: row["model"] for row in rows if self.is_usable_by(row["model"], person_id)}
 
     def set_choice(self, person_id: int, surface: str, ref: str | None) -> None:
         """A person's model for a surface; None: the server's own. Only a model an administrator selected."""
@@ -281,7 +303,7 @@ class ModelCatalog:
                 db.execute("DELETE FROM model_choices WHERE person_id = ? AND surface = ?", (person_id, surface))
                 return
             ref = self._checked(ref)
-            if not self.is_usable(ref):
+            if not self.is_usable_by(ref, person_id):
                 raise ProviderError(f"{ref} is not one of the models you may choose.")
             db.execute(
                 "INSERT INTO model_choices (person_id, surface, model) VALUES (?, ?, ?)"
@@ -301,4 +323,9 @@ class ModelCatalog:
 
     def choose(self, surface: str, person_id: int | None) -> Chosen:
         ref = self.effective_ref(surface, person_id)
-        return Chosen(ref, self.weight(ref), self._providers.window_of(ref))
+        window = self._providers.window_of(ref)
+        if surface != DISCORD and person_id is not None and self.user_keys is not None:  # Discord is shared: never
+            key = self.user_keys.key_of(person_id, split_ref(ref)[0])
+            if key:
+                return Chosen(ref, 0.0, window, key)
+        return Chosen(ref, self.weight(ref), window)

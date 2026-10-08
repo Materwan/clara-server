@@ -3,6 +3,7 @@
 import { api } from "./api.js";
 import { discordPicker, signInDiscordDialog } from "./discord.js";
 import { mark } from "./icons.js";
+import { usage as usageTab } from "./usage.js";
 import { costText, weightText } from "./models.js";
 import { CHECK, askRestart, restartStatus } from "./restart.js";
 import {
@@ -10,7 +11,7 @@ import {
   toast, tokenCount, usageBar,
 } from "./ui.js";
 
-const TABS = [["users", "Users"], ["models", "Models"], ["server", "Server"], ["people", "People & memory"], ["console", "Console"]];
+const TABS = [["users", "Users"], ["models", "Models"], ["usage", "Usage"], ["server", "Server"], ["people", "People & memory"], ["console", "Console"]];
 
 export function mountAdmin(container, me, tab = "users") {
   const body = h("div", {});
@@ -26,7 +27,7 @@ export function mountAdmin(container, me, tab = "users") {
     clear(tabs).append(...TABS.map(([id, label]) =>
       h("button", { role: "tab", "aria-selected": String(id === current), onclick: () => show(id) }, label)));
     clear(body);
-    ({ users, models, server, people, console: consoleTab })[current](body, me, (interval) => { timer = interval; });
+    ({ users, models, usage: usageTab, server, people, console: consoleTab })[current](body, me, (interval) => { timer = interval; });
   };
 
   container.append(pageHead("Administration"), h("div", { class: "scroll" }, h("div", { class: "container wide" }, tabs, body)));

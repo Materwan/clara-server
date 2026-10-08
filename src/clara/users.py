@@ -26,8 +26,14 @@ NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,31}$")
 MIN_PASSWORD = 10
 MAX_PASSWORD = 256
 TOKEN_PREFIX = "clu_"  # tells a user token from a client token (CLARA_TOKENS) at a glance
+# Names nobody may make for themselves (the web site's sign-up, a Discord /register): they would pass for the people
+# who run the server. An administrator can still make one with /user add.
+RESERVED_NAMES = frozenset({
+    "admin", "administrator", "administrateur", "root", "system", "clara", "support", "moderator", "mod", "owner",
+    "operator", "staff", "official", "security", "null", "none", "anonymous", "everyone", "here", "me",
+})
 TOUCH_SECONDS = 600  # `last_used_at` is not written more often than this
-SCRYPT = {"n": 2**14, "r": 8, "p": 1}
+SCRYPT = {"n": 2**15, "r": 8, "p": 1}  # a hash made with weaker ones is made again at the next login
 
 
 class UserError(ValueError):
@@ -66,7 +72,9 @@ def _stamp(moment: datetime) -> str:
 
 def hash_password(password: str) -> str:
     salt = secrets.token_bytes(16)
-    digest = hashlib.scrypt(password.encode(), salt=salt, dklen=32, **SCRYPT)
+    digest = hashlib.scrypt(
+        password.encode(), salt=salt, dklen=32, maxmem=128 * SCRYPT["n"] * SCRYPT["r"] * 2 + 2**20, **SCRYPT
+    )
     return "scrypt${n}${r}${p}${salt}${digest}".format(
         **SCRYPT, salt=base64.b64encode(salt).decode(), digest=base64.b64encode(digest).decode()
     )
@@ -102,6 +110,14 @@ def check_name(name: str) -> str:
     return name
 
 
+def check_self_service_name(name: str) -> str:
+    """`check_name`, and not a name that would pass for the operator's."""
+    name = check_name(name)
+    if name in RESERVED_NAMES or name.strip("._-0123456789") in RESERVED_NAMES:
+        raise UserError(f"The name {name} is already taken.")  # the same words as a name that is: it says nothing more
+    return name
+
+
 def check_password_rules(password: str) -> None:
     if len(password) < MIN_PASSWORD:
         raise UserError(f"The password needs at least {MIN_PASSWORD} characters.")
@@ -109,14 +125,25 @@ def check_password_rules(password: str) -> None:
         raise UserError(f"The password is too long (at most {MAX_PASSWORD} characters).")
 
 
+def _weak(stored: str) -> bool:
+    """Was this hash made with cheaper scrypt parameters than today's?"""
+    try:
+        return int(stored.split("$")[1]) < SCRYPT["n"]
+    except (IndexError, ValueError):
+        return False
+
+
 def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
 class Users:
-    def __init__(self, memory: Memory, session_days: int = 90, clock: Callable[[], datetime] = _now):
+    def __init__(
+        self, memory: Memory, session_days: int = 90, clock: Callable[[], datetime] = _now, session_max_days: int = 0
+    ):
         self._memory = memory
         self.session_days = session_days  # 0: tokens never expire
+        self.session_max_days = session_max_days  # the longest a token lasts, used or not (0: no limit)
         self._clock = clock
 
     # ------------------------------------------------------------------
@@ -153,7 +180,7 @@ class Users:
         db = self._memory.database
         with self._memory.lock, db:
             if db.execute("SELECT 1 FROM users WHERE name = ?", (name,)).fetchone():
-                raise UserError(f"There already is a user called {name}.")
+                raise UserError(f"The name {name} is already taken.")
             if person is not None:
                 person_id = person.id
             else:
@@ -171,7 +198,7 @@ class Users:
         """A user who made themselves (the web site's sign-up). Unlike `create`, they never take over the
         memories of an account that already has their name (`cli:erwan`, `discord:1234`...): anybody could
         claim them, so such a name is refused and the person is always a new one."""
-        name = check_name(name)
+        name = check_self_service_name(name)
         check_password_rules(password)
         with self._memory.lock:
             if self._memory.database.execute("SELECT 1 FROM accounts WHERE external_id = ?", (name,)).fetchone():
@@ -248,7 +275,12 @@ class Users:
                 row = self._memory.database.execute("SELECT password_hash FROM users WHERE name = ?", (user.name,)).fetchone()
             stored = row["password_hash"] if row else None
         right = verify_password(password[:MAX_PASSWORD * 2], stored or _DUMMY_HASH)
-        return user if (right and stored and user and not user.disabled) else None
+        if not (right and stored and user and not user.disabled):
+            return None
+        if _weak(stored):  # made when scrypt was cheaper: made again now that the password is at hand
+            with self._memory.lock, self._memory.database as db:
+                db.execute("UPDATE users SET password_hash = ? WHERE name = ?", (hash_password(password), user.name))
+        return user
 
     def open_session(self, user: User, surface: str, device: str = "", address: str = "") -> tuple[str, Session]:
         token = TOKEN_PREFIX + secrets.token_urlsafe(32)
@@ -289,6 +321,8 @@ class Users:
         now = self._clock()
         last = datetime.fromisoformat(session.last_used_at)
         if self.session_days and now - last > timedelta(days=self.session_days):
+            return None
+        if self.session_max_days and now - datetime.fromisoformat(session.created_at) > timedelta(days=self.session_max_days):
             return None
         user = self.get(session.user)
         if user is None or user.disabled:
@@ -399,8 +433,12 @@ class Users:
 
     def prune(self) -> int:
         """Forget the sessions that have expired."""
-        if not self.session_days:
-            return 0
-        oldest = _stamp(self._clock() - timedelta(days=self.session_days))
+        removed = 0
         with self._memory.lock, self._memory.database as db:
-            return db.execute("DELETE FROM sessions WHERE last_used_at < ?", (oldest,)).rowcount
+            if self.session_days:
+                oldest = _stamp(self._clock() - timedelta(days=self.session_days))
+                removed += db.execute("DELETE FROM sessions WHERE last_used_at < ?", (oldest,)).rowcount
+            if self.session_max_days:
+                oldest = _stamp(self._clock() - timedelta(days=self.session_max_days))
+                removed += db.execute("DELETE FROM sessions WHERE created_at < ?", (oldest,)).rowcount
+        return removed

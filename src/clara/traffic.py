@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import queue
 import re
 import threading
@@ -35,11 +36,18 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from .private import private_dir
+
 log = logging.getLogger(__name__)
 
 FILE_PREFIX = "traffic-"
 SECRET_KEYS = re.compile(r"(?i)^(.*password.*|code|token|tokens|secret|api_?key|authorization)$")
 REDACTED = "[redacted]"
+
+
+def _private_opener(path: str, flags: int) -> int:
+    """Open with the mode of a private file: what people said is for the person who runs the server only."""
+    return os.open(path, flags, 0o600)
 
 
 def new_id() -> str:
@@ -70,7 +78,7 @@ class TrafficLog:
         self.retention_days = retention_days
         self.max_body = max_body
         self._today = today
-        self._queue: queue.Queue[str | None] = queue.Queue()
+        self._queue: queue.Queue[str | tuple[re.Pattern[str], list[int], threading.Event] | None] = queue.Queue()
         self._thread = threading.Thread(target=self._write, name="traffic-log", daemon=True)
         self._thread.start()
 
@@ -129,17 +137,25 @@ class TrafficLog:
         handle = None
         day: date | None = None
         try:
-            self.directory.mkdir(parents=True, exist_ok=True)
+            private_dir(self.directory)
             while True:
                 line = self._queue.get()
                 if line is None:
                     return
+                if isinstance(line, tuple):  # an erasure, done here: nobody else writes the files meanwhile
+                    if handle is not None:
+                        handle.close()
+                    handle, day = None, None  # reopened (and the old files pruned) at the next line
+                    pattern, count, done = line
+                    count[0] += self._scrub(pattern)
+                    done.set()
+                    continue
                 today = self._today()
                 if today != day:  # a new day: a new file, and the old ones may go
                     if handle is not None:
                         handle.close()
                     day = today
-                    handle = open(self.path_for(day), "a", encoding="utf-8")
+                    handle = open(self.path_for(day), "a", encoding="utf-8", opener=_private_opener)
                     self.prune()
                 handle.write(line + "\n")
                 if self._queue.empty():
@@ -149,6 +165,33 @@ class TrafficLog:
         finally:
             if handle is not None:
                 handle.close()
+
+    def _scrub(self, pattern: re.Pattern[str]) -> int:
+        """Rewrite every file without the lines `pattern` finds in. Returns how many went."""
+        removed = 0
+        for path in sorted(self.directory.glob(f"{FILE_PREFIX}*.jsonl")):
+            try:
+                with open(path, encoding="utf-8", errors="surrogateescape") as source:
+                    lines = source.readlines()
+                kept = [line for line in lines if not pattern.search(line)]
+                if len(kept) == len(lines):
+                    continue
+                temporary = path.with_suffix(".tmp")
+                with open(temporary, "w", encoding="utf-8", errors="surrogateescape", opener=_private_opener) as target:
+                    target.writelines(kept)
+                os.replace(temporary, path)
+                removed += len(lines) - len(kept)
+            except OSError as error:
+                log.warning("traffic log: cannot erase from %s: %s", path, error)
+        return removed
+
+    def erase(self, pattern: re.Pattern[str], timeout: float = 60.0) -> int:
+        """Delete the lines (requests, answers, prompts) that `pattern` finds: what a person said must go with them.
+        Returns how many lines went."""
+        count, done = [0], threading.Event()
+        self._queue.put((pattern, count, done))
+        done.wait(timeout)
+        return count[0]
 
     def flush(self, timeout: float = 5.0) -> None:
         """Wait until what was queued is written (for tests, and before stopping)."""
@@ -288,7 +331,8 @@ class TrafficMiddleware:
         async def logged_receive() -> dict:
             message = await receive()
             if message["type"] == "http.request":
-                received.append(message.get("body", b""))
+                if sum(map(len, received)) <= 4 * traffic.max_body:  # what is kept to be logged: enough to be cut later
+                    received.append(message.get("body", b""))
                 if not message.get("more_body"):
                     log_request()
             return message

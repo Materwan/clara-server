@@ -39,7 +39,7 @@ from .auth import Admin, Client, require_account
 from .memory import MergeRefused, Person, Space
 from .prompt import relation_label
 from .ratelimit import FailureLimiter
-from .users import User, UserError
+from .users import User, UserError, check_self_service_name
 
 log = logging.getLogger("clara")
 
@@ -184,6 +184,10 @@ async def register(body: SignInBody, client: Client, request: Request) -> dict:
         raise HTTPException(429, "Too many users made from this account: try again later.",
                             headers={"Retry-After": str(math.ceil(wait))})
     memory, users = state.memory, state.users
+    try:
+        check_self_service_name(body.username)  # nobody makes themselves the operator
+    except UserError as error:
+        raise HTTPException(409 if "already" in str(error) else 422, str(error)) from None
     current = memory.find_person(body.surface, body.user_id)
     # the account's own memories come along, unless they are someone else's (a user who signed out of it)
     person = current if current is not None and not _owned_by_a_user(request, current) else None
@@ -195,6 +199,8 @@ async def register(body: SignInBody, client: Client, request: Request) -> dict:
             memory.delete_person(fresh.id)
         raise HTTPException(409 if "already" in str(error) else 422, str(error)) from None
     state.registrations.failed(key)  # counts the users made, not failures
+    if not state.settings.signup_integrations:
+        state.integrations.store.opt_out(user.person_id)
     if fresh is not None:
         memory.move_account(body.surface, body.user_id, fresh)
     users.sign_in_account(user, body.surface, body.user_id, client)

@@ -209,6 +209,7 @@ def test_a_repository_is_downloaded_synced_and_removed(app, http):
     seen: list[httpx.Request] = []
     archive = make_zip({"octo-hello-abc123/README.md": "# Hello", "octo-hello-abc123/src/x.py": "x = 1"})
     app.state.github = GitHub("gh-token", fake_github(archive, seen))
+    app.state.settings = replace(app.state.settings, github_token_shared=True)  # the operator's token is for everybody
     project = new_project(http)
     response = http.post(f"/v1/projects/{project['id']}/github", headers=AUTH, json={**ME, "repo": "https://github.com/octo/hello"})
     assert response.status_code == 200, response.text
@@ -232,7 +233,30 @@ def test_a_repository_that_cannot_be_found_is_not_kept(app, http):
     project = new_project(http)
     response = http.post(f"/v1/projects/{project['id']}/github", headers=AUTH, json={**ME, "repo": "octo/missing"})
     assert response.status_code == 502
-    assert "not found" in response.json()["detail"] and "GITHUB_TOKEN" in response.json()["detail"]
+    assert "not found" in response.json()["detail"] and "GitHub account" in response.json()["detail"]
+
+
+def test_the_operators_token_is_not_used_for_an_ordinary_user(app, http):
+    seen: list[httpx.Request] = []
+    archive = make_zip({"octo-hello-abc123/README.md": "# Hello"})
+    app.state.github = GitHub("operators-private-token", fake_github(archive, seen))
+    project = new_project(http)
+    response = http.post(f"/v1/projects/{project['id']}/github", headers=AUTH, json={**ME, "repo": "octo/hello"})
+    assert response.status_code == 200, response.text
+    assert seen and all("authorization" not in request.headers for request in seen)
+
+
+def test_a_ref_that_leaves_the_repository_is_refused(app, http):
+    seen: list[httpx.Request] = []
+    app.state.github = GitHub("operators-private-token", fake_github(b"", seen))
+    project = new_project(http)
+    for ref in ("../../../user/repos", "a/../../b", "x y", "a//b"):
+        response = http.post(f"/v1/projects/{project['id']}/github", headers=AUTH, json={**ME, "repo": "octo/hello", "ref": ref})
+        assert response.status_code == 422, (ref, response.text)
+    assert http.post(
+        f"/v1/projects/{project['id']}/github", headers=AUTH, json={**ME, "repo": "octo/hello@../x"}
+    ).status_code == 422
+    assert seen == []  # nothing reached GitHub
     assert http.get(f"/v1/projects/{project['id']}", headers=AUTH, params=ME).json()["sources"] == []
 
 

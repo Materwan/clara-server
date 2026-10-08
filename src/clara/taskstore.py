@@ -36,6 +36,7 @@ class Task:
     conversation: str = ""
     targets: tuple[str, ...] = ()  # surfaces the reminders are shown on; empty: every surface of the person
     parent_id: int | None = None  # the task it is a sub task of (None: a main task)
+    position: int = 0  # its place among the tasks with the same parent (0: nobody chose an order for them)
     next: tuple[datetime, ...] = ()  # the reminders still to come, soonest first (UTC)
 
     @property
@@ -81,7 +82,8 @@ class TaskStore:
                 row["id"], row["person_id"], row["title"], row["description"], _moment(row["due_at"]), row["status"],
                 row["reminders_sent"], row["timezone"], datetime.fromisoformat(row["created_at"]),
                 datetime.fromisoformat(row["updated_at"]), _moment(row["done_at"]), row["surface"], row["user_id"],
-                row["conversation"], split_targets(row["targets"]), row["parent_id"], tuple(queued.get(row["id"], ())),
+                row["conversation"], split_targets(row["targets"]), row["parent_id"], row["position"],
+                tuple(queued.get(row["id"], ())),
             )
             for row in rows
         ]
@@ -119,9 +121,17 @@ class TaskStore:
         )
 
     def children(self, task_id: int) -> list[Task]:
-        """The sub tasks of a task, the oldest first."""
+        """The sub tasks of a task, in the order chosen for them (the oldest first when none was)."""
         with self._lock:
-            return self._tasks(self._db.execute("SELECT * FROM tasks WHERE parent_id = ? ORDER BY id", (task_id,)).fetchall())
+            return self._tasks(
+                self._db.execute("SELECT * FROM tasks WHERE parent_id = ? ORDER BY position, id", (task_id,)).fetchall()
+            )
+
+    def siblings(self, person_id: int, parent_id: int | None) -> list[Task]:
+        """The person's tasks with that parent (None: the main tasks), as they are shown: in the order chosen for
+        them, else the sub tasks oldest first and the main tasks as `of` gives them."""
+        found = [task for task in self.of(person_id, None) if task.parent_id == parent_id]
+        return sorted(found, key=(lambda t: (t.position, t.id)) if parent_id is not None else (lambda t: t.position))
 
     def descendants(self, task_id: int) -> list[Task]:
         """Its sub tasks, their sub tasks, and so on (the oldest first)."""
@@ -178,12 +188,16 @@ class TaskStore:
         parent_id: int | None = None,
     ) -> Task:
         with self._lock, self._db:
+            # where an order was chosen, a new task goes last in it; where not, it stays unordered like the others
+            last = self._db.execute(
+                "SELECT MAX(position) FROM tasks WHERE person_id = ? AND parent_id IS ?", (person_id, parent_id)
+            ).fetchone()[0] or 0
             cursor = self._db.execute(
                 "INSERT INTO tasks (person_id, title, description, due_at, timezone, surface, user_id, conversation,"
-                " targets, created_at, updated_at, parent_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " targets, created_at, updated_at, parent_id, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     person_id, title, description, _stamp(due_at) if due_at else None, zone, *origin,
-                    join_targets(targets), _stamp(now), _stamp(now), parent_id,
+                    join_targets(targets), _stamp(now), _stamp(now), parent_id, last + 1 if last else 0,
                 ),
             )
             task_id = cursor.lastrowid
@@ -220,6 +234,18 @@ class TaskStore:
         with self._lock, self._db:
             self._db.execute(
                 f"UPDATE tasks SET {', '.join(columns)}, updated_at = ? WHERE id = ?", (*values, _stamp(now), task_id)
+            )
+
+    def place(self, task_id: int, parent_id: int | None, ordered: Iterable[int], now: datetime) -> None:
+        """Put a task under `parent_id` (None: a main task) and number the tasks with that parent as `ordered`
+        says, which must hold the task: from then on that is their order."""
+        with self._lock, self._db:
+            self._db.execute(
+                "UPDATE tasks SET parent_id = ?, updated_at = ? WHERE id = ? AND parent_id IS NOT ?",
+                (parent_id, _stamp(now), task_id, parent_id),
+            )
+            self._db.executemany(
+                "UPDATE tasks SET position = ? WHERE id = ?", [(number, other) for number, other in enumerate(ordered, 1)]
             )
 
     def set_status(self, task_id: int, status: str, now: datetime) -> None:

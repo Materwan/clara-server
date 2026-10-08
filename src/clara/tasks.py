@@ -50,6 +50,7 @@ NOTIFICATION_TEXT = 1000  # characters kept of a notification
 
 TASKS = "tasks"  # who sends the reminders (not "server": Discord leaves the server's notes about its own conversations out)
 NO_DUE = object()  # update(): the deadline is not touched
+NO_PARENT = object()  # move(): the parent (or the place) is not given
 
 
 class TaskError(ValueError):
@@ -140,6 +141,7 @@ def describe(
     return {
         "id": task.id,
         "parent_id": task.parent_id,
+        "position": task.position,
         "subtasks": {"total": subtasks[0], "done": subtasks[1]},
         "due_limit": when(due_limit),
         "title": task.title,
@@ -517,6 +519,53 @@ class TaskService(DueLoop):
         self._wake.set()
         task = self.get(person, task_id)
         return task if given else await self._plan(task)
+
+    def move(
+        self, person: Person, task_id: int, parent: Any = NO_PARENT, before: Any = NO_PARENT
+    ) -> Task:
+        """Make a task a sub task of `parent` (None: a main task again) and/or put it before the task `before` among
+        the tasks with that parent (None: last). Left out: `parent` stays; `before` puts it last when the parent
+        changes and leaves it where it is when not. Its sub tasks go with it. Only open tasks move, and only under
+        an open one; nothing of it or of its sub tasks may be later than the deadline of the tasks it is then part
+        of. Where the order was not chosen yet it is, as it is shown, from now on. Raises :class:`TaskError`."""
+        task = self.get(person, task_id)
+        if task.status != OPEN:
+            raise TaskError(f"\u201c{task.title}\u201d is done: reopen it before moving it.")
+        new_parent_id = task.parent_id if parent is NO_PARENT else parent
+        new_parent = None
+        if new_parent_id is not None:
+            try:
+                new_parent = self.get(person, new_parent_id)
+            except TaskError:
+                raise TaskError(f"The task [{new_parent_id}] it should be part of does not exist.") from None
+            if new_parent.id == task.id or new_parent.id in {d.id for d in self.store.descendants(task.id)}:
+                raise TaskError("A task cannot be part of itself or of one of its own sub tasks.")
+            if new_parent.status != OPEN:
+                raise TaskError(f"\u201c{new_parent.title}\u201d is done: reopen it before adding a sub task.")
+        changing = new_parent_id != task.parent_id
+        if changing:
+            if new_parent is not None and self.store.count_children(new_parent.id) >= MAX_SUBTASKS:
+                raise TaskError(f"At most {MAX_SUBTASKS} sub tasks under one task.")
+            limit, owner = self._limit_above(new_parent)
+            for part in (task, *self.store.descendants(task.id)):
+                self._inside(limit, owner, part.timezone, part.due_at, part.next)
+        order = [t.id for t in self.store.siblings(person.id, new_parent_id) if t.id != task.id]
+        if before == task.id:
+            before = NO_PARENT  # before itself: where it is
+        if before is NO_PARENT and not changing:
+            return task  # nothing was asked
+        if before is not NO_PARENT and before is not None and before not in order:
+            raise TaskError(f"The task [{before}] is not among the tasks it would be put in.")
+        if before is NO_PARENT or before is None:
+            order.append(task.id)
+        else:
+            order.insert(order.index(before), task.id)
+        now = self._clock()
+        self.store.place(task.id, new_parent_id, order, now)
+        if changing:
+            self._settle(task.parent_id, now)  # what is left of the task it was part of may be all done
+        self._wake.set()
+        return self.get(person, task_id)
 
     def delete(self, person: Person, task_id: int) -> bool:
         """Delete a task and its sub tasks. What is left of the task it was part of may be all done: then it is."""

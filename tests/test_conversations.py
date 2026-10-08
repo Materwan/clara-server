@@ -87,6 +87,8 @@ def test_a_transcript_read_with_calls_gives_the_tools_an_answer_called(memory, e
         TurnRow("tool", "results", tool_name="web_search"),
         TurnRow("assistant", "", [{"function": {"name": "create_markdown_file", "arguments": {"name": "a.md", "content": "x" * 1000}}}]),
         TurnRow("tool", "Created", tool_name="create_markdown_file"),
+        TurnRow("assistant", "", [{"function": {"name": "read_markdown_file", "arguments": {"name": "b.md"}}}]),
+        TurnRow("tool", "y" * 9000, tool_name="read_markdown_file"),
         TurnRow("assistant", "Done."),
     ]
     memory.add_turn("app:pc:1", erwan.id, "Look up tea", rows)
@@ -95,10 +97,14 @@ def test_a_transcript_read_with_calls_gives_the_tools_an_answer_called(memory, e
         ("user", "Look up tea", []),
         ("assistant", "Let me look.", ["web_search"]),
         ("assistant", "", ["create_markdown_file"]),
+        ("assistant", "", ["read_markdown_file"]),
         ("assistant", "Done.", []),
     ]
     assert shown[1].calls[0]["arguments"] == {"query": "tea"}
-    assert len(shown[2].calls[0]["arguments"]["content"]) == 300  # what it was about, not all of it
+    assert len(shown[2].calls[0]["arguments"]["content"]) == 1000
+    assert (shown[1].calls[0]["result"], shown[1].calls[0]["truncated"]) == ("results", False)  # what it gave back
+    assert shown[2].calls[0]["result"] == "Created"
+    assert len(shown[3].calls[0]["result"]) == 8000 and shown[3].calls[0]["truncated"]  # cut, and says so
 
 
 def test_a_long_conversation_gives_its_last_messages(memory, erwan):

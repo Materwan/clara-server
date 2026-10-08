@@ -8,12 +8,12 @@ is made readable by its owner only (where the system lets it). The API never giv
 from __future__ import annotations
 
 import base64
-import contextlib
 import hashlib
-import os
 from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
+
+from ..private import private_dir, write_private_text
 
 
 class VaultError(ValueError):
@@ -48,10 +48,8 @@ class Vault:
     @staticmethod
     def _make(path: Path) -> str:
         key = Fernet.generate_key().decode()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(key, encoding="ascii")
-        with contextlib.suppress(OSError):  # Windows has no such modes: the profile folder is private enough
-            os.chmod(path, 0o600)
+        private_dir(path.parent)
+        write_private_text(path, key)  # created with the mode: never readable by others, not even for a moment
         return key
 
     def seal(self, text: str) -> str:

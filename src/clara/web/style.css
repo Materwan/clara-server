@@ -448,6 +448,8 @@ button.sm { padding: .32rem .65rem; font-size: .85rem; border-radius: var(--r-sm
 .msg.live { animation: develop .7s ease-out both; }
 @keyframes develop { from { opacity: 0; filter: blur(3px); } to { opacity: 1; filter: none; } }
 @keyframes thinking { 0%, 100% { transform: scale(.88); opacity: .65; } 50% { transform: scale(1); opacity: 1; } }
+.reply-stats { margin-top: .6rem; color: var(--muted); font-size: .78rem; line-height: 1.3; font-variant-numeric: tabular-nums; }
+.reply-stats[hidden] { display: none; }
 .msg .failed-note {
   display: flex; gap: .5rem; align-items: flex-start; margin-top: .5rem; padding: .55rem .8rem; border-radius: var(--r-xs);
   background: var(--danger-soft); color: var(--danger); font-size: .92rem;
@@ -477,6 +479,27 @@ button.sm { padding: .32rem .65rem; font-size: .85rem; border-radius: var(--r-sm
   border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite;
 }
 .run.working .run-head .spin, .run .note .spin { display: inline-block; }
+
+/* a tool call opens on what the tool was given and what it gave back */
+.call { min-width: 0; }
+button.note.call-toggle {
+  display: flex; width: auto; max-width: 100%; justify-content: flex-start; padding: .1rem .2rem; margin-left: -.2rem;
+  border: 0; border-radius: var(--r-xs); font-weight: 400; white-space: normal; text-align: left;
+}
+button.note.call-toggle:hover:not(:disabled) { background: var(--hover); color: var(--text-2); }
+.call-caret { flex: none; align-self: center; transition: transform .15s ease; }
+.call.open .call-caret { transform: rotate(90deg); }
+.call-detail {
+  display: flex; flex-direction: column; gap: .5rem; margin: .3rem 0 .45rem .15rem; padding: .6rem .75rem; min-width: 0;
+  background: var(--code-bg); border: 1px solid var(--code-line); border-radius: var(--r-sm); color: var(--text-2);
+}
+.call-field { display: flex; flex-direction: column; gap: .15rem; min-width: 0; }
+.call-key { display: flex; align-items: center; gap: .3rem; font-size: .72rem; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.call-detail code, .call-detail pre { font-family: var(--font-mono); font-size: .8rem; line-height: 1.45; color: var(--text); }
+.call-detail pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.call-detail pre.call-value, .call-detail pre.call-result { max-height: 18rem; overflow: auto; }
+.call-none { margin: 0; font-size: .8rem; color: var(--muted); }
+button.call-copy { padding: .15rem; border-radius: var(--r-xs); }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .waiting { display: inline-block; width: .5em; height: 1.05em; margin: .3em 0; vertical-align: -0.15em; background: var(--accent); border-radius: 1px; animation: blink 1s steps(2) infinite; }
@@ -737,6 +760,11 @@ dialog:has(.file-view) { width: min(940px, calc(100vw - 2rem)); }
 }
 /* ---- usage limits: credits used today (ui.js usageBar, the users table, the account page) ------------------ */
 .usage { display: inline-flex; flex-direction: column; gap: .3rem; min-width: 7.5rem; font-variant-numeric: tabular-nums; }
+ul.plain { list-style: none; margin: .5rem 0 0; padding: 0; display: flex; flex-direction: column; gap: .25rem; }
+.usage-split { display: grid; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); gap: 1.25rem; }
+.usage-figures { display: flex; gap: 2rem; flex-wrap: wrap; }
+.usage-figures > div { display: flex; flex-direction: column; font-variant-numeric: tabular-nums; }
+.usage-figures strong { font-family: var(--font-display); font-size: 1.5rem; letter-spacing: -0.02em; }
 .usage-bar { display: block; height: 4px; border-radius: 99px; background: var(--line); overflow: hidden; }
 .usage-bar .fill { display: block; height: 100%; border-radius: 99px; background: var(--text); }
 .usage.near .usage-bar .fill { background: var(--accent-text); }
@@ -964,6 +992,37 @@ label.field .picker .hint.error { color: var(--danger); }
 .list.tasks > li { align-items: flex-start; }
 .list.tasks > li.sub { padding-left: calc(1.3rem + var(--depth, 1) * 1.7rem); background: var(--panel-2, transparent); }
 .list.tasks > li.sub .title { font-size: .95rem; font-weight: 600; }
+/* dragging a task: the grip, the row it is over, the ghost that follows the pointer */
+.task .grip {
+  flex: none; width: 1.1rem; height: 1.4rem; margin: .1rem -.35rem 0 -.5rem; padding: 0; border: 0; border-radius: var(--r-xs);
+  color: var(--muted); opacity: .6; cursor: grab; touch-action: none;
+}
+.task .grip:hover:not(:disabled) { opacity: 1; background: var(--hover); }
+.grip-space { flex: none; width: .6rem; }
+.list.tasks > li.task:not(.done) { cursor: grab; }
+.list.tasks > li.task .text, .list.tasks > li.task .actions { cursor: auto; }
+.list.tasks > li.task.dragging { opacity: .4; }
+.list.tasks > li.task.drop-into { box-shadow: inset 0 0 0 2px var(--accent); background: var(--accent-soft); }
+.list.tasks > li.task.drop-before { box-shadow: inset 0 3px 0 var(--accent); }
+.list.tasks > li.task.drop-after { box-shadow: inset 0 -3px 0 var(--accent); }
+.list.tasks > li.task.drop-bad { box-shadow: inset 0 0 0 2px var(--danger); cursor: not-allowed; }
+body.dragging, body.dragging * { cursor: grabbing !important; user-select: none; -webkit-user-select: none; }
+.drag-ghost {
+  position: fixed; z-index: 1000; display: flex; flex-direction: column; gap: .1rem; max-width: min(360px, 80vw); padding: .5rem .8rem;
+  background: var(--raised); border: 1px solid var(--accent); border-radius: var(--r); box-shadow: var(--shadow-lg);
+  font-weight: 650; pointer-events: none; overflow-wrap: anywhere;
+}
+.drag-ghost small { font-weight: 500; font-size: .8rem; color: var(--muted); }
+.drag-ghost small:empty { display: none; }
+.drag-ghost.bad { border-color: var(--danger); }
+.drag-ghost.bad small { color: var(--danger); }
+.drop-main {
+  position: fixed; left: 50%; bottom: 1.2rem; transform: translateX(-50%); z-index: 999; padding: .75rem 1.3rem;
+  background: var(--panel); border: 2px dashed var(--line-strong); border-radius: var(--r); font-weight: 600; color: var(--text-2);
+  box-shadow: var(--shadow); max-width: calc(100vw - 2rem); text-align: center;
+}
+.drop-main[hidden] { display: none; }
+.drop-main.over { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
 .task .check {
   width: 1.4rem; height: 1.4rem; padding: 0; border-radius: var(--r-xs); border: 2px solid var(--line-strong); background: transparent;
   color: var(--bg); flex: none; margin-top: .1rem;
