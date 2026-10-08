@@ -17,6 +17,7 @@ DEFAULT_LIMIT = 16 * MEGABYTE
 LIMITS: tuple[tuple[re.Pattern[str], int], ...] = (
     (re.compile(r"^/v1/projects/\d+/files$"), 90 * MEGABYTE),  # a request of files (base64): see projectapi.MAX_UPLOAD_BYTES
     (re.compile(r"^/v1/documents/extract$"), 31 * MEGABYTE),  # a PDF: see webapi.MAX_PDF_BYTES
+    (re.compile(r"^/v1/documents/docx$"), 31 * MEGABYTE),  # a Word document: see webapi.MAX_DOCX_BYTES
     (re.compile(r"^/v1/turns/[^/]+/tool-results$"), 64 * MEGABYTE),  # what a client's tools read
 )
 

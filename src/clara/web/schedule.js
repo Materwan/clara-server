@@ -197,7 +197,7 @@ export function mountSchedule(container, user) {
         h("label", { class: "field" }, "Name", name),
         h("label", { class: "field" }, "Prompt", prompt),
         h("div", { class: "field" }, "Files", chips,
-          h("button", { type: "button", class: "sm add-reminder", onclick: () => picker.click() }, icon("clip", { size: 16 }), "Attach files (PDF, code, text)"), picker),
+          h("button", { type: "button", class: "sm add-reminder", onclick: () => picker.click() }, icon("clip", { size: 16 }), "Attach files (PDF, Word, code, text)"), picker),
         h("div", { class: "field" }, "What Clara can reach", connections),
         h("label", { class: "field" }, "Project (its files and instructions)", project),
         h("div", { class: "field" }, whenLabel, at),

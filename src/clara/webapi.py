@@ -12,6 +12,7 @@ administration of users and people, reading a PDF, and the web site itself (`web
     GET    /v1/auth/sessions            my devices
     DELETE /v1/auth/sessions/{id}       sign one out
     POST   /v1/documents/extract        the text of a PDF (body: the bytes)
+    POST   /v1/documents/docx           the text of a Word document (body: the bytes)
 
     GET    /v1/admin/users              (administrators; also with an admin token)
     POST   /v1/admin/users              {name, password?, admin?, discord_id?} -> the password, shown once
@@ -63,7 +64,8 @@ log = logging.getLogger("clara")
 
 WEB_DIR = Path(__file__).parent / "web"
 MAX_PDF_BYTES = 30_000_000
-MAX_PDF_CHARS = 400_000
+MAX_DOCX_BYTES = 30_000_000
+MAX_DOCUMENT_CHARS = 400_000  # the text of one document sent back: a longer one is cut
 SIGNUPS = 5  # an address that makes this many users within a minute...
 SIGNUPS_BLOCK = 3600  # ...may make no other for an hour
 
@@ -392,20 +394,40 @@ def pdf_text(data: bytes) -> tuple[str, int]:
         raise HTTPException(501 if "pypdf" in str(error) else 422, str(error)) from None
 
 
-@router.post("/v1/documents/extract")
-async def extract_document(request: Request, client: Client) -> dict:
+def docx_text(data: bytes) -> str:
+    try:
+        return ingest.docx_text(data)
+    except IngestError as error:
+        raise HTTPException(422, str(error)) from None
+
+
+async def uploaded_bytes(request: Request, limit: int, what: str) -> bytes:
     chunks: list[bytes] = []
     size = 0
     async for chunk in request.stream():  # counted as it comes: a body with no Content-Length is not read whole first
         size += len(chunk)
-        if size > MAX_PDF_BYTES:
-            raise HTTPException(413, f"A PDF can be {MAX_PDF_BYTES // 1_000_000} MB at most.")
+        if size > limit:
+            raise HTTPException(413, f"{what} can be {limit // 1_000_000} MB at most.")
         chunks.append(chunk)
-    data = b"".join(chunks)
+    return b"".join(chunks)
+
+
+@router.post("/v1/documents/extract")
+async def extract_document(request: Request, client: Client) -> dict:
+    data = await uploaded_bytes(request, MAX_PDF_BYTES, "A PDF")
     if not data.startswith(b"%PDF"):
         raise HTTPException(422, "This is not a PDF file.")
     text, pages = await asyncio.to_thread(pdf_text, data)
-    return {"text": text[:MAX_PDF_CHARS], "pages": pages, "truncated": len(text) > MAX_PDF_CHARS}
+    return {"text": text[:MAX_DOCUMENT_CHARS], "pages": pages, "truncated": len(text) > MAX_DOCUMENT_CHARS}
+
+
+@router.post("/v1/documents/docx")
+async def extract_docx(request: Request, client: Client) -> dict:
+    data = await uploaded_bytes(request, MAX_DOCX_BYTES, "A Word document")
+    if not data.startswith(b"PK\x03\x04"):  # a .docx is a zip archive; the check on its parts comes in docx_text
+        raise HTTPException(422, "This is not a Word (.docx) file.")
+    text = await asyncio.to_thread(docx_text, data)
+    return {"text": text[:MAX_DOCUMENT_CHARS], "truncated": len(text) > MAX_DOCUMENT_CHARS}
 
 
 # ----------------------------------------------------------------------

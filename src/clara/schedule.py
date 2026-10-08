@@ -114,7 +114,7 @@ def next_run(start: datetime, zone: str, repeat: str, days: tuple[int, ...], aft
 
 def _document(doc: dict) -> str:
     """A document as the web chat puts it in a message (documents.js, `forModel`)."""
-    if doc["kind"] == "pdf":
+    if doc["kind"] in ("pdf", "docx"):
         body = doc["text"]
     else:
         longest = max([0, *(len(run) for run in re.findall(r"`+", doc["text"]))])

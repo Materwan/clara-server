@@ -1,5 +1,7 @@
 """Users with a password: tokens bound to one user and one surface, cookies for the web site, administration."""
 
+import io
+import zipfile
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
@@ -515,6 +517,28 @@ def test_a_pdf_is_read_on_the_server(http):
     assert answer.status_code == 200 and "Hello Clara" in answer.json()["text"] and answer.json()["pages"] == 1
     assert http.post("/v1/documents/extract", content=b"not a pdf", headers=headers).status_code == 422
     assert http.post("/v1/documents/extract", content=tiny_pdf("x")).status_code == 401
+
+
+def tiny_docx(*paragraphs: str) -> bytes:
+    body = "".join(f"<w:p><w:r><w:t>{text}</w:t></w:r></w:p>" for text in paragraphs)
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f"<w:body>{body}</w:body></w:document>"
+    )
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as archive:
+        archive.writestr("word/document.xml", xml)
+    return out.getvalue()
+
+
+def test_a_word_document_is_read_on_the_server(http):
+    headers = bearer(http)
+    answer = http.post("/v1/documents/docx", content=tiny_docx("Hello Clara", "Second line"), headers=headers)
+    assert answer.status_code == 200 and answer.json() == {"text": "Hello Clara\nSecond line", "truncated": False}
+    assert http.post("/v1/documents/docx", content=b"not a docx", headers=headers).status_code == 422
+    assert http.post("/v1/documents/docx", content=b"PK\x03\x04 but no document", headers=headers).status_code == 422
+    assert http.post("/v1/documents/docx", content=tiny_docx("x")).status_code == 401
 
 
 def test_the_web_site_is_served_with_strict_headers_and_does_not_hide_the_api(http):

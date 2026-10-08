@@ -17,7 +17,7 @@ const SURFACE = "web";
 const INSTRUCTIONS =
   "You are talking through Clara's web site, in a chat window. Markdown is displayed, but keep answers " +
   "short and conversational. Write mathematical formulas in LaTeX: $...$ inline and $$...$$ on their own lines " +
-  "(they are typeset). The user can attach files (PDF, code, Markdown, text): their content comes in the " +
+  "(they are typeset). The user can attach files (PDF, Word, code, Markdown, text): their content comes in the " +
   'message, each inside <document name="..." type="..."> tags. Refer to them by name. To quiz the user or to ' +
   "collect several answers at once, call the qcm tool: the page shows it as a form (radio buttons, check boxes " +
   "or a text box) and their answers come back in their next message.";
@@ -76,7 +76,7 @@ export function mountChat(container, user, { slot, fresh = false, project = null
   const input = h("textarea", { rows: 1, placeholder: `Message Clara`, "aria-label": "Message", enterkeyhint: "send" });
   const chips = h("div", { class: "chips" });
   const picker = h("input", { type: "file", multiple: true, hidden: true, onchange: () => { addFiles([...picker.files]); picker.value = ""; } });
-  const attach = h("button", { class: "ghost icon-btn", title: "Attach documents (PDF, code, text)", "aria-label": "Attach documents", onclick: () => picker.click() }, icon("clip"));
+  const attach = h("button", { class: "ghost icon-btn", title: "Attach documents (PDF, Word, code, text)", "aria-label": "Attach documents", onclick: () => picker.click() }, icon("clip"));
   const sendButton = h("button", { class: "send", "aria-label": "Send", title: "Send", onclick: send, disabled: true }, icon("send", { size: 19 }));
   const docInfo = h("span", { class: "grow docinfo" });
   const modelBox = h("span", { class: "model-box", hidden: true }); // the model picker, when an administrator offers a choice

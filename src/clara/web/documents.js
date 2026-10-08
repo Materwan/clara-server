@@ -1,11 +1,16 @@
-// Attached documents: read in the browser (text and code) or on the server (PDF), then put in the message the way
-// the desktop app does, so a conversation reads the same on every surface.
+// Attached documents: read in the browser (text and code) or on the server (PDF, Word), then put in the message the
+// way the desktop app does, so a conversation reads the same on every surface.
 
 import { request } from "./api.js";
 
 export const MAX_TOTAL_CHARS = 150_000; // all the documents of one message
 const MAX_TEXT_BYTES = 2_000_000;
-const MAX_PDF_BYTES = 30_000_000;
+const DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+// Read by the server: the route, the most bytes it takes (webapi.MAX_PDF_BYTES, MAX_DOCX_BYTES) and the note on the chip
+const SERVER_READERS = {
+  pdf: { path: "/v1/documents/extract", maxBytes: 30_000_000, note: (body) => `${body.pages} page${body.pages === 1 ? "" : "s"}` },
+  docx: { path: "/v1/documents/docx", maxBytes: 30_000_000, note: () => "Word document" },
+};
 
 const LANGUAGES = {
   py: "python", pyw: "python", pyi: "python", c: "c", h: "c", cpp: "cpp", cc: "cpp", cxx: "cpp", hpp: "cpp",
@@ -26,11 +31,13 @@ function extension(name) {
 /** `{name, kind, text, size}` for a File, or throws DocumentError. */
 export async function readDocument(file) {
   const ext = extension(file.name);
-  if (ext === "pdf" || file.type === "application/pdf") {
-    if (file.size > MAX_PDF_BYTES) throw new DocumentError(`${file.name} is too big (at most ${MAX_PDF_BYTES / 1e6} MB).`);
+  const serverKind = ext === "pdf" || file.type === "application/pdf" ? "pdf" : ext === "docx" || file.type === DOCX_TYPE ? "docx" : "";
+  if (serverKind) {
+    const reader = SERVER_READERS[serverKind];
+    if (file.size > reader.maxBytes) throw new DocumentError(`${file.name} is too big (at most ${reader.maxBytes / 1e6} MB).`);
     try {
-      const body = await request("POST", "/v1/documents/extract", { raw: await file.arrayBuffer() });
-      return { name: file.name, kind: "pdf", text: body.text, note: `${body.pages} page${body.pages === 1 ? "" : "s"}` };
+      const body = await request("POST", reader.path, { raw: await file.arrayBuffer() });
+      return { name: file.name, kind: serverKind, text: body.text, note: reader.note(body) };
     } catch (error) {
       throw new DocumentError(`${file.name}: ${error.detail || error.message}`);
     }
@@ -52,7 +59,7 @@ export async function readDocument(file) {
 export function forModel(doc) {
   const kind = doc.kind || "text";
   let body;
-  if (doc.kind === "pdf") body = doc.text;
+  if (doc.kind === "pdf" || doc.kind === "docx") body = doc.text;
   else {
     const longest = Math.max(0, ...(doc.text.match(/`+/g) || []).map((run) => run.length));
     const fence = "`".repeat(Math.max(3, longest + 1)); // longer than any run inside: it cannot be closed early
