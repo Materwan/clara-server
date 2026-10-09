@@ -129,7 +129,7 @@ With an Ollama API key (`OLLAMA_API_KEY`), the model can also search the web and
 
 With `MUSIC_ASSISTANT_URL` set (see `.env.example`), the model can also search a Music Assistant library and play, queue
 or stop on a player: `music_search`, `music_play`, `music_queue`, `music_stop` and `music_now_playing`. Each person has
-their own player and token, chosen on the Music page (`/#/music`): the token is kept encrypted and never shown again, and
+their own player and token, chosen on the music site (`/music/`, *Your player*): the token is kept encrypted and never shown again, and
 those tools only ever control the player of the person talking. They run without asking.
 
 The model saves and removes facts itself through three tools, `remember`, `forget` and
@@ -926,6 +926,24 @@ that browser. Its two fonts (Hanken Grotesk and Epilogue, SIL Open Font License)
 browser keeps your sign-in in an HttpOnly cookie (out of reach of scripts) and the server only honours it when the
 request has the header `X-Clara-Web: 1`, which a page of another site cannot add. Everything it shows is built from
 text nodes; the page's Content-Security-Policy allows only its own files.
+
+## The music site
+
+`http://127.0.0.1:8765/music/` is Clara's music site, for the player of your PC in Music Assistant (set
+`MUSIC_ASSISTANT_URL`). It has the same sign-in and the same look as the web site, and three pages: **Discover** (the rows of
+Music Assistant's own discover page, each with the provider it comes from), **Search** (the library, grouped by kind) and
+**Queue** (the queue of the player, in Music Assistant's order: play from there, move, remove, clear, shuffle, repeat). A bar
+at the foot of every page shows what plays, with its position, the transport and the volume. *Your player* chooses the
+player of the PC and the token.
+
+**This browser** can be a player too: in *Your player*, *Turn on in this browser* makes the open page a Sendspin player,
+and Music Assistant streams the music to it, which the device plays while the page is open (after a tap: browsers allow
+sound only then). The page pairs with Music Assistant through the server, which holds the token; the Sendspin connection
+goes through `/v1/me/music/relay/{client id}/sendspin`, which only moves bytes, since the connection is end to end
+encrypted. The page's Sendspin client is `@sendspin/sendspin-js` 5.0.0, vendored in `musicweb/vendor/` (see its README).
+
+Its files are in `src/clara/musicweb/` and it reads the web site's styles and scripts. Its routes are in `musicapi.py`
+(`/v1/me/music/discover`, `/now`, `/queue`, `/control`, `/image`, `/sendspin/pair`, the relay, and the others).
 
 ## Traffic log
 

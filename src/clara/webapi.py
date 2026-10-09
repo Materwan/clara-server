@@ -63,6 +63,7 @@ from .users import User, UserError, generate_password
 log = logging.getLogger("clara")
 
 WEB_DIR = Path(__file__).parent / "web"
+MUSIC_SITE_DIR = Path(__file__).parent / "musicweb"  # the music site, at /music/ (it reads the web site's files)
 MAX_PDF_BYTES = 30_000_000
 MAX_DOCX_BYTES = 30_000_000
 MAX_DOCUMENT_CHARS = 400_000  # the text of one document sent back: a longer one is cut
@@ -668,12 +669,14 @@ class WebFiles(StaticFiles):
     """The web site's files, with the headers that keep it self-contained: no script or style from elsewhere,
     no framing, and a browser asks again for them (they change with the server)."""
 
+    policy = (
+        "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; "
+        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+    )
+
     async def get_response(self, path: str, scope):
         response = await super().get_response(path, scope)
-        response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; "
-            "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
-        )
+        response.headers["Content-Security-Policy"] = self.policy
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Cache-Control"] = "no-cache"
@@ -684,8 +687,21 @@ def install(app: FastAPI) -> None:
     app.include_router(router)
 
 
+class MusicFiles(WebFiles):
+    """The music site: as the web site, and its browser player decodes audio as WebAssembly and keeps its output
+    awake with a short sound inside the page (a data: address)."""
+
+    policy = (
+        "default-src 'self'; img-src 'self' data:; media-src 'self' data:; style-src 'self'; "
+        "script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; "
+        "form-action 'self'"
+    )
+
+
 def install_web(app: FastAPI) -> None:
-    """Last, so that no file shadows a route of the API."""
+    """Last, so that no file shadows a route of the API. The music site comes before the web site, which is at "/"."""
+    if MUSIC_SITE_DIR.is_dir():
+        app.mount("/music", MusicFiles(directory=MUSIC_SITE_DIR, html=True), name="music-site")
     if WEB_DIR.is_dir():
         app.mount("/", WebFiles(directory=WEB_DIR, html=True), name="web")
 

@@ -11,7 +11,6 @@ import { mountFiles } from "./files.js";
 import { mountHistory } from "./history.js";
 import { icon, mark } from "./icons.js";
 import { mountIntegrations } from "./integrations.js";
-import { mountMusic } from "./music.js";
 import { mountProjects } from "./projects.js";
 import { mountRestartBadge, resumeRestart } from "./restart.js";
 import { mountSchedule } from "./schedule.js";
@@ -174,7 +173,7 @@ function settingsBar(current) {
 function shell() {
   const status = h("div", { class: "status", title: "Server status" }, h("span", { class: "dot" }), h("span", { class: "text" }, "Checking…"));
   const pages = h("nav", { class: "pages", "aria-label": "Pages" },
-    WORK_PAGES.map((id) => h("a", { href: `#/${id}`, "data-page": id }, icon(PAGES[id][1], { size: 19 }), PAGES[id][0])));
+    WORK_PAGES.map((id) => h("a", { href: id === "music" ? "/music/" : `#/${id}`, "data-page": id }, icon(PAGES[id][1], { size: 19 }), PAGES[id][0])));
   const displayName = user.person?.name || user.name;
   const rail = h("aside", { class: "rail", id: "rail", "aria-label": "Navigation" },
     h("div", { class: "rail-head" },
@@ -241,6 +240,7 @@ function stop() {
 function route() {
   if (!user) return;
   const [, id = "chat", sub, arg] = location.hash.split("/");
+  if (id === "music") return location.replace("/music/"); // the music site has its own address (its own page)
   const name = Object.hasOwn(PAGES, id) && (!ADMIN_PAGES.has(id) || user.is_admin) ? id : "chat";
   for (const link of document.querySelectorAll(".pages a")) {
     const active = link.dataset.page === name;
@@ -273,7 +273,6 @@ function route() {
   page = name === "chat" ? mountChat(body, user, { slot, fresh, project, open: openId })
     : name === "tasks" ? mountTasks(body, user)
     : name === "schedule" ? mountSchedule(body, user)
-    : name === "music" ? mountMusic(body)
     : name === "projects" ? mountProjects(body, user, sub)
     : name === "files" ? mountFiles(body, user)
     : name === "memory" ? mountMemory(body, user)

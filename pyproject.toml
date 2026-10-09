@@ -12,6 +12,7 @@ dependencies = [
     "uvicorn>=0.29",
     "ollama>=0.4",
     "httpx>=0.27",
+    "websockets>=13",  # the WebSocket server (uvicorn) and the link to Music Assistant (the browser player)
     "python-dotenv>=1.0",
     "prompt_toolkit>=3.0",
     "pypdf>=4.0",  # the text of PDF documents attached on the web site
@@ -33,7 +34,7 @@ clara-discord = "clara.discord_bot.standalone:run"
 where = ["src"]
 
 [tool.setuptools.package-data]
-clara = ["web/*", "web/fonts/*", "web/katex/*", "web/katex/fonts/*"]  # the web site, its fonts, and KaTeX (formulas)
+clara = ["web/*", "web/fonts/*", "web/katex/*", "web/katex/fonts/*", "musicweb/*"]  # the web site, its fonts, KaTeX (formulas), and the music site
 
 [tool.ruff]
 line-length = 120

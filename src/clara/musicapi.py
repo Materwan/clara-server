@@ -13,20 +13,42 @@ signed in is ever controlled, and the token is never given back.
     POST   /v1/me/music/play            {uri}: play it now, replacing the queue
     POST   /v1/me/music/queue           {uri, position}: position next (after the current track) or end
     POST   /v1/me/music/stop            stop the player
+
+The music site (musicweb/, at /music/) uses the same person and player, and these:
+
+    GET    /v1/me/music/discover             the rows of Music Assistant's discover page (provider, item_id, name)
+    GET    /v1/me/music/discover/items       ?provider=&item_id=: the items of one row
+    GET    /v1/me/music/lookup               ?q=&media_type=: the library results, grouped by kind
+    GET    /v1/me/music/now                  what the player plays, its position, shuffle, repeat and volume
+    GET    /v1/me/music/queue                the queue, in Music Assistant's order
+    POST   /v1/me/music/queue/jump           {index}: play that item of the queue
+    POST   /v1/me/music/queue/remove         {index}: take it out of the queue
+    POST   /v1/me/music/queue/move           {queue_item_id, shift}: one place up (-1) or down (1)
+    POST   /v1/me/music/queue/clear          empty the queue
+    POST   /v1/me/music/control              {action, value?}: play, pause, next, previous, shuffle, repeat, seek, volume
+    GET    /v1/me/music/image                ?id=: a picture of the library (its proxy id), through Music Assistant
+    POST   /v1/me/music/sendspin/pair        {pairing_token}: pair this browser as a player of Music Assistant
+    WS     /v1/me/music/relay/{client_id}/sendspin   the browser player's Sendspin connection, relayed to Music
+                                             Assistant with the person's token (the token never reaches the browser)
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
+import re
 from contextlib import contextmanager
 from typing import Literal
+from urllib.parse import urlsplit
 
-from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, Response, WebSocket
 from pydantic import BaseModel, Field
 
-from .auth import LoggedIn
+from .auth import COOKIE, LoggedIn
 from .music import MusicAssistant, MusicError
 from .musicaccounts import MAX_PLAYER, MAX_TOKEN
+from .users import TOKEN_PREFIX
 
 log = logging.getLogger("clara")
 
@@ -48,6 +70,24 @@ class UriBody(BaseModel):
 
 class QueueBody(UriBody):
     position: Literal["next", "end"]
+
+
+class PairBody(BaseModel):
+    pairing_token: str = Field(min_length=3, max_length=300)  # the browser player's SP: token (see pairing.md)
+
+
+class IndexBody(BaseModel):
+    index: int = Field(ge=0, le=10_000)
+
+
+class MoveBody(BaseModel):
+    queue_item_id: str = Field(min_length=1, max_length=500)
+    shift: Literal[-1, 1]
+
+
+class ControlBody(BaseModel):
+    action: Literal["play", "pause", "next", "previous", "shuffle", "repeat", "seek", "volume"]
+    value: bool | int | str | None = None
 
 
 @contextmanager
@@ -167,6 +207,184 @@ async def music_stop(caller: LoggedIn, request: Request) -> dict:
     client = _mine(request, caller.user.person_id)
     with _answering():
         return {"message": await client.stop()}
+
+
+@router.get("/v1/me/music/discover")
+async def music_discover(caller: LoggedIn, request: Request) -> dict:
+    client = _mine(request, caller.user.person_id)
+    with _answering():
+        return {"rows": await client.discover_rows()}
+
+
+@router.get("/v1/me/music/discover/items")
+async def music_discover_items(
+    caller: LoggedIn, request: Request,
+    provider: str = Query(min_length=1, max_length=200), item_id: str = Query(min_length=1, max_length=200),
+) -> dict:
+    client = _mine(request, caller.user.person_id)
+    with _answering():
+        return {"items": await client.discover_items(provider, item_id)}
+
+
+@router.get("/v1/me/music/lookup")
+async def music_lookup(
+    caller: LoggedIn, request: Request, q: str = Query("", max_length=200), media_type: str = Query("", max_length=20),
+) -> dict:
+    client = _mine(request, caller.user.person_id)
+    with _answering():
+        return await client.lookup(q, media_type)
+
+
+@router.get("/v1/me/music/now")
+async def music_now(caller: LoggedIn, request: Request) -> dict:
+    client = _mine(request, caller.user.person_id)
+    with _answering():
+        return await client.now()
+
+
+@router.get("/v1/me/music/queue")
+async def music_queue_items(caller: LoggedIn, request: Request) -> dict:
+    client = _mine(request, caller.user.person_id)
+    with _answering():
+        return await client.queue_items()
+
+
+@router.post("/v1/me/music/queue/jump")
+async def music_jump(body: IndexBody, caller: LoggedIn, request: Request) -> dict:
+    client = _mine(request, caller.user.person_id)
+    with _answering():
+        await client.jump(body.index)
+    return {"ok": True}
+
+
+@router.post("/v1/me/music/queue/remove")
+async def music_remove(body: IndexBody, caller: LoggedIn, request: Request) -> dict:
+    client = _mine(request, caller.user.person_id)
+    with _answering():
+        await client.remove(body.index)
+    return {"ok": True}
+
+
+@router.post("/v1/me/music/queue/move")
+async def music_move(body: MoveBody, caller: LoggedIn, request: Request) -> dict:
+    client = _mine(request, caller.user.person_id)
+    with _answering():
+        await client.move(body.queue_item_id, body.shift)
+    return {"ok": True}
+
+
+@router.post("/v1/me/music/queue/clear")
+async def music_clear(caller: LoggedIn, request: Request) -> dict:
+    client = _mine(request, caller.user.person_id)
+    with _answering():
+        await client.clear()
+    return {"ok": True}
+
+
+@router.post("/v1/me/music/control")
+async def music_control(body: ControlBody, caller: LoggedIn, request: Request) -> dict:
+    client = _mine(request, caller.user.person_id)
+    with _answering():
+        await client.control(body.action, body.value)
+    return {"ok": True}
+
+
+@router.get("/v1/me/music/image")
+async def music_image(
+    caller: LoggedIn, request: Request, image_id: str = Query(alias="id", min_length=1, max_length=512),
+) -> Response:
+    client = _mine(request, caller.user.person_id)
+    with _answering():
+        data, kind = await client.image(image_id)
+    return Response(data, media_type=kind, headers={"Cache-Control": "private, max-age=3600"})
+
+
+@router.post("/v1/me/music/sendspin/pair")
+async def music_sendspin_pair(body: PairBody, caller: LoggedIn, request: Request) -> dict:
+    client = _mine(request, caller.user.person_id)
+    with _answering():
+        return {"message": await client.pair_web_player(body.pairing_token)}
+
+
+# ---- the browser player: a Sendspin connection, relayed -------------------------------------------------------------
+# The browser plays what Music Assistant streams to it. Its Sendspin connection is end to end encrypted, so this
+# relay only moves bytes: it opens the connection to Music Assistant with the person's token (which the browser never
+# has) and forwards both ways. A browser cannot send the X-Clara-Web header on a WebSocket, so its session cookie is
+# read as it is: the cookie is SameSite=Strict, and the Origin header must be this site.
+
+CLIENT_ID = re.compile(r"[A-Za-z0-9_-]{43}")  # the browser player's id: a base64url public key
+
+
+def _browser_person(websocket: WebSocket) -> int | None:
+    """The person whose session cookie this page's connection carries, or None."""
+    origin = websocket.headers.get("origin", "")
+    if not origin or urlsplit(origin).netloc != websocket.headers.get("host"):
+        return None
+    token = ""
+    for part in websocket.headers.get("cookie", "").split(";"):
+        name, _, value = part.strip().partition("=")
+        if name == COOKIE:
+            token = value
+    if not token.startswith(TOKEN_PREFIX):
+        return None
+    found = websocket.app.state.users.lookup(token)
+    if not found:
+        return None
+    user, session = found
+    return user.person_id if session.surface == "web" else None
+
+
+@router.websocket("/v1/me/music/relay/{client_id}/sendspin")
+async def music_relay(websocket: WebSocket, client_id: str) -> None:
+    person_id = _browser_person(websocket)
+    music = websocket.app.state.music
+    accounts = websocket.app.state.music_accounts
+    if person_id is None or music is None or accounts.saved(person_id) is None or not CLIENT_ID.fullmatch(client_id):
+        await websocket.close(code=4403)  # refused before the handshake
+        return
+    try:
+        client = accounts.client(music, person_id)
+    except MusicError:
+        await websocket.close(code=4403)
+        return
+    await websocket.accept()
+    try:
+        upstream = await client.open_sendspin(client_id)
+    except MusicError as error:
+        await websocket.close(code=4502, reason=str(error)[:100])
+        return
+    await _pipe(websocket, upstream)
+
+
+async def _pipe(browser: WebSocket, upstream) -> None:
+    """Move the messages of one connection to the other until either side ends it."""
+
+    async def from_music() -> None:
+        async for message in upstream:
+            if isinstance(message, bytes):
+                await browser.send_bytes(message)
+            else:
+                await browser.send_text(message)
+
+    async def from_browser() -> None:
+        while True:
+            message = await browser.receive()
+            if message["type"] == "websocket.disconnect":
+                return
+            if message.get("bytes") is not None:
+                await upstream.send(message["bytes"])
+            elif message.get("text") is not None:
+                await upstream.send(message["text"])
+
+    tasks = {asyncio.ensure_future(from_music()), asyncio.ensure_future(from_browser())}
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await upstream.close()
+        with contextlib.suppress(Exception):  # the browser may be gone already
+            await browser.close(code=upstream.close_code or 1000)
 
 
 def install(app: FastAPI) -> None:
