@@ -22,8 +22,11 @@ from .markdownfiles import READ_MAX_CHARS as MARKDOWN_READ_CHARS
 from .markdownfiles import SURFACES as MARKDOWN_SURFACES
 from .markdownfiles import MarkdownFile, MarkdownFiles
 from .memory import Memory, Person
+from .music import MAX_RESULTS as MUSIC_LIMIT_MAX
 from .music import MEDIA_TYPES as MUSIC_MEDIA_TYPES
+from .music import SEARCH_LIMIT as MUSIC_LIMIT
 from .music import MusicAssistant, MusicError
+from .musicaccounts import MusicAccounts
 from .notifications import CLARA, Notifier
 from .projects import READ_MAX_LINES, Projects
 from .qcm import MAX_OPTION, MAX_OPTIONS, MAX_QUESTION, MAX_QUESTIONS, MIN_OPTIONS, TYPES, build_form
@@ -915,23 +918,39 @@ def web_tools(web: WebClient) -> list[Tool]:
     ]
 
 
-def music_tools(music: MusicAssistant) -> list[Tool]:
-    """`music_search`, `music_play`, `music_queue`, `music_stop` and `music_now_playing`: the PC's player of Music Assistant."""
+def music_tools(music: MusicAssistant, accounts: MusicAccounts) -> list[Tool]:
+    """`music_search`, `music_play`, `music_queue`, `music_stop` and `music_now_playing`: the player of the person
+    talking, in their Music Assistant (musicaccounts.py)."""
+
+    def client(context: ToolContext) -> MusicAssistant:
+        return accounts.client(music, context.person.id)
 
     async def search(context: ToolContext, query: str, media_type: str | None = None) -> str:
-        return await music.search(str(query), media_type or "")
+        return await client(context).search(str(query), media_type or "")
 
     async def play(context: ToolContext, uri: str) -> str:
-        return await music.play(str(uri))
+        return await client(context).play(str(uri))
 
     async def queue(context: ToolContext, uri: str, position: str) -> str:
-        return await music.queue(str(uri), str(position))
+        return await client(context).queue(str(uri), str(position))
 
     async def stop(context: ToolContext) -> str:
-        return await music.stop()
+        return await client(context).stop()
 
     async def now_playing(context: ToolContext) -> str:
-        return await music.now_playing()
+        return await client(context).now_playing()
+
+    async def next_track(context: ToolContext) -> str:
+        return await client(context).next()
+
+    async def similar(context: ToolContext, uri: str, limit: int | None = None) -> str:
+        return await client(context).similar(str(uri), limit or MUSIC_LIMIT)
+
+    async def genre(context: ToolContext, genre: str, limit: int | None = None) -> str:
+        return await client(context).genre(str(genre), limit or MUSIC_LIMIT)
+
+    async def recommend(context: ToolContext, row: str | None = None, limit: int | None = None) -> str:
+        return await client(context).recommend(str(row or ""), limit or MUSIC_LIMIT)
 
     return [
         Tool(
@@ -954,8 +973,8 @@ def music_tools(music: MusicAssistant) -> list[Tool]:
         Tool(
             name="music_play",
             description=(
-                "Play a music item (its uri, from music_search) now on the PC's player, replacing its queue. "
-                "Only the PC's player is controlled."
+                "Play a music item (its uri, from music_search) now on the person's player, replacing its queue. "
+                "Only that player is controlled."
             ),
             function=play,
             parameters={"uri": {"type": "string", "description": "The uri of the item, as music_search gave it."}},
@@ -964,7 +983,7 @@ def music_tools(music: MusicAssistant) -> list[Tool]:
         Tool(
             name="music_queue",
             description=(
-                "Add a music item (its uri, from music_search) to the PC's player queue, without interrupting it. "
+                "Add a music item (its uri, from music_search) to the person's player queue, without interrupting it. "
                 'position "next" puts it after the current track; "end" puts it at the end of the queue.'
             ),
             function=queue,
@@ -976,29 +995,83 @@ def music_tools(music: MusicAssistant) -> list[Tool]:
         ),
         Tool(
             name="music_stop",
-            description="Stop the music on the PC's player.",
+            description="Stop the music on the person's player.",
             function=stop,
             parameters={},
         ),
         Tool(
             name="music_now_playing",
             description=(
-                "Say what the PC's player is playing: the track, the artist, and whether it is "
+                "Say what the person's player is playing: the track, the artist, and whether it is "
                 "playing, paused or stopped."
             ),
             function=now_playing,
             parallel=True,
             parameters={},
         ),
+        Tool(
+            name="music_next",
+            description=(
+                "Skip to the next track on the person's player. When no track is queued after the current one, a track "
+                "similar to the last few played is chosen and played next, and the reply says which one and why."
+            ),
+            function=next_track,
+            parameters={},
+        ),
+        Tool(
+            name="music_similar",
+            description=(
+                "Find music that sounds like a track: its uri, from music_search. Returns results in the same "
+                "format as music_search, to play or queue with their uri."
+            ),
+            function=similar,
+            parallel=True,
+            parameters={
+                "uri": {"type": "string", "description": "The uri of a track, as music_search gave it."},
+                "limit": {"type": "integer", "description": f"Optional: how many (1 to {MUSIC_LIMIT_MAX})."},
+            },
+            required=("uri",),
+        ),
+        Tool(
+            name="music_genre",
+            description=(
+                "List tracks of a style or genre (bossa nova, ambient, jazz...) from the library, in a random order. "
+                "Only genres tagged in the library are known: when none matches, search with music_search instead "
+                "(mood or style words often match playlists)."
+            ),
+            function=genre,
+            parallel=True,
+            parameters={
+                "genre": {"type": "string", "description": "The name of the style or genre."},
+                "limit": {"type": "integer", "description": f"Optional: how many (1 to {MUSIC_LIMIT_MAX})."},
+            },
+            required=("genre",),
+        ),
+        Tool(
+            name="music_recommend",
+            description=(
+                "Music Assistant's own recommendations for the person, from its home rows (such as Recently played "
+                "or Discover). Without a row, the first row is used; a row name picks another. Returns results in "
+                "the same format as music_search."
+            ),
+            function=recommend,
+            parallel=True,
+            parameters={
+                "row": {"type": "string", "description": "Optional: the name of the row, as the rows are named."},
+                "limit": {"type": "integer", "description": f"Optional: how many (1 to {MUSIC_LIMIT_MAX})."},
+            },
+        ),
     ]
 
 
-def default_toolbox(web: WebClient | None = None, music: MusicAssistant | None = None) -> Toolbox:
+def default_toolbox(
+    web: WebClient | None = None, music: MusicAssistant | None = None, accounts: MusicAccounts | None = None
+) -> Toolbox:
     """The server's tools; the web ones only with a `web` client (it needs an Ollama API key), the music ones only
-    with a `music` client (Music Assistant is configured)."""
+    with a `music` client (Music Assistant is configured) and the accounts of the people who use it."""
     return Toolbox(
         (web_tools(web) if web is not None else [])
-        + (music_tools(music) if music is not None else [])
+        + (music_tools(music, accounts) if music is not None and accounts is not None else [])
         + [
             Tool(
                 name="remember",

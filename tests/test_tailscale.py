@@ -1,6 +1,7 @@
 """Tailscale: the mapping is set at startup and removed at exit, whatever goes wrong stays a warning, and a public
 URL cannot be brute-forced."""
 
+import asyncio
 import json
 import threading
 import time
@@ -154,6 +155,59 @@ async def test_a_command_waiting_for_approval_is_cut_and_explained():
     tailscale, _ = make("funnel", funnel=CommandOutput(None, "Funnel is not enabled. Visit https://login.tailscale.com/f/funnel"))
     await tailscale.start()
     assert "did not finish" in tailscale.problem and "login.tailscale.com/f/funnel" in tailscale.problem
+
+
+class Starting(FakeTailscale):
+    """Reports each of the given states for `status`, in turn, then Running."""
+
+    def __init__(self, *states: str):
+        super().__init__()
+        self.states = list(states)
+
+    async def __call__(self, command: list[str], timeout: float) -> CommandOutput:
+        if command[1] != "status" or not self.states:
+            return await super().__call__(command, timeout)
+        self.calls.append(command[1:])
+        state = self.states.pop(0)
+        return CommandOutput(0, json.dumps({"BackendState": state, "Self": {"DNSName": "box.tail1234.ts.net."}}))
+
+
+async def test_start_until_up_tries_again_until_tailscale_runs():
+    fake = Starting("NeedsLogin", "Starting")
+    tailscale = Tailscale("serve", 443, TARGET, runner=fake)
+    await tailscale.start_until_up(first_wait=0, longest_wait=0)
+    assert tailscale.url == "https://box.tail1234.ts.net" and tailscale.problem is None
+    assert fake.calls.count(["status", "--json"]) == 3
+    assert ["serve", "--bg", "--https=443", TARGET] in fake.calls
+
+
+async def test_start_until_up_waits_longer_after_each_failure(monkeypatch):
+    waits: list[float] = []
+
+    async def record(seconds: float) -> None:
+        waits.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", record)
+    tailscale = Tailscale("serve", 443, TARGET, runner=Starting("NeedsLogin", "NeedsLogin", "NeedsLogin", "NeedsLogin"))
+    await tailscale.start_until_up(first_wait=5, longest_wait=12)
+    assert waits == [5, 10, 12, 12]
+    assert tailscale.url is not None
+
+
+async def test_start_until_up_keeps_its_problem_until_cancelled():
+    tailscale = Tailscale("serve", 443, TARGET, runner=Starting(*["NeedsLogin"] * 1000))
+    task = asyncio.create_task(tailscale.start_until_up(first_wait=0.01, longest_wait=0.01))
+    await asyncio.sleep(0.1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert tailscale.url is None and "NeedsLogin" in tailscale.problem
+
+
+async def test_start_until_up_does_nothing_when_off():
+    tailscale, fake = make("off")
+    await tailscale.start_until_up(first_wait=0, longest_wait=0)
+    assert fake.calls == []
 
 
 def test_the_target_follows_the_listening_address(settings):

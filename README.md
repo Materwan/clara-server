@@ -127,10 +127,10 @@ an operator does it from the server console (`/link`).
 With an Ollama API key (`OLLAMA_API_KEY`), the model can also search the web and read pages: `web_search` and
 `web_fetch` use ollama.com's web API (results cut to a few thousand tokens). `CLARA_WEB_TOOLS=false` turns them off.
 
-With `MUSIC_ASSISTANT_URL`, `MUSIC_ASSISTANT_PLAYER` and `MUSIC_ASSISTANT_TOKEN` set (see `.env.example`), the model can
-also search a Music Assistant library and play, queue or stop on one of its players: `music_search`, `music_play`,
-`music_queue`, `music_stop` and `music_now_playing`. Those five only ever control the player of `MUSIC_ASSISTANT_PLAYER`,
-and they run without asking.
+With `MUSIC_ASSISTANT_URL` set (see `.env.example`), the model can also search a Music Assistant library and play, queue
+or stop on a player: `music_search`, `music_play`, `music_queue`, `music_stop` and `music_now_playing`. Each person has
+their own player and token, chosen on the Music page (`/#/music`): the token is kept encrypted and never shown again, and
+those tools only ever control the player of the person talking. They run without asking.
 
 The model saves and removes facts itself through three tools, `remember`, `forget` and
 `recall_facts`, which can only touch the person who is talking. The prompt shows the newest facts that fit
@@ -1076,6 +1076,9 @@ At startup the server finds its name (`tailscale status --json`) and runs `tails
 listening on localhost only. The address (`https://<machine>.<tailnet>.ts.net`) is in the log and in `/status`.
 When the server exits it removes the mapping. If Tailscale cannot be used (not installed, not logged in,
 Funnel not allowed...) the server **starts anyway**, on localhost, and says why in the log and in `/status`.
+It then keeps trying, waiting 5 s, then 10 s, doubling up to 1 minute between tries, so a Tailscale that comes up
+or logs in after the server is still published. `deploy/wait-for-tailscale.sh` (run before the server by the
+systemd unit) waits for Tailscale and Music Assistant before the first start.
 The first DNS lookup of a new address can take several minutes to work from outside.
 
 **Once, on the machine** (Ubuntu):

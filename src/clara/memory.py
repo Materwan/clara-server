@@ -247,6 +247,12 @@ CREATE TABLE IF NOT EXISTS user_api_keys (
     created_at TEXT NOT NULL,
     PRIMARY KEY (person_id, provider)
 );
+CREATE TABLE IF NOT EXISTS user_music (
+    person_id  INTEGER PRIMARY KEY REFERENCES people (id) ON DELETE CASCADE,
+    player     TEXT NOT NULL,  -- the Music Assistant id of the player of the PC this person controls (musicaccounts.py)
+    token      TEXT NOT NULL,  -- their Music Assistant token, encrypted (integrations/vault.py), never given back
+    updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS models (
     ref     TEXT PRIMARY KEY,  -- "provider:model", as models.py names it
     enabled INTEGER NOT NULL DEFAULT 0,  -- may users choose it?

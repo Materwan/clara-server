@@ -83,6 +83,8 @@ from .memory import Memory
 from .modelapi import install as install_models
 from .models import ModelCatalog
 from .music import MusicAssistant
+from .musicaccounts import MusicAccounts
+from .musicapi import install as install_music
 from .notificationapi import install as install_notifications
 from .notifications import Notifier
 from .private import harden_tree, private_dir
@@ -139,12 +141,8 @@ def create_app(
     tasks = TaskService(memory, notifier, max_reminders=settings.task_max_reminders)
     schedules = ScheduleService(memory, notifier)
     web = WebClient(settings.ollama_api_key) if settings.web_tools and settings.ollama_api_key else None
-    # the music_* tools need Music Assistant's address, the player they control, and its token (MA refuses without one)
-    music = (
-        MusicAssistant(settings.music_assistant_url, settings.music_assistant_player, settings.music_assistant_token)
-        if settings.music_assistant_url and settings.music_assistant_player and settings.music_assistant_token
-        else None
-    )
+    # the music_* tools and the Music page need Music Assistant's address; each person's player and token are theirs
+    music = MusicAssistant(settings.music_assistant_url) if settings.music_assistant_url else None
     projects = Projects(
         memory, settings.project_max_bytes, settings.project_max_files, settings.project_inline_percent
     )
@@ -155,10 +153,11 @@ def create_app(
     integrations = build_integrations(memory, settings, notifier)
     user_keys = UserKeys(memory, integrations.vault, providers)
     models.user_keys = user_keys
+    music_accounts = MusicAccounts(memory, integrations.vault)
     agent = Agent(
         memory,
         providers,
-        default_toolbox(web, music),
+        default_toolbox(web, music, music_accounts),
         SystemPrompt(settings.system_prompt_file),
         history_turns=settings.history_turns,
         max_concurrent_llm=settings.max_concurrent_llm,
@@ -232,7 +231,8 @@ def create_app(
             asyncio.create_task(loop.run())
             for loop in (reminders, tasks, schedules, integrations.approvals)
         ]
-        publishing = asyncio.create_task(tailscale.start())  # slow if tailscale hangs: not before the server is up
+        # tailscaled may come up (or log in) after the server: keep trying. Slow if tailscale hangs: not before the server is up
+        publishing = asyncio.create_task(tailscale.start_until_up())
         bot_start = None
         if settings.discord_auto_start:
             if discord_bot.state in ("unavailable", "no-token"):
@@ -293,6 +293,8 @@ def create_app(
     app.state.usage_log = usage_log
     app.state.models = models
     app.state.user_keys = user_keys
+    app.state.music = music
+    app.state.music_accounts = music_accounts
     app.state.github = GitHub(settings.github_token)
     app.state.integrations = integrations
     app.state.schedules = schedules
@@ -330,6 +332,7 @@ def create_app(
     install_markdown(app)
     install_models(app)
     install_keys(app)
+    install_music(app)
     install_tasks(app)
     install_integrations(app)
     install_schedules(app)

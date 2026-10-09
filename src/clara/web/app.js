@@ -11,6 +11,7 @@ import { mountFiles } from "./files.js";
 import { mountHistory } from "./history.js";
 import { icon, mark } from "./icons.js";
 import { mountIntegrations } from "./integrations.js";
+import { mountMusic } from "./music.js";
 import { mountProjects } from "./projects.js";
 import { mountRestartBadge, resumeRestart } from "./restart.js";
 import { mountSchedule } from "./schedule.js";
@@ -158,8 +159,8 @@ events.addEventListener("signed-out", () => { if (user) showLogin("Your session 
 
 // ---- the shell and the pages -----------------------------------------------------------------------------
 
-const PAGES = { chat: ["Chat", "chat"], projects: ["Projects", "folder"], tasks: ["Tasks", "tasks"], schedule: ["Schedule", "clock"], files: ["Files", "file"], memory: ["Memory", "memory"], account: ["Account", "user"], usage: ["Usage", "bolt"], integrations: ["Integrations", "plug"], discord: ["Discord", "bot"], admin: ["Admin", "admin"] };
-const WORK_PAGES = ["projects", "tasks", "schedule", "files"]; // what you do with Clara: the links of the rail (the chat is the conversations listed below them)
+const PAGES = { chat: ["Chat", "chat"], projects: ["Projects", "folder"], tasks: ["Tasks", "tasks"], schedule: ["Schedule", "clock"], files: ["Files", "file"], music: ["Music", "play"], memory: ["Memory", "memory"], account: ["Account", "user"], usage: ["Usage", "bolt"], integrations: ["Integrations", "plug"], discord: ["Discord", "bot"], admin: ["Admin", "admin"] };
+const WORK_PAGES = ["projects", "tasks", "schedule", "files", "music"]; // what you do with Clara: the links of the rail (the chat is the conversations listed below them)
 const SETTINGS_PAGES = ["memory", "account", "usage", "integrations", "discord", "admin"]; // reached by your avatar, they share a bar at the top
 const ADMIN_PAGES = new Set(["discord", "admin"]);
 
@@ -272,6 +273,7 @@ function route() {
   page = name === "chat" ? mountChat(body, user, { slot, fresh, project, open: openId })
     : name === "tasks" ? mountTasks(body, user)
     : name === "schedule" ? mountSchedule(body, user)
+    : name === "music" ? mountMusic(body)
     : name === "projects" ? mountProjects(body, user, sub)
     : name === "files" ? mountFiles(body, user)
     : name === "memory" ? mountMemory(body, user)

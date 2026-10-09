@@ -3,7 +3,8 @@
 Clara keeps listening on 127.0.0.1; tailscaled terminates HTTPS and proxies to it. This module only drives the
 `tailscale` command line: it learns the machine's name, sets the mapping at startup and removes it when the server
 exits. It never raises: whatever goes wrong becomes `problem`, shown in the log and by `/status`, and the
-server keeps running on localhost.
+server keeps running on localhost. At startup `start_until_up` keeps trying, so a tailscaled that is not up yet
+(or not logged in yet) gets published as soon as it is.
 
 The HTTPS port (443, 8443 or 10000: the only ones Tailscale allows) belongs to Clara while this is on.
 """
@@ -21,6 +22,8 @@ log = logging.getLogger(__name__)
 MODES = ("off", "serve", "funnel")
 HTTPS_PORTS = (443, 8443, 10000)  # what `tailscale serve` / `funnel` can listen on
 COMMAND_TIMEOUT = 20.0  # seconds; `funnel` waits for approval when it is not allowed yet
+RETRY_FIRST = 5.0  # seconds before the second try; the wait doubles after each failure
+RETRY_LONGEST = 60.0  # the longest wait between two tries
 
 
 @dataclass(frozen=True)
@@ -104,7 +107,19 @@ class Tailscale:
             return f"{self.mode}: NOT AVAILABLE, {self.problem}"
         return f"{self.mode}: starting..."
 
+    async def start_until_up(self, first_wait: float = RETRY_FIRST, longest_wait: float = RETRY_LONGEST) -> None:
+        """Call `start` until the mapping is in place, waiting between tries. Runs until it works or is cancelled."""
+        wait = first_wait
+        while self.enabled and self.url is None:
+            await self.start()
+            if self.url is not None:
+                return
+            log.info("Tailscale %s: trying again in %.0f s", self.mode, wait)
+            await asyncio.sleep(wait)
+            wait = min(wait * 2, longest_wait)
+
     async def start(self) -> None:
+        """One try at setting the mapping. A failure is kept in `problem`; `start_until_up` tries again."""
         if not self.enabled:
             return
         try:
@@ -117,6 +132,7 @@ class Tailscale:
             self.problem = str(problem)
             log.warning("Tailscale %s is not available: %s", self.mode, problem)
             return
+        self.problem = None
         self.url = f"https://{host}" + ("" if self.https_port == 443 else f":{self.https_port}")
         log.info(
             "Tailscale %s: %s -> %s (%s)", self.mode, self.url, self.target,
@@ -179,7 +195,7 @@ class Tailscale:
         if output.returncode is None:
             raise _Problem(
                 f"`{shown}` did not finish in {COMMAND_TIMEOUT:.0f} s. If it printed a link, open it to allow "
-                f"{self.mode} for this machine, then restart. Output: {output.text or '(none)'}"
+                f"{self.mode} for this machine; Clara tries again by itself. Output: {output.text or '(none)'}"
             )
         hint = ""
         lowered = output.text.lower()
