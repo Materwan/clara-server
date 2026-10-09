@@ -207,6 +207,10 @@ class Settings:
     ollama_api_key: str | None = field(repr=False)
     web_tools: bool = True  # web_search and web_fetch (they need ollama_api_key)
     web_fetch_any_url: bool = False  # web_fetch may read any address (else: only those the person wrote or a search found)
+    # Music Assistant (music.py, the music_* tools): its address, the player of the PC that they control, and its token
+    music_assistant_url: str = ""
+    music_assistant_player: str = ""
+    music_assistant_token: str | None = field(default=None, repr=False)
     notify_long_turn: int = 120  # a turn this long (seconds) notifies its person when done (0: never)
     # The traffic log (traffic.py): every request in and out, in data/logs
     traffic_log: bool = True
@@ -394,6 +398,9 @@ class Settings:
             ollama_api_key=api_key,
             web_tools=_flag(env, "CLARA_WEB_TOOLS", default=True),
             web_fetch_any_url=_flag(env, "CLARA_WEB_FETCH_ANY_URL"),
+            music_assistant_url=text("MUSIC_ASSISTANT_URL").rstrip("/"),
+            music_assistant_player=text("MUSIC_ASSISTANT_PLAYER"),
+            music_assistant_token=text("MUSIC_ASSISTANT_TOKEN") or None,
             notify_long_turn=_non_negative_int(env, "CLARA_NOTIFY_LONG_TURN", 120),
             traffic_log=_flag(env, "CLARA_TRAFFIC_LOG", default=True),
             traffic_log_days=_positive_int(env, "CLARA_TRAFFIC_LOG_DAYS", 7),

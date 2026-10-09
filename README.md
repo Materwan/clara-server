@@ -127,6 +127,11 @@ an operator does it from the server console (`/link`).
 With an Ollama API key (`OLLAMA_API_KEY`), the model can also search the web and read pages: `web_search` and
 `web_fetch` use ollama.com's web API (results cut to a few thousand tokens). `CLARA_WEB_TOOLS=false` turns them off.
 
+With `MUSIC_ASSISTANT_URL`, `MUSIC_ASSISTANT_PLAYER` and `MUSIC_ASSISTANT_TOKEN` set (see `.env.example`), the model can
+also search a Music Assistant library and play, queue or stop on one of its players: `music_search`, `music_play`,
+`music_queue`, `music_stop` and `music_now_playing`. Those five only ever control the player of `MUSIC_ASSISTANT_PLAYER`,
+and they run without asking.
+
 The model saves and removes facts itself through three tools, `remember`, `forget` and
 `recall_facts`, which can only touch the person who is talking. The prompt shows the newest facts that fit
 `CLARA_FACTS_TOKEN_BUDGET` tokens (2000) and says how many older ones are left out; `recall_facts` searches

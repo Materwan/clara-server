@@ -82,6 +82,7 @@ from .markdownfiles import MarkdownFiles
 from .memory import Memory
 from .modelapi import install as install_models
 from .models import ModelCatalog
+from .music import MusicAssistant
 from .notificationapi import install as install_notifications
 from .notifications import Notifier
 from .private import harden_tree, private_dir
@@ -138,6 +139,12 @@ def create_app(
     tasks = TaskService(memory, notifier, max_reminders=settings.task_max_reminders)
     schedules = ScheduleService(memory, notifier)
     web = WebClient(settings.ollama_api_key) if settings.web_tools and settings.ollama_api_key else None
+    # the music_* tools need Music Assistant's address, the player they control, and its token (MA refuses without one)
+    music = (
+        MusicAssistant(settings.music_assistant_url, settings.music_assistant_player, settings.music_assistant_token)
+        if settings.music_assistant_url and settings.music_assistant_player and settings.music_assistant_token
+        else None
+    )
     projects = Projects(
         memory, settings.project_max_bytes, settings.project_max_files, settings.project_inline_percent
     )
@@ -151,7 +158,7 @@ def create_app(
     agent = Agent(
         memory,
         providers,
-        default_toolbox(web),
+        default_toolbox(web, music),
         SystemPrompt(settings.system_prompt_file),
         history_turns=settings.history_turns,
         max_concurrent_llm=settings.max_concurrent_llm,
@@ -248,10 +255,12 @@ def create_app(
                 scheduler.cancel()
             await asyncio.gather(*schedulers, return_exceptions=True)
             await integrations.approvals.close()
-            # the HTTP clients kept open for the providers, the web tools and the connectors
+            # the HTTP clients kept open for the providers, the web tools, the music tools and the connectors
             await providers.aclose()
             if web is not None:
                 await web.aclose()
+            if music is not None:
+                await music.aclose()
             for connector in integrations.connectors.values():
                 await connector.aclose()
             memory.close()

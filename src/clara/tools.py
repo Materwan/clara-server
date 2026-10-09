@@ -22,6 +22,8 @@ from .markdownfiles import READ_MAX_CHARS as MARKDOWN_READ_CHARS
 from .markdownfiles import SURFACES as MARKDOWN_SURFACES
 from .markdownfiles import MarkdownFile, MarkdownFiles
 from .memory import Memory, Person
+from .music import MEDIA_TYPES as MUSIC_MEDIA_TYPES
+from .music import MusicAssistant, MusicError
 from .notifications import CLARA, Notifier
 from .projects import READ_MAX_LINES, Projects
 from .qcm import MAX_OPTION, MAX_OPTIONS, MAX_QUESTION, MAX_QUESTIONS, MIN_OPTIONS, TYPES, build_form
@@ -191,7 +193,7 @@ class Toolbox:
             return self.run(name, context, arguments)
         try:
             return await tool.function(context, **arguments)
-        except (ValueError, TypeError, WebError) as error:
+        except (ValueError, TypeError, WebError, MusicError) as error:
             return f"Error: {error}"
         except Exception:
             log.exception("tool %s crashed", name)
@@ -913,10 +915,90 @@ def web_tools(web: WebClient) -> list[Tool]:
     ]
 
 
-def default_toolbox(web: WebClient | None = None) -> Toolbox:
-    """The server's tools; the web ones only with a `web` client (it needs an Ollama API key)."""
+def music_tools(music: MusicAssistant) -> list[Tool]:
+    """`music_search`, `music_play`, `music_queue`, `music_stop` and `music_now_playing`: the PC's player of Music Assistant."""
+
+    async def search(context: ToolContext, query: str, media_type: str | None = None) -> str:
+        return await music.search(str(query), media_type or "")
+
+    async def play(context: ToolContext, uri: str) -> str:
+        return await music.play(str(uri))
+
+    async def queue(context: ToolContext, uri: str, position: str) -> str:
+        return await music.queue(str(uri), str(position))
+
+    async def stop(context: ToolContext) -> str:
+        return await music.stop()
+
+    async def now_playing(context: ToolContext) -> str:
+        return await music.now_playing()
+
+    return [
+        Tool(
+            name="music_search",
+            description=(
+                "Search the music library and sources of Music Assistant. Returns one result per line: "
+                "uri | type | title | artist | album. Give a result's uri to music_play or music_queue."
+            ),
+            function=search,
+            parallel=True,
+            parameters={
+                "query": {"type": "string", "description": "A title, an artist, an album... as you would type it."},
+                "media_type": {
+                    "type": "string",
+                    "description": f"Optional: only this kind of item ({', '.join(MUSIC_MEDIA_TYPES)}).",
+                },
+            },
+            required=("query",),
+        ),
+        Tool(
+            name="music_play",
+            description=(
+                "Play a music item (its uri, from music_search) now on the PC's player, replacing its queue. "
+                "Only the PC's player is controlled."
+            ),
+            function=play,
+            parameters={"uri": {"type": "string", "description": "The uri of the item, as music_search gave it."}},
+            required=("uri",),
+        ),
+        Tool(
+            name="music_queue",
+            description=(
+                "Add a music item (its uri, from music_search) to the PC's player queue, without interrupting it. "
+                'position "next" puts it after the current track; "end" puts it at the end of the queue.'
+            ),
+            function=queue,
+            parameters={
+                "uri": {"type": "string", "description": "The uri of the item, as music_search gave it."},
+                "position": {"type": "string", "enum": ["next", "end"], "description": "next or end."},
+            },
+            required=("uri", "position"),
+        ),
+        Tool(
+            name="music_stop",
+            description="Stop the music on the PC's player.",
+            function=stop,
+            parameters={},
+        ),
+        Tool(
+            name="music_now_playing",
+            description=(
+                "Say what the PC's player is playing: the track, the artist, and whether it is "
+                "playing, paused or stopped."
+            ),
+            function=now_playing,
+            parallel=True,
+            parameters={},
+        ),
+    ]
+
+
+def default_toolbox(web: WebClient | None = None, music: MusicAssistant | None = None) -> Toolbox:
+    """The server's tools; the web ones only with a `web` client (it needs an Ollama API key), the music ones only
+    with a `music` client (Music Assistant is configured)."""
     return Toolbox(
         (web_tools(web) if web is not None else [])
+        + (music_tools(music) if music is not None else [])
         + [
             Tool(
                 name="remember",
