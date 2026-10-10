@@ -325,7 +325,8 @@ async def test_old_tool_outputs_are_kept_within_a_share_of_the_window(memory, tm
     assert contents[:2] == ["[output omitted to save context]"] * 2 and contents[2] == "2" * 6_000
 
 
-async def test_older_outputs_of_a_long_answer_are_left_out_to_fit(memory, tmp_path):
+async def test_older_outputs_of_a_long_answer_are_left_out_to_fit(memory, tmp_path, monkeypatch):
+    monkeypatch.setattr("clara.agent.IN_TURN_RESULT_KEEP", 10**9)  # the safety net, when no output was cut earlier
     backend = FakeBackend(*[call("read_file", path=str(i)) for i in range(3)], say("done"))
     agent = make_agent(memory, tmp_path, backend, toolbox=Toolbox([]), context_window=4_000)
     events = await drive(agent, request(tools=(READ_FILE,)), lambda n, a: a["path"] * 5_000)  # ~1,400 tokens each

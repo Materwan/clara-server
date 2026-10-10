@@ -17,7 +17,7 @@ from .memory import Memory
 MAX_NAME = 80
 MAX_CHARS = 200_000  # characters of one file
 MAX_FILES = 200  # files of one person
-READ_MAX_CHARS = 40_000  # what read_markdown_file gives at once
+READ_MAX_CHARS = 20_000  # what read_markdown_file gives at once
 EXTENSION = ".md"
 SURFACES = frozenset({"web"})  # the clients that show a file Clara just wrote (the others point to the web site)
 NAME_RE = re.compile(r"^[^\W_](?:[\w .()\-]*[\w)\-])?$")  # letters, digits, spaces, "_.()-"; not starting with a symbol

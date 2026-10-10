@@ -172,6 +172,8 @@ def create_app(
         max_tool_rounds=settings.max_tool_rounds,
         context_window=lambda: providers.context_window,
         compact_percent=settings.compact_percent,
+        compact_tokens=settings.compact_tokens,
+        hidden_tools=settings.hidden_tools,
         keep_recent_turns=settings.keep_recent_turns,
         facts_token_budget=settings.facts_token_budget,
         purge_summarised=settings.purge_summarised,

@@ -44,6 +44,26 @@ def parse_tokens(raw: str) -> dict[str, str]:
     return tokens
 
 
+# Tools a surface never needs: their schemas (tokens in every round) are not sent there. CLARA_HIDDEN_TOOLS replaces it.
+DEFAULT_HIDDEN_TOOLS = "discord=add_task|update_task|edit_markdown_file|github_pr"
+
+
+def parse_hidden_tools(raw: str) -> dict[str, frozenset[str]]:
+    """`"discord=add_task|update_task,web=notify"` -> the tools whose schemas each surface is not sent."""
+    hidden: dict[str, frozenset[str]] = {}
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        surface, separator, names = item.partition("=")
+        surface = surface.strip().lower()
+        if not separator or not surface:
+            raise SettingsError(f"CLARA_HIDDEN_TOOLS: expected surface=tool|tool, got {item!r}")
+        found = frozenset(part.strip() for part in names.split("|") if part.strip())
+        hidden[surface] = hidden.get(surface, frozenset()) | found
+    return hidden
+
+
 def parse_client_surfaces(raw: str, clients: set[str]) -> dict[str, frozenset[str]]:
     """`"terminal=cli|console,discord=discord"` -> the surfaces each client may speak for."""
     allowed: dict[str, frozenset[str]] = {}
@@ -191,6 +211,8 @@ class Settings:
     llm_retries: int  # times a busy or unreachable model is asked again (0 = never)
     llm_retry_delay: int  # seconds before the first new try; doubled each time
     compact_percent: int  # summarise a conversation when its context is this full (0 = never)
+    compact_tokens: int  # ...or when its messages alone weigh this many tokens (0 = never)
+    hidden_tools: dict[str, frozenset[str]]  # surface -> tools it is not offered (their schemas cost tokens)
     keep_recent_turns: int  # turns a compaction leaves unsummarised
     facts_token_budget: int  # tokens of remembered facts shown to the model in each prompt
     purge_summarised: bool  # delete messages once a summary stands for them
@@ -387,13 +409,15 @@ class Settings:
             history_turns=_positive_int(env, "CLARA_HISTORY_TURNS", 20),
             max_concurrent_llm=_positive_int(env, "CLARA_MAX_CONCURRENT_LLM", 2),
             max_turns_per_user=_non_negative_int(env, "CLARA_MAX_TURNS_PER_USER", 2),
-            max_tool_rounds=_positive_int(env, "CLARA_MAX_TOOL_ROUNDS", 40),
+            max_tool_rounds=_positive_int(env, "CLARA_MAX_TOOL_ROUNDS", 20),
             tool_timeout=_positive_int(env, "CLARA_TOOL_TIMEOUT", 900),
             llm_first_token_timeout=_positive_int(env, "CLARA_LLM_FIRST_TOKEN_TIMEOUT", 300),
             llm_idle_timeout=_positive_int(env, "CLARA_LLM_IDLE_TIMEOUT", 120),
             llm_retries=_non_negative_int(env, "CLARA_LLM_RETRIES", 3),
             llm_retry_delay=_positive_int(env, "CLARA_LLM_RETRY_DELAY", 2),
             compact_percent=_non_negative_int(env, "CLARA_COMPACT_PERCENT", 80),
+            compact_tokens=_non_negative_int(env, "CLARA_COMPACT_TOKENS", 40_000),
+            hidden_tools=parse_hidden_tools(env.get("CLARA_HIDDEN_TOOLS", DEFAULT_HIDDEN_TOOLS)),
             keep_recent_turns=_non_negative_int(env, "CLARA_KEEP_RECENT_TURNS", 2),
             facts_token_budget=_positive_int(env, "CLARA_FACTS_TOKEN_BUDGET", 2000),
             purge_summarised=_flag(env, "CLARA_PURGE_SUMMARISED"),

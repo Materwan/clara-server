@@ -52,7 +52,7 @@ class UsageLog:
     def record(
         self, person_id: int | None, kind: str, surface: str, conversation: str, model_ref: str, model: str,
         provider: str, prompt_tokens: int, completion_tokens: int, credits: int = 0, rounds: int = 1,
-        estimated: bool = False, own_key: bool = False,
+        estimated: bool = False, own_key: bool = False, cached_tokens: int = 0,
     ) -> None:
         """Keep one row. Never raises: counting must not break an answer."""
         if prompt_tokens <= 0 and completion_tokens <= 0:
@@ -61,12 +61,13 @@ class UsageLog:
             with self._memory.lock, self._memory.database as db:
                 db.execute(
                     "INSERT INTO usage_log (at, person_id, kind, surface, conversation, model_ref, model, provider,"
-                    " prompt_tokens, completion_tokens, credits, rounds, estimated, own_key)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " prompt_tokens, completion_tokens, credits, rounds, estimated, own_key, cached_tokens)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         self._clock().isoformat(timespec="seconds"), person_id, kind, surface, conversation,
                         model_ref, model, provider, max(0, prompt_tokens), max(0, completion_tokens), max(0, credits),
                         max(1, rounds), int(estimated), int(own_key),
+                        max(0, min(cached_tokens, prompt_tokens)),
                     ),
                 )
         except Exception:
@@ -197,7 +198,8 @@ class UsageLog:
             db = self._memory.database
             total = db.execute(
                 f"SELECT COUNT(*) AS calls, COALESCE(SUM(prompt_tokens), 0) AS prompt,"
-                f" COALESCE(SUM(completion_tokens), 0) AS completion FROM usage_log l WHERE {condition}",
+                f" COALESCE(SUM(completion_tokens), 0) AS completion, COALESCE(SUM(cached_tokens), 0) AS cached"
+                f" FROM usage_log l WHERE {condition}",
                 args,
             ).fetchone()
             page_where, page_args = (condition + " AND l.id < ?", [*args, before]) if before > 0 else (condition, args)
@@ -216,9 +218,12 @@ class UsageLog:
             "user": row["user"], "model_ref": row["model_ref"], "model": row["model"], "provider": row["provider"],
             "prompt_tokens": row["prompt_tokens"], "completion_tokens": row["completion_tokens"],
             "credits": row["credits"], "rounds": row["rounds"], "estimated": bool(row["estimated"]),
-            "own_key": bool(row["own_key"]),
+            "own_key": bool(row["own_key"]), "cached_tokens": row["cached_tokens"],
         } for row in rows[:limit]]
         return {
             "calls": calls, "next": calls[-1]["id"] if more and calls else None,
-            "totals": {"calls": total["calls"], "prompt_tokens": total["prompt"], "completion_tokens": total["completion"]},
+            "totals": {
+                "calls": total["calls"], "prompt_tokens": total["prompt"], "completion_tokens": total["completion"],
+                "cached_tokens": total["cached"],
+            },
         }

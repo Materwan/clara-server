@@ -809,7 +809,7 @@ def integration_tools() -> list[Tool]:
     ]
 
 
-DOCUMENT_READ_CHARS = 40_000  # what read_conversation_file gives of a document at once
+DOCUMENT_READ_CHARS = 20_000  # what read_conversation_file gives of a document at once
 
 
 def _read_conversation_file(context: ToolContext, name: str) -> str:

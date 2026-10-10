@@ -166,7 +166,9 @@ def test_the_history_is_filtered_and_paged(memory, usage_log):
     erwan, alice = fill(memory, usage_log)
     assert [c["surface"] for c in usage_log.history(group="discord")["calls"]] == ["discord", "discord"]
     assert len(usage_log.history(group="other")["calls"]) == 3
-    assert usage_log.history(person_id=alice.id)["totals"] == {"calls": 1, "prompt_tokens": 10, "completion_tokens": 1}
+    assert usage_log.history(person_id=alice.id)["totals"] == {
+        "calls": 1, "prompt_tokens": 10, "completion_tokens": 1, "cached_tokens": 0,
+    }
     assert len(usage_log.history(kind="compaction")["calls"]) == 1
     assert len(usage_log.history(model="cloud:big")["calls"]) == 2
     first = usage_log.history(limit=2)

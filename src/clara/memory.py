@@ -235,7 +235,8 @@ CREATE TABLE IF NOT EXISTS usage_log (
     completion_tokens INTEGER NOT NULL DEFAULT 0,
     credits       INTEGER NOT NULL DEFAULT 0,  -- what was counted against the daily limit
     rounds        INTEGER NOT NULL DEFAULT 1,  -- model rounds of the answer (tool loop steps)
-    estimated     INTEGER NOT NULL DEFAULT 0  -- the model reported nothing: the tokens are estimated
+    estimated     INTEGER NOT NULL DEFAULT 0,  -- the model reported nothing: the tokens are estimated
+    cached_tokens INTEGER NOT NULL DEFAULT 0  -- of the prompt tokens, those the provider read from its prompt cache
 );
 CREATE INDEX IF NOT EXISTS idx_usage_log_person ON usage_log (person_id, at);
 CREATE INDEX IF NOT EXISTS idx_usage_log_at ON usage_log (at);
@@ -436,6 +437,7 @@ _ADDED_COLUMNS = {
     },
     "usage_log": {
         "own_key": "INTEGER NOT NULL DEFAULT 0",  # answered with the person's own API key (userkeys.py): no credits
+        "cached_tokens": "INTEGER NOT NULL DEFAULT 0",  # prompt tokens the provider read from its cache (0: not said)
     },
     "users": {
         "daily_token_limit": "INTEGER",  # tokens a day (limits.py); NULL: the server's default, 0: no limit

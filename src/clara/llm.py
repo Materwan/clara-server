@@ -45,6 +45,7 @@ class LlmChunk:
     tool_calls: list[ToolCall] = field(default_factory=list)
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    cached_tokens: int = 0  # of the prompt tokens, those the provider read from its prompt cache (0: it does not say)
     notice: str = ""  # not from the model: the agent says it is waiting to ask again (see agent._model)
 
 
@@ -228,6 +229,14 @@ def google_record(model_id: str, model: dict) -> dict:
     }
 
 
+def cached_tokens(usage: dict) -> int:
+    """The prompt tokens a provider says it read from its cache: OpenAI's and Gemini's `prompt_tokens_details`,
+    DeepSeek's `prompt_cache_hit_tokens`. 0 when the provider says nothing."""
+    details = usage.get("prompt_tokens_details")
+    found = details.get("cached_tokens") if isinstance(details, dict) else None
+    return int(found or usage.get("prompt_cache_hit_tokens") or 0)
+
+
 def call_id(number: int) -> str:
     """Ids of tool calls, made up when the messages are sent: Mistral wants exactly 9 letters or digits."""
     return f"c{number:08d}"
@@ -395,6 +404,7 @@ class OpenAIBackend:
                 chunk = LlmChunk(
                     prompt_tokens=int(usage.get("prompt_tokens") or 0),
                     completion_tokens=int(usage.get("completion_tokens") or 0),
+                    cached_tokens=cached_tokens(usage),
                 )
                 for choice in part.get("choices") or []:
                     delta = choice.get("delta") or {}
@@ -409,7 +419,7 @@ class OpenAIBackend:
                         slot["arguments"] += arguments if isinstance(arguments, str) else json.dumps(arguments)
                         if piece.get("extra_content"):
                             slot["extra"] = piece["extra_content"]
-                if chunk.text or chunk.thinking or chunk.prompt_tokens or chunk.completion_tokens:
+                if chunk.text or chunk.thinking or chunk.prompt_tokens or chunk.completion_tokens or chunk.cached_tokens:
                     yield chunk
         if calls:
             yield LlmChunk(

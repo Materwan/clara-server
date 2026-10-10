@@ -22,7 +22,7 @@ import re
 import time
 import uuid
 import weakref
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -71,12 +71,14 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-MAX_TOOL_ROUNDS = 40
+MAX_TOOL_ROUNDS = 20
 MAX_FACTS_IN_PROMPT = 100
 DEFAULT_FACTS_TOKEN_BUDGET = 2_000
-RECENT_TOOL_RESULTS_KEPT = 8  # at most this many tool outputs of past turns are replayed...
-TOOL_HISTORY_SHARE = 0.25  # ...and only while they fit in this share of the window; older ones become a note
+RECENT_TOOL_RESULTS_KEPT = 5  # at most this many tool outputs of past turns are replayed...
+TOOL_HISTORY_SHARE = 0.15  # ...and only while they fit in this share of the window; older ones become a note
+IN_TURN_RESULT_KEEP = 2_000  # characters kept of a tool output once the model has read it and gone on (this turn)
 OMITTED = "[output omitted to save context]"
+CUT_IN_TURN = "\n[… cut to save context: run the tool again for the rest]"
 OMITTED_IN_TURN = "[output omitted to fit the context: run the tool again if you still need it]"
 NOT_RUN = "[not run: the answer was interrupted]"
 TOOL_EVENT_RESULT = 8000  # characters of a server tool's result shown to the client (the model gets all of it)
@@ -236,6 +238,7 @@ class _Round:
     calls: list[ToolCall] = field(default_factory=list)
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    cached_tokens: int = 0  # of the prompt tokens, those the provider read from its cache
     credits: int = 0  # what it cost the person
     seconds: float = 0.0  # how long the model took, from the request to its last chunk
     separator: str = ""  # put before its text: it follows a round that wrote something
@@ -256,6 +259,7 @@ class _Tally:
     rounds: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    cached_tokens: int = 0
     credits: int = 0
     estimated: bool = False
 
@@ -282,6 +286,8 @@ class Agent:
         max_tool_rounds: int = MAX_TOOL_ROUNDS,
         context_window: int | Callable[[], int] = DEFAULT_CONTEXT_WINDOW,
         compact_percent: int = 80,
+        compact_tokens: int = 0,
+        hidden_tools: Mapping[str, Iterable[str]] | None = None,
         keep_recent_turns: int = 2,
         facts_token_budget: int = DEFAULT_FACTS_TOKEN_BUDGET,
         purge_summarised: bool = False,
@@ -328,6 +334,9 @@ class Agent:
         self.history_turns = history_turns
         self.max_tool_rounds = max_tool_rounds
         self.compact_percent = compact_percent
+        self.compact_tokens = compact_tokens  # also summarise when the conversation alone weighs this much (0: never)
+        # surface -> tools whose schemas it is not sent (they cost tokens in every round)
+        self.hidden_tools = {surface: frozenset(names) for surface, names in (hidden_tools or {}).items()}
         self.keep_recent_turns = keep_recent_turns  # turns a compaction leaves as they are
         self.facts_token_budget = facts_token_budget  # tokens of facts shown in the system prompt
         self.purge_summarised = purge_summarised  # delete messages once a summary stands for them
@@ -746,6 +755,7 @@ class Agent:
             hidden |= MARKDOWN_TOOLS
         if not vault_on:
             hidden |= VAULT_TOOLS
+        hidden |= self.hidden_tools.get(request.surface, frozenset())
         if ephemeral or self.conversation_files is None or not self.conversation_files.of(conversation):
             hidden |= CONVERSATION_FILE_TOOLS  # nothing was sent in this conversation to read
         server_tools = [] if ephemeral or request.no_tools else self.toolbox.schemas_without(hidden)
@@ -771,6 +781,8 @@ class Agent:
             # requests that ended that this turn's prompt tells the model about: told for good once the turn went through
             news = self.integrations.news(conversation) if self.integrations and not ephemeral else []
             messages = self._build_messages(request, person, state, window)
+            fixed_tokens = estimate_prompt_tokens(messages[:1], schemas)  # the system prompt and the tools: not history
+            latest_outputs: list[dict] = []  # the tool outputs of the last round: the model has not read them yet
             rows: list[TurnRow] = []
             reply_parts: list[str] = []
             tools_used: list[str] = []
@@ -844,8 +856,13 @@ class Agent:
                                 shown = event["file"]
                                 made.append({"id": shown["id"], "name": shown["name"], "action": event["action"]})
                             yield event
+                    for output in latest_outputs:  # the model read these and went on: keep their start only
+                        self._cut_read_output(output)
+                    latest_outputs = []
                     for call_id, call in zip(ids, calls):
-                        messages.append({"role": "tool", "tool_name": call.name, "content": results[call_id]})
+                        output = {"role": "tool", "tool_name": call.name, "content": results[call_id]}
+                        messages.append(output)
+                        latest_outputs.append(output)
                         rows.append(TurnRow("tool", results[call_id], tool_name=call.name))
                     if context.pictures:  # pictures a tool read: the model sees them in its next round
                         messages.append(self._pictures_message(context.pictures, chosen))
@@ -874,7 +891,9 @@ class Agent:
             elif not ephemeral and (reply or rows):  # an empty answer would only pollute the history
                 self.memory.add_turn(conversation, person.id, request.message, rows, request.prefix, request.project)
                 self.memory.set_context_tokens(conversation, context_tokens)
-                if self.compact_percent and 100 * context_tokens / window >= self.compact_percent:
+                over_window = bool(self.compact_percent) and 100 * context_tokens / window >= self.compact_percent
+                over_tokens = bool(self.compact_tokens) and context_tokens - fixed_tokens >= self.compact_tokens
+                if over_window or over_tokens:
                     try:
                         before, after = await self._compact_locked(conversation, chosen=chosen)
                         context_tokens = self.memory.state(conversation).context_tokens
@@ -917,6 +936,7 @@ class Agent:
                         continue
                     current.prompt_tokens += chunk.prompt_tokens
                     current.completion_tokens += chunk.completion_tokens
+                    current.cached_tokens += chunk.cached_tokens
                     current.calls.extend(chunk.tool_calls)
                     if chunk.thinking:  # shown to the client; kept only with tool calls (see _turn)
                         current.thinking_parts.append(chunk.thinking)
@@ -940,6 +960,7 @@ class Agent:
                 tally.rounds += 1
                 tally.prompt_tokens += prompt
                 tally.completion_tokens += completion
+                tally.cached_tokens += min(current.cached_tokens, prompt)
                 tally.credits += current.credits
                 tally.estimated = tally.estimated or estimated
 
@@ -982,6 +1003,14 @@ class Agent:
             results.update(await self._wait_for_client(turn_id))
         finally:
             self._pending.pop(turn_id, None)
+
+    @staticmethod
+    def _cut_read_output(message: dict) -> None:
+        """Shorten, in the prompt of the running turn only (the stored row keeps it all), a tool output the model has
+        already read: every later round would send it again."""
+        content = message["content"]
+        if len(content) > IN_TURN_RESULT_KEEP:
+            message["content"] = content[:IN_TURN_RESULT_KEEP] + CUT_IN_TURN
 
     def _batches(self, calls: list[tuple[str, ToolCall]]) -> list[list[tuple[str, ToolCall]]]:
         """The calls in order, those of `parallel` tools that follow each other grouped (they run together); any
@@ -1034,7 +1063,7 @@ class Agent:
         self.usage_log.record(
             person_id, kind, surface, conversation, fields.get("model_ref", ""), fields["model"], fields["provider"],
             tally.prompt_tokens, tally.completion_tokens, tally.credits, tally.rounds, tally.estimated,
-            chosen.own_key,
+            chosen.own_key, tally.cached_tokens,
         )
 
     async def _upkeep_model(
@@ -1049,6 +1078,7 @@ class Agent:
                 parts.append(chunk.text)
                 tally.prompt_tokens += chunk.prompt_tokens
                 tally.completion_tokens += chunk.completion_tokens
+                tally.cached_tokens += chunk.cached_tokens
         text = "".join(parts)
         tally.rounds = 1
         if not tally.prompt_tokens + tally.completion_tokens:

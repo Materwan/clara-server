@@ -19,7 +19,7 @@ DEFAULT_HOST = "https://ollama.com"
 TIMEOUT = 30.0
 MAX_RESULTS = 10
 RESULT_CHARS = 1_500  # of each search result's content
-PAGE_CHARS = 12_000  # of a fetched page
+PAGE_CHARS = 8_000  # of a fetched page
 LINKS_SHOWN = 30
 
 

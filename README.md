@@ -279,6 +279,13 @@ are summarised (half of the history is kept) instead of silently falling out of 
 as `CLARA_COMPACT_PERCENT` is not 0. The summary is not meant to shrink conversations that are
 already short.
 
+Token costs are mostly the prompt, sent again at every model round, so the server keeps it small and stable: the
+system prompt puts what does not change first (so a provider's prompt cache keeps working when a fact is added or
+the relationship moves), a tool output the model has already read is cut to its first 2,000 characters in the
+prompt of the running answer, a surface is not sent the schemas of the tools it never needs
+(`CLARA_HIDDEN_TOOLS`), and an answer stops after `CLARA_MAX_TOOL_ROUNDS` (20) rounds. The usage log keeps
+`cached_tokens` (what the provider read from its cache, when it says so) next to the prompt tokens.
+
 A prompt is never left to be truncated silently. Before each model round the server estimates its size
 (messages, tool calls and schemas, whatever the model reports): above 95% of the window it summarises the
 older turns, then leaves the oldest replayed turns out, then the oldest tool outputs of the answer in progress
