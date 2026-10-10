@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import base64
+import io
 import logging
 from collections import Counter
 from typing import TYPE_CHECKING
 
 import discord
+import httpx
 
 from .backend import ClaraBackend, ClaraError
+from .gifs import gif_links, gif_of
 from .mentions import add_pings, readable, split_message
 from .routing import Action, Incoming, conversation_of, route, space_of
 from .texts import ENGLISH, language, t
@@ -19,14 +23,19 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 QUOTE = 300  # characters of a replied-to message given to Clara
+MAX_SENT_FILES = 10  # Discord takes this many files in one message
 
 
 class MessageHandler:
-    def __init__(self, bot: discord.Client, api: ClaraBackend, accounts: Accounts, timezone: str | None = None):
+    def __init__(
+        self, bot: discord.Client, api: ClaraBackend, accounts: Accounts, timezone: str | None = None,
+        gif_transport: httpx.AsyncBaseTransport | None = None,  # tests answer the GIF links from it
+    ):
         self.bot = bot
         self.api = api
         self.accounts = accounts
         self.timezone = timezone
+        self.gif_transport = gif_transport
         self._busy: Counter[int] = Counter()  # channel id -> messages Clara is working on there
 
     # -- reading the message ---------------------------------------------------------------------- #
@@ -137,6 +146,7 @@ class MessageHandler:
                 signed_in=self.accounts.signed_in(message.author.id),
                 text=text,
                 channel_busy=self._busy[message.channel.id] > 0,
+                files=bool(message.attachments),
             )
         )
         if action is Action.IGNORE:
@@ -150,10 +160,33 @@ class MessageHandler:
             return
         await self.talk(message, replied, text, action)
 
+    async def files_of(self, message: discord.Message) -> list[dict]:
+        """The files a message carries, for the server to read (attachments.py): name, MIME type and bytes. Those
+        are the attachments, and the GIFs of the links Discord's picker sent (gifs.py)."""
+        files = []
+        for attachment in message.attachments:
+            try:
+                data = await attachment.read()
+            except discord.HTTPException as error:
+                log.warning("message %s: cannot download %s: %s", message.id, attachment.filename, error)
+                continue
+            files.append({
+                "name": attachment.filename, "mime": attachment.content_type or "",
+                "data": base64.b64encode(data).decode(),
+            })
+        for link in gif_links(message.content):
+            data = await gif_of(link, self.gif_transport)
+            if data is not None:
+                slug = link.rstrip("/").rsplit("/", 1)[-1][:60]
+                files.append({"name": f"{slug}.gif", "mime": "image/gif", "data": base64.b64encode(data).decode()})
+        return files
+
     async def talk(self, message: discord.Message, replied: discord.Message | None, text: str, action: Action) -> None:
         guild = message.guild
         channel_id = message.channel.id
         counted = action is not Action.OBSERVE
+        # the files are downloaded only for a message she answers: she does not read the others
+        files = await self.files_of(message) if action is Action.ANSWER else []
         if counted:
             self._busy[channel_id] += 1
         try:
@@ -169,6 +202,7 @@ class MessageHandler:
                 instructions=self.instructions(message),
                 prefix=self.prefix(message, replied),
                 timezone=self.timezone,
+                attachments=files,
             )
             if action is Action.ANSWER:
                 async with message.channel.typing():
@@ -183,9 +217,22 @@ class MessageHandler:
                 self._busy[channel_id] -= 1
                 if self._busy[channel_id] <= 0:
                     del self._busy[channel_id]
-        if reply.answered and reply.text:
+        if reply.answered and (reply.text or reply.files):
             members = guild.members if guild is not None else []
-            await self.send(message, add_pings(reply.text, members, self.me.id))
+            text = add_pings(reply.text, members, self.me.id) if reply.text else ""
+            await self.send(message, text, await self.made_files(message, reply.files))
+
+    async def made_files(self, message: discord.Message, files: tuple[dict, ...]) -> list[discord.File]:
+        """The markdown files Clara wrote in her answer, as Discord files (their text is read from the server)."""
+        found: list[discord.File] = []
+        for item in files[:MAX_SENT_FILES]:
+            try:
+                saved = await self.api.file_of(message.author.id, int(item["id"]))
+            except ClaraError as error:
+                log.warning("message %s: cannot give the file %s: %s", message.id, item.get("name"), error.detail)
+                continue
+            found.append(discord.File(io.BytesIO(saved["content"].encode("utf-8")), filename=saved["name"]))
+        return found
 
     async def failed(self, message: discord.Message, action: Action, error: ClaraError) -> None:
         log.warning("message %s (%s): %s %s", message.id, action.value, error.status, error.detail)
@@ -211,11 +258,12 @@ class MessageHandler:
             text = t(lang, "failed", detail=error.detail[:200])
         await self.send(message, text)
 
-    async def send(self, message: discord.Message, text: str) -> None:
-        """Reply, in several messages when it is longer than Discord allows."""
-        first, *rest = split_message(text) or ["…"]
+    async def send(self, message: discord.Message, text: str, files: list[discord.File] | None = None) -> None:
+        """Reply, in several messages when it is longer than Discord allows; the files come with the first."""
+        first, *rest = split_message(text) or ["…" if not files else ""]
+        options = {"files": files} if files else {}
         try:
-            await message.reply(first, mention_author=False)
+            await message.reply(first or None, mention_author=False, **options)
             for chunk in rest:
                 await message.channel.send(chunk)
         except discord.HTTPException as error:

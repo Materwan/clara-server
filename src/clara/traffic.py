@@ -50,6 +50,15 @@ def _private_opener(path: str, flags: int) -> int:
     return os.open(path, flags, 0o600)
 
 
+def without_pictures(messages: list[dict]) -> list[dict]:
+    """The messages as the log keeps them: a picture is named, its bytes (base64) are not written out."""
+    return [
+        {**message, "images": [f"{image.get('name', '')} ({image.get('mime', '')})" for image in message["images"]]}
+        if message.get("images") else message
+        for message in messages
+    ]
+
+
 def new_id() -> str:
     return uuid.uuid4().hex[:12]
 
@@ -214,7 +223,7 @@ class TrafficLog:
         self.record(
             {
                 "dir": "out", "kind": "llm_request", "id": exchange, "peer": peer, "host": host, "model": model,
-                "messages": self.body(messages), "tools": self.body(tools or []),
+                "messages": self.body(without_pictures(messages)), "tools": self.body(tools or []),
             }
         )
         started = time.monotonic()

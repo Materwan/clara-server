@@ -67,6 +67,7 @@ from .chatapi import install as install_chat
 from .clientapi import install as install_clients
 from .commands import CommandContext, CommandResult, registry
 from .conversationapi import install as install_conversations
+from .conversationfiles import ConversationFiles
 from .discord_bot.local import LocalBackend
 from .discord_bot.service import DiscordService
 from .github import GitHub
@@ -147,6 +148,7 @@ def create_app(
         memory, settings.project_max_bytes, settings.project_max_files, settings.project_inline_percent
     )
     markdown = MarkdownFiles(memory)
+    conversation_files = ConversationFiles(memory)  # what people sent in each conversation
     limits = UsageLimits(memory, settings.default_daily_tokens)
     usage_log = UsageLog(memory)
     models = ModelCatalog(memory, providers, settings.weight_reference_b)
@@ -184,6 +186,7 @@ def create_app(
         models=models,
         tasks=tasks,
         integrations=integrations.broker,
+        conversation_files=conversation_files,
     )
 
     async def integration_followup(approval, project_id, message):
@@ -233,6 +236,8 @@ def create_app(
         ]
         # tailscaled may come up (or log in) after the server: keep trying. Slow if tailscale hangs: not before the server is up
         publishing = asyncio.create_task(tailscale.start_until_up())
+        # what the providers say of their models (sizes, capabilities) is stored now, so users see it without an administrator
+        listing = asyncio.create_task(models.refresh(force=True))
         bot_start = None
         if settings.discord_auto_start:
             if discord_bot.state in ("unavailable", "no-token"):
@@ -248,6 +253,7 @@ def create_app(
                     await bot_start
             await discord_bot.stop()
             publishing.cancel()
+            listing.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await publishing
             await tailscale.stop()

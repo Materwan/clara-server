@@ -5,7 +5,8 @@ replies to one of her messages; any other message of a signed-in member is sent 
 conversation: as `maybe` (she answers only if she has something to add, where an administrator allows it; the
 server decides) or, while she is already busy in that channel, as `observe` (only kept as context).
 Bots are ignored, and so are people who are not signed in (they are only told how to sign in, when they talk
-to her).
+to her). The files of a message (pictures, documents) are read only when the message is for her: the others are
+not even downloaded.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ class Incoming:
     signed_in: bool
     text: str  # as Clara would read it (mentions turned into names)
     channel_busy: bool = False  # Clara is already working on a message of this channel
+    files: bool = False  # carries files: they are read only for a message she is addressed in (see handler)
 
 
 def route(message: Incoming) -> Action:
@@ -40,7 +42,7 @@ def route(message: Incoming) -> Action:
     to_clara = message.private or message.addressed
     if not message.signed_in:
         return Action.HINT if to_clara else Action.IGNORE
-    if not message.text:
+    if not message.text and not (to_clara and message.files):  # a message with only files is for her when addressed
         return Action.IGNORE
     if to_clara:
         return Action.SLASH if message.text.startswith("/") else Action.ANSWER

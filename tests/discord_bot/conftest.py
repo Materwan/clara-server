@@ -80,6 +80,20 @@ class FakeGuild:
 
 
 @dataclass(eq=False)
+class FakeAttachment:
+    """A file a message carries: what the bot reads (its name, MIME type, bytes; `reads` counts downloads)."""
+
+    filename: str
+    content_type: str
+    data: bytes
+    reads: int = 0
+
+    async def read(self) -> bytes:
+        self.reads += 1
+        return self.data
+
+
+@dataclass(eq=False)
 class FakeMessage:
     id: int
     content: str
@@ -92,9 +106,12 @@ class FakeMessage:
     reference: Any = None
     type: discord.MessageType = discord.MessageType.default
     replies: list[str] = field(default_factory=list)
+    attachments: list[FakeAttachment] = field(default_factory=list)
+    files: list = field(default_factory=list)  # the Discord files the bot posted with its replies
 
-    async def reply(self, text: str, **options) -> None:
+    async def reply(self, text: str | None = None, **options) -> None:
         self.replies.append(text)
+        self.files.extend(options.get("files") or [])
 
 
 class FakeBot:
@@ -119,6 +136,7 @@ class FakeServer:
         self.chat_status = 200
         self.chat_detail = ""
         self.done_extra: dict = {}
+        self.markdown: dict[int, tuple[str, str]] = {}  # the markdown files of the person: id -> (name, content)
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -131,6 +149,11 @@ class FakeServer:
                 return httpx.Response(self.chat_status, json={"detail": self.chat_detail})
             body = json.loads(request.content)
             return httpx.Response(200, json={"reply": self.reply, "conversation": body.get("conversation", ""), **self.done_extra})
+        if path.startswith("/v1/markdown-files/"):
+            found = self.markdown.get(int(path.rsplit("/", 1)[-1]))
+            if found is None:
+                return httpx.Response(404, json={"detail": "No such file of yours"})
+            return httpx.Response(200, json={"id": int(path.rsplit("/", 1)[-1]), "name": found[0], "content": found[1]})
         return httpx.Response(404, json={"detail": "not here"})
 
     def bodies(self, path: str) -> list[dict]:

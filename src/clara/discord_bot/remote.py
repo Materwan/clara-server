@@ -98,6 +98,10 @@ class RemoteBackend:
     async def task(self, user_id: int, task_id: int) -> dict:
         return await self._call("GET", f"/v1/tasks/{task_id}", params=self._account(user_id))
 
+    async def file_of(self, user_id: int, file_id: int) -> dict:
+        found = await self._call("GET", f"/v1/markdown-files/{file_id}", params=self._account(user_id))
+        return {"name": found["name"], "content": found["content"]}
+
     # -- talking -------------------------------------------------------------------------------------- #
 
     async def chat(
@@ -114,10 +118,13 @@ class RemoteBackend:
         instructions: str = "",
         prefix: str = "",
         timezone: str | None = None,
+        attachments: list[dict] | None = None,
     ) -> Reply:
         body: dict[str, Any] = {
             **self._account(user_id), "user_name": display_name, "message": message, "mode": mode, "quiet": True,
         }
+        if attachments:
+            body["attachments"] = attachments
         if conversation:
             body["conversation"] = conversation
         if space:
@@ -130,7 +137,8 @@ class RemoteBackend:
             body["timezone"] = timezone
         done = await self._call("POST", "/v1/chat", json=body, timeout=CHAT_TIMEOUT)
         answered = not done.get("observed") and not done.get("passed")
-        return Reply(done.get("reply", "") if answered else "", done.get("conversation", ""), answered)
+        files = tuple(done.get("files") or []) if answered else ()
+        return Reply(done.get("reply", "") if answered else "", done.get("conversation", ""), answered, files)
 
     # -- requests for permission ---------------------------------------------------------------------- #
 

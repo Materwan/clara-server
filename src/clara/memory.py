@@ -323,6 +323,18 @@ CREATE TABLE IF NOT EXISTS markdown_files (
     updated_at TEXT NOT NULL,
     UNIQUE (person_id, name)
 );
+CREATE TABLE IF NOT EXISTS conversation_files (  -- what people sent in a conversation (conversationfiles.py)
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation TEXT NOT NULL,
+    person_id    INTEGER NOT NULL REFERENCES people (id) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    mime         TEXT NOT NULL,
+    kind         TEXT NOT NULL,  -- "picture" or "document"
+    size         INTEGER NOT NULL,
+    data         BLOB NOT NULL,
+    created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_conversation_files_conversation ON conversation_files (conversation);
 CREATE TABLE IF NOT EXISTS integration_accounts (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     person_id  INTEGER NOT NULL REFERENCES people (id) ON DELETE CASCADE,
@@ -427,6 +439,9 @@ _ADDED_COLUMNS = {
     },
     "users": {
         "daily_token_limit": "INTEGER",  # tokens a day (limits.py); NULL: the server's default, 0: no limit
+    },
+    "models": {
+        "capabilities": "TEXT NOT NULL DEFAULT '{}'",  # JSON of what the provider says the model can do (models.Capabilities)
     },
     "messages": {
         "prefix": "TEXT NOT NULL DEFAULT ''",
@@ -847,6 +862,7 @@ class Memory:
             found = self.footprint(person_id)
             alone, shared = self._conversations_of(person_id)
             for conversation in alone:
+                self._db.execute("DELETE FROM conversation_files WHERE conversation = ?", (conversation,))
                 self._db.execute("DELETE FROM messages WHERE conversation = ?", (conversation,))
                 self._db.execute("DELETE FROM conversation_state WHERE conversation = ?", (conversation,))
                 self._db.execute("DELETE FROM conversations WHERE conversation = ?", (conversation,))
@@ -1502,6 +1518,7 @@ class Memory:
     def clear_conversation(self, conversation: str) -> int:
         with self._lock, self._db:
             self._db.execute("DELETE FROM integration_attachments WHERE conversation = ?", (conversation,))
+            self._db.execute("DELETE FROM conversation_files WHERE conversation = ?", (conversation,))
             self._db.execute("DELETE FROM conversation_state WHERE conversation = ?", (conversation,))
             self._db.execute("DELETE FROM conversations WHERE conversation = ?", (conversation,))
             return self._db.execute(

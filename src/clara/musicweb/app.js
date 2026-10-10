@@ -1,4 +1,4 @@
-// Clara's music site, at /music/: Discover, Search and the Queue of your player in Music Assistant, with the player bar
+// Clara's music site, at /music/: Discover, Playlists, Search and the Queue of your player in Music Assistant, with the player bar
 // at the foot of every page. It is the web site's shell, and talks to the same HTTP API, as the surface "web".
 
 import { api, events } from "/api.js";
@@ -7,12 +7,17 @@ import { clear, h, themeSwitch, toggleRail } from "/ui.js";
 import { mountDiscover } from "./discover.js";
 import { resume } from "./browser-player.js";
 import { mountBar, refreshNow, startPolling } from "./player.js";
+import { mountPlaylist } from "./playlist.js";
+import { mountPlaylists } from "./playlists.js";
 import { mountQueue } from "./queue.js";
 import { mountSearch } from "./search.js";
 import { mountSetup } from "./setup.js";
 
 const app = document.getElementById("app");
-const PAGES = { discover: ["Discover", "globe"], search: ["Search", "search"], queue: ["Queue", "queue"], setup: ["Your player", "laptop"] };
+const PAGES = {
+  discover: ["Discover", "globe"], playlists: ["Playlists", "playlist"], playlist: ["Playlist", "playlist"],
+  search: ["Search", "search"], queue: ["Queue", "queue"], setup: ["Your player", "laptop"],
+};
 const SIGN_IN = "/#/music"; // the web site signs the person in, then comes back here
 
 let music = null; // /v1/me/music: whether the server has Music Assistant, and the player this person chose
@@ -28,12 +33,13 @@ async function loadMusic() {
 
 function shell() {
   const pages = h("nav", { class: "pages", "aria-label": "Pages" },
-    ["discover", "search", "queue"].map((id) => h("a", { href: `#/${id}`, "data-page": id }, icon(PAGES[id][1], { size: 19 }), PAGES[id][0])));
+    ["discover", "playlists", "search", "queue"].map((id) => h("a", { href: `#/${id}`, "data-page": id }, icon(PAGES[id][1], { size: 19 }), PAGES[id][0])));
   const rail = h("aside", { class: "rail", id: "rail", "aria-label": "Navigation" },
     h("div", { class: "rail-head" },
       h("a", { class: "brand", href: "#/discover" }, mark(28), "Music"),
       h("button", { class: "ghost icon-btn close-rail", type: "button", "aria-label": "Close navigation", onclick: () => toggleRail(false) }, icon("close"))),
     pages,
+    h("div", { class: "rail-slot" }), // empty: it takes the room, so the foot (Back to Clara, your player) sits at the bottom
     h("div", { class: "rail-foot" },
       h("a", { class: "back-link", href: "/#/chat" }, icon("back", { size: 17 }), "Back to Clara"),
       h("hr", { class: "rail-divider" }),
@@ -60,8 +66,9 @@ function route() {
   if (name === "music") name = "discover";
   if (!Object.hasOwn(PAGES, name)) name = "discover";
   if (!music.player) name = "setup";
+  const tab = name === "playlist" ? "playlists" : name; // a playlist opened keeps the Playlists tab lit
   for (const link of document.querySelectorAll(".pages a, .me")) {
-    const active = link.dataset.page === name;
+    const active = link.dataset.page === tab;
     link.classList.toggle("active", active);
     if (active) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
@@ -72,6 +79,8 @@ function route() {
   document.title = `${PAGES[name][0]} – Music – Clara`;
   const params = new URLSearchParams(search);
   page = name === "discover" ? mountDiscover(pageEl)
+    : name === "playlists" ? mountPlaylists(pageEl)
+    : name === "playlist" ? mountPlaylist(pageEl, params)
     : name === "search" ? mountSearch(pageEl, params)
     : name === "queue" ? mountQueue(pageEl)
     : mountSetup(pageEl, { music, changed });

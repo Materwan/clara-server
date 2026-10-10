@@ -1,10 +1,12 @@
 """From a Discord message to the request sent to the server, and the answer posted."""
 
+import base64
+
 import pytest
 
 from clara.discord_bot.handler import MessageHandler
 
-from .conftest import FakeBot, FakeChannel, FakeGuild, FakeMessage, FakeUser
+from .conftest import FakeAttachment, FakeBot, FakeChannel, FakeGuild, FakeMessage, FakeUser
 
 CLARA = FakeUser(1, "clara", "Clara", bot=True)
 ERWAN = FakeUser(111, "erwan", "Erwan")
@@ -113,3 +115,73 @@ async def test_a_long_answer_is_split(handler, server):
     msg = message("tell me a story")
     await handler.handle(msg)
     assert len(msg.replies) == 1 and len(msg.channel.sent) >= 2
+
+
+# --- files: read for a message she is addressed in, and only then -------------------------------------------
+
+PICTURE = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
+
+
+def with_files(content: str, *files: FakeAttachment, guild=None) -> FakeMessage:
+    return FakeMessage(1001, content, ERWAN, FakeChannel(10), guild, [CLARA] if "<@1>" in content else [],
+                       attachments=list(files))
+
+
+async def test_a_picture_is_read_for_a_message_she_is_addressed_in(handler, server, guild):
+    picture = FakeAttachment("photo.png", "image/png", PICTURE)
+    await handler.handle(with_files("<@1> what is this?", picture, guild=guild))
+    body = server.bodies("/v1/chat")[0]
+    assert body["mode"] == "answer" and body["message"] == "what is this?"
+    assert body["attachments"] == [{"name": "photo.png", "mime": "image/png", "data": base64.b64encode(PICTURE).decode()}]
+    assert picture.reads == 1
+
+
+async def test_a_picture_alone_is_enough_when_she_is_addressed(handler, server, guild):
+    await handler.handle(with_files("<@1>", FakeAttachment("photo.png", "image/png", PICTURE), guild=guild))
+    body = server.bodies("/v1/chat")[0]
+    assert body["mode"] == "answer" and body["message"] == "" and len(body["attachments"]) == 1
+
+
+async def test_files_of_messages_she_is_not_addressed_in_are_never_downloaded(handler, server, guild):
+    picture = FakeAttachment("photo.png", "image/png", PICTURE)
+    await handler.handle(with_files("anyone up for chess?", picture, guild=guild))
+    body = server.bodies("/v1/chat")[0]
+    assert body["mode"] == "maybe" and "attachments" not in body
+    assert picture.reads == 0
+
+
+async def test_a_file_only_message_nobody_addresses_is_ignored(handler, server, guild):
+    picture = FakeAttachment("photo.png", "image/png", PICTURE)
+    await handler.handle(with_files("", picture, guild=guild))
+    assert server.bodies("/v1/chat") == [] and picture.reads == 0
+
+
+# --- the markdown files Clara wrote in her answer are posted with it -------------------------------------------
+
+
+async def test_the_markdown_files_she_wrote_are_posted_with_her_answer(handler, server, guild):
+    server.reply = "Here is your note."
+    server.done_extra = {"files": [{"id": 7, "name": "notes.md", "action": "created"}]}
+    server.markdown[7] = ("notes.md", "# Notes\n\nbuy milk\n")
+    msg = message("<@1> write me a note", guild=guild, mentions=[CLARA])
+    await handler.handle(msg)
+    assert msg.replies == ["Here is your note."]
+    (posted,) = msg.files
+    assert posted.filename == "notes.md" and posted.fp.read().decode() == "# Notes\n\nbuy milk\n"
+
+
+async def test_a_file_without_words_is_posted_alone(handler, server, guild):
+    server.reply = ""
+    server.done_extra = {"files": [{"id": 8, "name": "list.md", "action": "updated"}]}
+    server.markdown[8] = ("list.md", "- eggs\n")
+    msg = message("<@1> update my list", guild=guild, mentions=[CLARA])
+    await handler.handle(msg)
+    assert msg.replies == [None] and [f.filename for f in msg.files] == ["list.md"]
+
+
+async def test_a_file_the_server_cannot_give_does_not_stop_the_answer(handler, server, guild):
+    server.reply = "Done."
+    server.done_extra = {"files": [{"id": 99, "name": "gone.md", "action": "created"}]}
+    msg = message("<@1> write it", guild=guild, mentions=[CLARA])
+    await handler.handle(msg)
+    assert msg.replies == ["Done."] and msg.files == []

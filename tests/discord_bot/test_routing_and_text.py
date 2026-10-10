@@ -23,6 +23,12 @@ def test_messages_for_clara_are_answered():
     assert route(incoming(private=True)) is Action.ANSWER
 
 
+def test_a_message_with_only_files_is_for_her_only_when_she_is_addressed():
+    assert route(incoming(text="", files=True, addressed=True)) is Action.ANSWER
+    assert route(incoming(text="", files=True)) is Action.IGNORE
+    assert route(incoming(text="", files=True, addressed=True, signed_in=False)) is Action.HINT
+
+
 def test_other_messages_are_sent_as_maybe_or_only_observed_while_she_is_busy():
     assert route(incoming()) is Action.MAYBE
     assert route(incoming(channel_busy=True)) is Action.OBSERVE

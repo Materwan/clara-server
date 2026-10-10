@@ -51,6 +51,8 @@ SEED_TRACKS = 3
 # The music site (musicweb/): rows of Music Assistant's discover page, items of a row, results of a search, queue items
 DISCOVER_ROWS = 24
 ROW_ITEMS = 20
+PLAYLISTS_LIMIT = 500  # the library playlists the site lists: its favorites first, then the others by name
+PLAYLIST_TRACKS = 500  # the tracks of one playlist the site lists, in the playlist's order
 LOOKUP_LIMIT = 25
 QUEUE_LIMIT = 200
 # The transport commands of the site, and the queue's repeat modes
@@ -173,9 +175,16 @@ def _picture(image: Any) -> dict | None:
 
 
 def _image(item: dict) -> dict | None:
-    """The picture of an item, else of its album's."""
+    """The picture of an item: its own, else its album's, else one of its metadata's (the thumbnail first)."""
     album = item.get("album")
-    return _picture(item.get("image")) or _picture(album.get("image") if isinstance(album, dict) else None)
+    metadata = item.get("metadata")
+    images = metadata.get("images") if isinstance(metadata, dict) else None
+    pictures = [image for image in images or [] if isinstance(image, dict)]
+    pictures.sort(key=lambda image: image.get("type") != "thumb")
+    for image in (item.get("image"), album.get("image") if isinstance(album, dict) else None, *pictures):
+        if picture := _picture(image):
+            return picture
+    return None
 
 
 def _whole(value: Any, low: int, high: int, name: str) -> int:
@@ -440,8 +449,83 @@ class MusicAssistant:
     async def discover_items(self, provider: str, item_id: str) -> list[dict]:
         """The items of one discover row, as site cards (see _card)."""
         found = await self._command("music/recommendations/items", provider=provider, item_id=item_id)
-        cards = [_card(item) for item in _items(found)]
+        items = _items(found)[:ROW_ITEMS]
+        cards = [_card(item) for item in items]
+        await self._add_pictures(items, cards)
         return [card for card in cards if card][:ROW_ITEMS]
+
+    async def playlists(self) -> list[dict]:
+        """The playlists of the library, as site cards with `favorite` (the mark Music Assistant gives them): the
+        favorites first, each group in name order."""
+        found = await self._command("music/playlists/library_items", order_by="sort_name", limit=PLAYLISTS_LIMIT)
+        cards = []
+        for item in _items(found):
+            card = _card(item)
+            if card:
+                card["favorite"] = bool(item.get("favorite"))
+                cards.append(card)
+        return sorted(cards, key=lambda card: not card["favorite"])
+
+    async def playlist(self, uri: str) -> dict:
+        """A playlist of the library, opened: its card, and its tracks as site cards with their length, in the order of
+        the playlist (at most PLAYLIST_TRACKS of them)."""
+        provider, kind, item_id = _split_uri(uri)
+        if kind != "playlist":
+            raise ValueError("That is not a playlist: take its uri from the Playlists page.")
+        found, tracks = await asyncio.gather(
+            self._command("music/playlists/get", item_id=item_id, provider_instance_id_or_domain=provider),
+            self._command("music/playlists/playlist_tracks", item_id=item_id, provider_instance_id_or_domain=provider),
+        )
+        card = _card({**found, "media_type": "playlist"}) if isinstance(found, dict) else None
+        if card is None:
+            raise ValueError("Music Assistant has no such playlist.")
+        card["favorite"] = bool(found.get("favorite"))
+        items = _items(tracks)[:PLAYLIST_TRACKS]
+        cards = [_card(item) for item in items]
+        await self._add_pictures(items, cards)
+        rows = []
+        for item, track in zip(items, cards):
+            if track:
+                duration = item.get("duration")
+                track["duration"] = int(duration) if isinstance(duration, (int, float)) and duration > 0 else None
+                rows.append(track)
+        return {"playlist": card, "tracks": rows}
+
+    async def _add_pictures(self, items: list[dict], cards: list[dict | None]) -> None:
+        """Music Assistant's own library rows come without pictures (its copy of a Deezer album or artist has none, and
+        asking for the provider's item gives that copy back). Search the providers for the same name instead, and take
+        the picture of the match (a track: the one of its album)."""
+        wanted: dict[tuple[str, str], list[tuple[dict, str]]] = {}
+        for item, card in zip(items, cards):
+            if not card or card["image"] or card["type"] not in ("track", "album", "artist"):
+                continue
+            album = item.get("album")
+            if card["type"] == "track":
+                kind, name = "album", _text(album.get("name")) if isinstance(album, dict) else ""
+            else:
+                kind, name = card["type"], card["title"]
+            by = _artists(item) if kind == "album" else ""
+            if name and name != "-":
+                wanted.setdefault((kind, name), []).append((card, "" if by == "-" else by))
+
+        async def find(kind: str, name: str, by: str) -> dict | None:
+            try:
+                data = await self._command("music/search", search_query=name, media_types=[kind], limit=SEARCH_LIMIT)
+            except MusicError:
+                return None
+            found = [hit for hit in _items(data.get(kind + "s") if isinstance(data, dict) else None)
+                     if _text(hit.get("name")).casefold() == name.casefold() and _image(hit)]
+            found.sort(key=lambda hit: by.casefold() not in _artists(hit).casefold())  # the same artist first
+            return _image(found[0]) if found else None
+
+        async def fetch(key: tuple[str, str], cards_by: list[tuple[dict, str]]) -> None:
+            for card, by in cards_by:
+                if key not in found_for:
+                    found_for[key] = await find(key[0], key[1], by)
+                card["image"] = found_for[key]
+
+        found_for: dict[tuple[str, str], dict | None] = {}
+        await asyncio.gather(*(fetch(key, cards_by) for key, cards_by in wanted.items()))
 
     async def lookup(self, query: str, media_type: str = "") -> dict:
         """The library search of the site: the results grouped by kind, as {query, groups: [{type, items}]}."""

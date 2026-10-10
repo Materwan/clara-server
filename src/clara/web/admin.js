@@ -4,7 +4,7 @@ import { api } from "./api.js";
 import { discordPicker, signInDiscordDialog } from "./discord.js";
 import { mark } from "./icons.js";
 import { usage as usageTab } from "./usage.js";
-import { costText, weightText } from "./models.js";
+import { abilityBadges, costText, weightText } from "./models.js";
 import { CHECK, askRestart, restartStatus } from "./restart.js";
 import {
   ago, avatar, clear, confirmDialog, dateTime, duration, h, icon, openDialog, pageHead, parseTokens, popupMenu, promptDialog, secretDialog,
@@ -277,7 +277,7 @@ function models(box) {
     clear(list);
     if (!rows.length) return void list.append(h("div", { class: "empty-state" }, state.data.models.length ? "No model matches." : "No provider offers a model."));
     list.append(h("table", { class: "grid cards" },
-      h("thead", {}, h("tr", {}, ["Users may choose", "Model", "Provider", "Size", "Credits per token"].map((t) => h("th", {}, t)))),
+      h("thead", {}, h("tr", {}, ["Users may choose", "Model", "Provider", "Size", "Can do", "Credits per token"].map((t) => h("th", {}, t)))),
       h("tbody", {}, rows.map(row))));
   }
 
@@ -294,6 +294,7 @@ function models(box) {
       h("td", {}, h("strong", {}, m.name), " ", !m.listed && h("span", { class: "badge off", title: "The provider does not offer it now" }, "not offered"), m.ref === state.data.default && h("span", { class: "badge ok" }, "server default")),
       h("td", { "data-label": "Provider" }, m.provider_label),
       h("td", { class: "num", "data-label": "Size" }, sizeText(m)),
+      h("td", { "data-label": "Can do" }, abilityBadges(m)),
       h("td", { "data-label": "Credits per token" }, h("div", { class: "row wrap" }, weight,
         m.auto_weight ? h("span", { class: "muted small" }, m.size_b ? "from its size" : "size unknown")
           : [h("span", { class: "badge" }, "set by hand"), h("button", { class: "ghost sm", onclick: () => change({ refs: [m.ref], auto_weight: true }) }, "Use the size")])));
@@ -360,7 +361,9 @@ function server(box, me, setTimer) {
       h("div", { class: "panel-head" }, h("div", {}, h("h3", {}, "Language model"),
         h("p", { class: "muted small" }, "The server's own model: used by everybody who chose none, and for summaries and titles. Changes apply at once, without a restart, and everybody is told. Users and Discord can use others (Models tab)."))),
       h("div", { class: "panel-body stack" },
-        h("div", { class: "model-pick" }, h("label", { class: "field" }, "Provider", provider), h("label", { class: "field" }, "Model", model)),
+        h("div", { class: "model-pick" }, h("label", { class: "field" }, "Provider", provider),
+          h("label", { class: "field" }, "Model", model,
+            h("div", { class: "hint" }, "Can do: ", abilityBadges({ capabilities: models.capabilities?.[status.model] })))),
         models.error && h("p", { class: "error small" }, models.error)));
   }
 

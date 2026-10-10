@@ -1,10 +1,11 @@
 import json
 
+import httpx
 import pytest
 from conftest import FakeBackend, fake_providers
 
-from clara.llm import OllamaBackend
-from clara.providers import ProviderError, ProviderManager, configs_from_settings, default_factory
+from clara.llm import OllamaBackend, OpenAIBackend, OpenAIFlavor, ollama_record
+from clara.providers import ProviderError, ProviderManager, configs_from_settings, default_factory, flavor_of
 from clara.settings import Settings, SettingsError
 
 
@@ -140,3 +141,72 @@ async def test_api_key_provider_rejects_a_bad_key(settings, monkeypatch):
     with pytest.raises(PermissionError, match="rejected"):
         await bad.verify()
     await good.verify()
+
+
+# --- what each provider says a model can do --------------------------------------------------------------
+
+
+def test_ollama_says_what_a_model_can_do_and_an_older_one_only_its_context():
+    assert ollama_record(["completion", "tools", "thinking", "vision"], {"qwen35.context_length": 262144}) == {
+        "thinking": True, "tools": True, "vision": True, "context": 262144,
+    }
+    assert ollama_record(["completion"], {"phi3.context_length": 131072, "general.name": "phi3"}) == {
+        "thinking": False, "tools": False, "vision": False, "context": 131072,
+    }
+    assert ollama_record(None, {"llama.context_length": 8192}) == {"context": 8192}
+
+
+async def test_ollama_is_asked_about_each_model_and_one_that_does_not_answer_is_left_out():
+    from types import SimpleNamespace as NS
+
+    class Shows:  # stands in for the ollama client's /api/show
+        async def show(self, name):
+            if name == "broken:latest":
+                raise ConnectionError("no answer")
+            if name == "old:latest":
+                return NS(capabilities=None, modelinfo={"old.context_length": 4096})
+            return NS(capabilities=["completion", "tools"], modelinfo={"qwen.context_length": 262144})
+
+    backend = OllamaBackend("m", client=Shows())
+    assert await backend.model_capabilities(["qwen3:8b", "broken:latest", "old:latest"]) == {
+        "qwen3:8b": {"thinking": False, "tools": True, "vision": False, "context": 262144},
+        "old:latest": {"context": 4096},
+    }
+
+
+async def test_gemini_says_what_its_models_can_do_from_its_own_list_over_every_page(settings):
+    pages = {
+        None: {"models": [{"name": "models/gemini-2.5-flash", "thinking": True, "inputTokenLimit": 1048576,
+                           "supportedGenerationMethods": ["generateContent", "countTokens"]}],
+               "nextPageToken": "2"},
+        "2": {"models": [{"name": "models/gemini-2.5-flash-preview-tts", "inputTokenLimit": 8192,
+                          "supportedGenerationMethods": ["generateContent"]},
+                         {"name": "models/gemini-embedding-001", "inputTokenLimit": 2048,
+                          "supportedGenerationMethods": ["embedContent"]}]},
+    }
+    asked = []
+
+    def handler(request):
+        assert request.url.path == "/v1beta/models"
+        assert request.headers["x-goog-api-key"] == "key-123"
+        assert "authorization" not in request.headers  # the Bearer of the OpenAI API is refused by this one
+        token = request.url.params.get("pageToken")
+        asked.append(token)
+        return httpx.Response(200, json=pages[token])
+
+    backend = OpenAIBackend(
+        "gemini-2.5-flash", host="https://generativelanguage.googleapis.com/v1beta/openai", api_key="key-123",
+        flavor=flavor_of("gemini", settings), label="Google Gemini", transport=httpx.MockTransport(handler),
+    )
+    found = await backend.model_capabilities(["gemini-2.5-flash", "gemini-2.5-flash-preview-tts", "gemini-embedding-001", "gemini-gone"])
+    assert found == {
+        "gemini-2.5-flash": {"thinking": True, "tools": True, "vision": True, "context": 1048576},
+        "gemini-2.5-flash-preview-tts": {"thinking": False, "tools": None, "vision": None, "context": 8192},
+        "gemini-embedding-001": {"thinking": False, "tools": None, "vision": None, "context": 2048},
+    }
+    assert asked == [None, "2"]
+
+
+async def test_a_service_without_a_list_of_its_own_says_nothing_more_than_its_names(settings):
+    deepseek = OpenAIBackend("deepseek-chat", host="https://api.deepseek.com", api_key="key-123", flavor=OpenAIFlavor())
+    assert await deepseek.model_capabilities(["deepseek-chat"]) == {}

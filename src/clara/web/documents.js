@@ -5,6 +5,9 @@ import { request } from "./api.js";
 
 export const MAX_TOTAL_CHARS = 150_000; // all the documents of one message
 const MAX_TEXT_BYTES = 2_000_000;
+const MAX_IMAGE_BYTES = 8_000_000; // a picture (the server refuses a bigger one too)
+const MAX_ANIMATION_BYTES = 30_000_000; // a GIF or WebP: the server reads some of its frames, not all of them
+const IMAGE_TYPES = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" };
 const DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 // Read by the server: the route, the most bytes it takes (webapi.MAX_PDF_BYTES, MAX_DOCX_BYTES) and the note on the chip
 const SERVER_READERS = {
@@ -56,7 +59,29 @@ export async function readDocument(file) {
   return { name: file.name, kind: LANGUAGES[ext] ?? "", text: text.replace(/^﻿/, ""), note: `${lines} line${lines === 1 ? "" : "s"}` };
 }
 
+/** A file of the composer: a picture (`{name, kind: "image", image: {mime, data}, note}`, the data in base64) or a document (`readDocument`). */
+export async function readAttachment(file) {
+  const type = file.type || IMAGE_TYPES[extension(file.name)];
+  if (!Object.values(IMAGE_TYPES).includes(type)) return readDocument(file);
+  const limit = type === "image/gif" || type === "image/webp" ? MAX_ANIMATION_BYTES : MAX_IMAGE_BYTES;
+  if (file.size > limit) throw new DocumentError(`${file.name} is too big (at most ${limit / 1e6} MB for a picture).`);
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  for (let start = 0; start < bytes.length; start += 0x8000) binary += String.fromCharCode(...bytes.subarray(start, start + 0x8000));
+  return { name: file.name, kind: "image", image: { mime: type, data: btoa(binary) }, note: `${Math.max(1, Math.round(file.size / 1000))} KB` };
+}
+
+/** The pictures among the composer's files, as the chat request takes them (the server reads them with the message). */
+export const imagesOf = (docs) => docs.filter((doc) => doc.image).map((doc) => ({ name: doc.name, mime: doc.image.mime, data: doc.image.data }));
+
+/** The note that names the pictures in a message, as the server writes it into the message it stores: "(Attached: a.png)". */
+export function imageNote(docs) {
+  const names = docs.filter((doc) => doc.image).map((doc) => doc.name);
+  return names.length ? `(Attached: ${names.join(", ")})` : "";
+}
+
 export function forModel(doc) {
+  if (doc.image) return ""; // a picture goes to the model as a picture, not as text
   const kind = doc.kind || "text";
   let body;
   if (doc.kind === "pdf" || doc.kind === "docx") body = doc.text;
@@ -72,11 +97,12 @@ export const totalChars = (docs) => docs.reduce((sum, doc) => sum + forModel(doc
 
 /** The message sent to Clara: what the user wrote, then the documents. */
 export function compose(message, docs) {
+  const documents = docs.filter((doc) => !doc.image); // pictures are named by the server, not written here
   const parts = message.trim() ? [message.trim()] : [];
-  if (docs.length) {
-    const names = docs.map((doc) => doc.name).join(", ");
-    parts.push(parts.length ? `(Attached: ${names})` : `Here ${docs.length === 1 ? "is" : "are"}: ${names}.`);
-    parts.push(...docs.map(forModel));
+  if (documents.length) {
+    const names = documents.map((doc) => doc.name).join(", ");
+    parts.push(parts.length ? `(Attached: ${names})` : `Here ${documents.length === 1 ? "is" : "are"}: ${names}.`);
+    parts.push(...documents.map(forModel));
   }
   return parts.join("\n\n");
 }

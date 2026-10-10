@@ -5,6 +5,7 @@ import { api } from "/api.js";
 import { icon } from "/icons.js";
 import { clear, h, pageHead, popupMenu } from "/ui.js";
 import { cover, failure, playUri } from "./player.js";
+import { playlistHref } from "./items.js";
 
 export function mountDiscover(container) {
   let open = true;
@@ -52,16 +53,23 @@ export function mountDiscover(container) {
   return { destroy() { open = false; } };
 }
 
-/** One item of a row: its picture plays it; the menu puts it next or at the end of the queue instead. */
-function tile(item) {
+/** One item of a row: its picture plays it; the menu puts it next or at the end of the queue instead. A playlist's
+ *  picture opens the playlist's page instead, and a play button in its bottom right corner plays it. */
+export function tile(item) {
   const more = h("button", {
     class: "ghost icon-btn", type: "button", "aria-label": `More for ${item.title}`, title: "More",
     onclick: (event) => itemMenu(event.currentTarget, item),
   }, icon("more", { size: 18 }));
-  return h("article", { class: "tile" },
-    h("button", { class: "tile-play", type: "button", "aria-label": `Play ${item.title}`, title: `Play ${item.title}`, onclick: () => playUri(item.uri) },
+  const picture = item.type === "playlist"
+    ? h("div", { class: "tile-cover" },
+      h("a", { class: "tile-play", href: playlistHref(item.uri), "aria-label": `Open ${item.title}`, title: `Open ${item.title}` }, cover(item.image, "lg")),
+      h("button", { class: "tile-fab", type: "button", "aria-label": `Play ${item.title}`, title: `Play ${item.title}`, onclick: () => playUri(item.uri) },
+        icon("play", { size: 16 })))
+    : h("button", { class: "tile-play", type: "button", "aria-label": `Play ${item.title}`, title: `Play ${item.title}`, onclick: () => playUri(item.uri) },
       cover(item.image, "lg"),
-      h("span", { class: "play-mark", "aria-hidden": "true" }, icon("play", { size: 18 }))),
+      h("span", { class: "play-mark", "aria-hidden": "true" }, icon("play", { size: 18 })));
+  return h("article", { class: "tile" },
+    picture,
     h("div", { class: "tile-foot" },
       h("div", { class: "tile-text" }, h("strong", {}, item.title), h("span", { class: "muted small" }, item.subtitle)),
       more));

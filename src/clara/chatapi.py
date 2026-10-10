@@ -8,13 +8,14 @@ Discord bot runs them too, discord_bot/local.py).
 
 from __future__ import annotations
 
+import base64
 import dataclasses
 from collections.abc import AsyncIterator
 from typing import Any, Literal
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .agent import Agent, ChatRequest, ClientToolTimeout, ModelTimeout, PromptTooLarge, ServerStopping
 from .apicommon import (
@@ -29,6 +30,7 @@ from .apicommon import (
     sse,
     sse_lines,
 )
+from .attachments import MAX_ATTACHMENTS, MAX_NAME, Attached, FileError, Prepared, prepare
 from .auth import Client, require_account, require_conversation, require_space
 from .limits import UsageLimitReached
 from .memory import Memory, Person
@@ -44,11 +46,32 @@ class RosterEntry(Body):
     name: str = Field(default="", max_length=80)
 
 
+MAX_ATTACHMENT_CHARS = 40_000_000  # a file in base64 (a 30 MB document is about 40 million)
+
+
+class AttachmentBody(Body):
+    """A file a message carries (attachments.py): its name, a MIME type (a hint only), its bytes in base64."""
+
+    name: str = Field(min_length=1, max_length=MAX_NAME)
+    mime: str = Field(default="", max_length=100)
+    data: str = Field(min_length=1, max_length=MAX_ATTACHMENT_CHARS)
+
+    @field_validator("data")
+    @classmethod
+    def _base64(cls, value: str) -> str:
+        try:
+            base64.b64decode(value, validate=True)
+        except ValueError:
+            raise ValueError("the file is not base64") from None
+        return value
+
+
 class ChatBody(Body):
     surface: Surface
     user_id: ExternalId
     user_name: str | None = Field(default=None, max_length=80)
-    message: str = Field(min_length=1, max_length=200_000)
+    message: str = Field(default="", max_length=200_000)  # may be empty when files are attached
+    attachments: list[AttachmentBody] = Field(default_factory=list, max_length=MAX_ATTACHMENTS)
     conversation: str | None = Field(default=None, min_length=1, max_length=200)
     # What a client can add to a turn (see agent.py):
     tools: list[dict[str, Any]] = Field(default_factory=list, max_length=200)  # tools it runs itself
@@ -64,6 +87,12 @@ class ChatBody(Body):
     mode: Literal["answer", "observe", "maybe"] = "answer"
     # The project a new conversation is part of (one that exists stays in its own, see PATCH /v1/conversations)
     project: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def _says_something(self) -> ChatBody:
+        if not self.message.strip() and not self.attachments:
+            raise ValueError("Write a message, or attach a file.")
+        return self
 
     def to_request(self, roster: tuple[Person, ...] = (), focus: tuple[Person, ...] = (), mode: str = "") -> ChatRequest:
         return ChatRequest(
@@ -114,6 +143,19 @@ def conversation_project(request: Request, body: ChatBody) -> int | None:
     return own_project_id(request, body.surface, body.user_id, body.project) if body.project is not None else None
 
 
+def attached_files(body: ChatBody) -> tuple[Attached, ...]:
+    """The files of a message as they were sent (the bytes, decoded)."""
+    return tuple(Attached(item.name, base64.b64decode(item.data)) for item in body.attachments)
+
+
+def prepared_message(body: ChatBody) -> Prepared:
+    """The message and its files as the model gets them (attachments.py). A file that cannot be used is a 422."""
+    try:
+        return prepare(body.message, attached_files(body))
+    except FileError as error:
+        raise HTTPException(422, str(error)) from None
+
+
 def checked(request: Request, client: str, body: ChatBody) -> ChatRequest:
     """The turn a chat request asks for, once everything in it was checked (else an HTTPException)."""
     refuse_when_stopping(request)
@@ -133,6 +175,10 @@ def checked(request: Request, client: str, body: ChatBody) -> ChatRequest:
     if mode == "maybe" and not request.app.state.memory.chime_allowed(body.space):
         mode = "observe"  # an administrator did not let Clara answer what is not for her there
     turn = body.to_request(roster, focus, mode)
+    prepared = prepared_message(body)
+    turn = dataclasses.replace(
+        turn, message=prepared.message, images=prepared.images, files=attached_files(body)
+    )
     project = None if body.ephemeral else conversation_project(request, body)
     if project is not None:
         turn = dataclasses.replace(turn, project=project)

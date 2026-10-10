@@ -41,6 +41,7 @@ class Reply:
     text: str  # "" when Clara chose not to answer, or the message was only kept as context
     conversation: str
     answered: bool  # False: observed, or a "maybe" she passed on
+    files: tuple[dict, ...] = ()  # the markdown files she wrote in the answer: {id, name, action}
 
 
 class ClaraBackend(Protocol):
@@ -63,6 +64,7 @@ class ClaraBackend(Protocol):
     # the to-do list
     async def tasks(self, user_id: int, status: str = "open") -> list[dict]: ...
     async def task(self, user_id: int, task_id: int) -> dict: ...
+    async def file_of(self, user_id: int, file_id: int) -> dict: ...  # {name, content}: a markdown file of theirs
 
     # requests for permission
     async def decide_approval(self, user_id: int, approval_id: int, approve: bool) -> dict: ...
@@ -82,6 +84,7 @@ class ClaraBackend(Protocol):
         instructions: str = "",
         prefix: str = "",
         timezone: str | None = None,
+        attachments: list[dict] | None = None,
     ) -> Reply: ...
 
     # spaces and events

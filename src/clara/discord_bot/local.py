@@ -133,6 +133,14 @@ class LocalBackend:
             raise ClaraError(404, "No such task of yours")
         return self.state.tasks.describe(found)
 
+    async def file_of(self, user_id: int, file_id: int) -> dict:
+        person = self.state.memory.find_person(SURFACE, self._account(user_id))
+        found = self.state.markdown.get(person.id, file_id) if person else None
+        if found is None:
+            raise ClaraError(404, "No such file of yours")
+        file, content = found
+        return {"name": file.name, "content": content}
+
     # -- talking -------------------------------------------------------------------------------------- #
 
     async def chat(
@@ -149,11 +157,12 @@ class LocalBackend:
         instructions: str = "",
         prefix: str = "",
         timezone: str | None = None,
+        attachments: list[dict] | None = None,
     ) -> Reply:
         fields: dict[str, Any] = {
             "surface": SURFACE, "user_id": str(user_id), "user_name": display_name, "message": message, "mode": mode,
             "quiet": True, "conversation": conversation, "instructions": instructions, "prefix": prefix,
-            "timezone": timezone,
+            "timezone": timezone, "attachments": attachments or [],
         }
         if space:
             fields.update(space=space, roster=roster or [], focus=[str(i) for i in focus or []])
@@ -171,7 +180,8 @@ class LocalBackend:
             refused = model_failure(error, "chat", self.client)
             raise ClaraError(refused.status_code, str(refused.detail)) from None
         answered = not done.get("observed") and not done.get("passed")
-        return Reply(done.get("reply", "") if answered else "", done.get("conversation", ""), answered)
+        files = tuple(done.get("files") or []) if answered else ()
+        return Reply(done.get("reply", "") if answered else "", done.get("conversation", ""), answered, files)
 
     # -- requests for permission ---------------------------------------------------------------------- #
 

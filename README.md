@@ -144,7 +144,7 @@ All routes except `/health` need `Authorization: Bearer <token>`.
 
 | Route | |
 | --- | --- |
-| `POST /v1/chat` | `{surface, user_id, user_name?, message, conversation?, quiet?, space?, roster?, focus?, mode?}` → `{reply, conversation, person, tools, usage, passed}`; 413 if it cannot fit the model's window, 504 if the model hangs, 503 if the server is stopping. `quiet`: never notify the person about this turn; the group fields are described in *Discord* |
+| `POST /v1/chat` | `{surface, user_id, user_name?, message, attachments?, conversation?, quiet?, space?, roster?, focus?, mode?}` → `{reply, conversation, person, tools, files, usage, passed}` (`files`: the markdown files written in the turn, `{id, name, action}`; fetch one with `GET /v1/markdown-files/{id}`); `attachments` are `[{name, mime, data}]` (data in base64, at most 4 files: pictures go to a model that reads them, documents are read into the message, see `attachments.py`); 422 for a file that cannot be read or a picture sent to a model that cannot read pictures; 413 if it cannot fit the model's window, 504 if the model hangs, 503 if the server is stopping. `quiet`: never notify the person about this turn; the group fields are described in *Discord* |
 | `POST /v1/chat/stream` | same body; Server-Sent Events `turn` / `thinking` / `token` / `tool_start` / `tool` / `qcm` / `tool_requests` / `usage` / `compacted` / `warning` / `done` / `error` |
 | `POST /v1/turns/{id}/tool-results` | `{results: [{id, content}]}`: a client's answer to a `tool_requests` event (see below) |
 | `GET /v1/conversations?surface=&user_id=&q=&limit=` | `{conversations: [{id, title, titled_by, pinned, created_at, updated_at, preview}]}`: the conversations the account's person started on that surface, pinned first, then the last written in; `q` keeps those whose title, messages or summary contain it (see *Conversation history*) |
@@ -320,6 +320,17 @@ An administrator starts and stops it at any time with `/discord start|stop|resta
 on the web site's **Discord** page. That lasts until the server restarts: `AUTO_START_DISCORD_BOT` decides then. When
 the server stops, the bot stops with it. The built-in bot reaches Clara by calling the server's own code (no token,
 no HTTP), under the client name `discord-bot`, through the same checks as the HTTP routes below.
+
+**Files.** Clara reads what is attached to a message she is addressed in (a mention, or a reply to her): text and
+code, PDF, Word documents and pictures (PNG, JPEG, GIF, WebP), as on the web site. A message she is not addressed in
+is never downloaded. A picture is shown to the model that answers, so that model must read pictures (its
+capabilities are in *Models*): otherwise the answer says so. An animated GIF (or WebP) gives the model six of its
+frames, spread over the animation. A GIF from Discord's own picker (a Tenor or Giphy link) is fetched from those two
+services only, and read the same way.
+
+The files people send stay with the conversation (the newest 20): later messages list them, and `read_conversation_file`
+reads a document or shows a picture again. The markdown files Clara writes in an answer (see *Files* on the web site)
+are posted with that answer as Discord attachments.
 
 **On another machine.** The same bot runs on its own with `clara-discord` (or the `bot-discord` project, which starts
 it), and reaches the server over HTTP with a client token (`CLARA_TOKENS=discord:<token>`,
@@ -930,8 +941,9 @@ text nodes; the page's Content-Security-Policy allows only its own files.
 ## The music site
 
 `http://127.0.0.1:8765/music/` is Clara's music site, for the player of your PC in Music Assistant (set
-`MUSIC_ASSISTANT_URL`). It has the same sign-in and the same look as the web site, and three pages: **Discover** (the rows of
-Music Assistant's own discover page, each with the provider it comes from), **Search** (the library, grouped by kind) and
+`MUSIC_ASSISTANT_URL`). It has the same sign-in and the same look as the web site, and four pages: **Discover** (the rows of
+Music Assistant's own discover page, each with the provider it comes from), **Playlists** (your library's playlists, the
+favorites first; a cover opens the playlist's tracks), **Search** (the library, grouped by kind) and
 **Queue** (the queue of the player, in Music Assistant's order: play from there, move, remove, clear, shuffle, repeat). A bar
 at the foot of every page shows what plays, with its position, the transport and the volume. *Your player* chooses the
 player of the PC and the token.

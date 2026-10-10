@@ -35,6 +35,7 @@ log = logging.getLogger(__name__)
 T = TypeVar("T")
 
 CHECK_TIMEOUT = 8.0
+CAPABILITIES_TIMEOUT = 30.0  # one request per Ollama model, a few at a time
 PERSONAL_BACKENDS = 32  # backends kept for people's own keys; the least recently used is closed
 
 
@@ -94,7 +95,8 @@ LABELS = {"gemini": "Google Gemini", "deepseek": "DeepSeek", "mistral": "Mistral
 def flavor_of(provider: str, settings: Settings) -> OpenAIFlavor:
     """How each OpenAI-compatible service differs from the others."""
     if provider == "gemini":
-        return OpenAIFlavor(signatures=True)
+        # its own model list says whether a model thinks and how much it takes: the OpenAI one only has the names
+        return OpenAIFlavor(signatures=True, native_models="https://generativelanguage.googleapis.com/v1beta/models")
     if provider == "deepseek":
         extra = () if settings.deepseek_thinking else (("thinking", {"type": "disabled"}),)
         return OpenAIFlavor(reasoning_back=True, extra_body=extra)
@@ -398,6 +400,15 @@ class ProviderManager:
         if sizes is None:
             return {}
         return await asyncio.wait_for(self._logged("model_sizes", sizes(), config), CHECK_TIMEOUT)
+
+    async def capabilities_of(self, provider: str, names: list[str]) -> dict[str, dict]:
+        """What each of these models says it can do, for the providers that say (Ollama's records, Gemini's list)."""
+        config = self.configs[provider]
+        backend = self._backend_for(make_ref(provider, self._models[provider]))
+        describe = getattr(backend, "model_capabilities", None)
+        if describe is None:
+            return {}
+        return await asyncio.wait_for(self._logged("model_capabilities", describe(names), config), CAPABILITIES_TIMEOUT)
 
     @staticmethod
     def _peer_of(config: ProviderConfig) -> str:

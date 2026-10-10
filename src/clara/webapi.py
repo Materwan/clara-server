@@ -57,6 +57,7 @@ from .erasure import erase_person
 from .ingest import IngestError
 from .limits import show_limit
 from .memory import MergeRefused
+from .providers import make_ref
 from .restart import RestartError
 from .users import User, UserError, generate_password
 
@@ -598,9 +599,14 @@ async def admin_restart(body: RestartBody, admin: Admin, request: Request) -> di
 
 @router.get("/v1/admin/models")
 async def admin_models(admin: Admin, request: Request) -> dict:
-    providers = request.app.state.providers
+    state = request.app.state
+    providers, catalog = state.providers, state.models
     try:
-        return {"provider": providers.config.id, "model": providers.model, "models": await providers.list_models()}
+        names = await providers.list_models()
+        return {
+            "provider": providers.config.id, "model": providers.model, "models": names,
+            "capabilities": {name: catalog.capabilities(make_ref(providers.config.id, name)) for name in names},
+        }
     except Exception as error:
         return {"provider": providers.config.id, "model": providers.model, "models": [],
                 "error": f"{type(error).__name__}: {str(error)[:200]}"}

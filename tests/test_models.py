@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from clara.agent import Agent, ChatRequest
 from clara.commands import CommandContext, registry
 from clara.limits import UsageLimits, credits_for
-from clara.models import ModelCatalog, auto_weight, parse_size, size_from_name
+from clara.models import Capabilities, ModelCatalog, auto_weight, parse_size, size_from_name
 from clara.prompt import SystemPrompt
 from clara.providers import ProviderError, ProviderManager, make_ref, split_ref
 from clara.server import create_app
@@ -21,11 +21,15 @@ TURN = 13  # what say() reports: 10 prompt tokens and 3 completion tokens
 
 
 class Farm:
-    """One fake backend per `provider:model`, made when first asked for, with the sizes a provider would report."""
+    """One fake backend per `provider:model`, made when first asked for, with the sizes a provider would report and
+    the capabilities it would say (`capabilities`: provider -> model -> what it says)."""
 
-    def __init__(self, sizes: dict[str, dict[str, str]] | None = None):
+    def __init__(
+        self, sizes: dict[str, dict[str, str]] | None = None, capabilities: dict[str, dict[str, dict]] | None = None
+    ):
         self.backends: dict[str, FakeBackend] = {}
         self.sizes = sizes or {}
+        self.capabilities = capabilities or {}
 
     def __call__(self, config, model):
         ref = make_ref(config.id, model)
@@ -37,6 +41,12 @@ class Farm:
                     return sizes
 
                 backend.model_sizes = model_sizes
+            said = self.capabilities.get(config.id)
+            if said is not None:
+                async def model_capabilities(names, said=said):
+                    return {name: said[name] for name in names if name in said}
+
+                backend.model_capabilities = model_capabilities
             self.backends[ref] = backend
         return self.backends[ref]
 
@@ -450,3 +460,60 @@ def test_the_terminal_command_chooses_the_model_of_the_cli_surface(http, capsys)
     assert "not one of the models offered" in capsys.readouterr().out
     command(api, "/model default")
     assert listed(http, http.headers, surface="cli")["choices"] == {}
+
+
+# --- what a model can do ---------------------------------------------------------------------------------
+
+
+def test_what_a_provider_says_a_model_can_do_is_kept_only_where_it_is_of_the_right_kind():
+    assert Capabilities.from_record({"thinking": True, "tools": False, "vision": "yes", "context": 262144}) == (
+        Capabilities(True, False, None, 262144)
+    )
+    assert Capabilities.from_record({"thinking": 1, "context": True}) == Capabilities()  # neither a yes nor a size
+    assert Capabilities.from_record({"context": 0}) == Capabilities()
+    assert Capabilities.from_json("not json") == Capabilities()
+    assert Capabilities.from_json(Capabilities(True, None, True, 8192).to_json()) == Capabilities(True, None, True, 8192)
+
+
+async def test_the_catalogue_keeps_what_each_provider_says_so_users_see_it_after_a_restart(settings, memory):
+    said = {"fake-big": {"thinking": True, "tools": True, "vision": False, "context": 262144}}
+
+    class Says(FakeBackend):
+        async def model_capabilities(self, names):
+            return {name: said[name] for name in names if name in said}
+
+    def factory(config, model):
+        return Says(model=model) if config.id == "local" else FakeBackend(model=model)
+
+    catalog = ModelCatalog(memory, ProviderManager.from_settings(settings, factory=factory))
+    found = {info.ref: info for info in await catalog.listing()}
+    assert found["local:fake-big"].capabilities == Capabilities(True, True, False, 262144)
+    assert found["local:fake"].capabilities == Capabilities()  # the provider said nothing of it
+    catalog.set_enabled(["local:fake-big"], True)
+    (usable,) = catalog.usable()
+    assert usable.describe()["capabilities"] == {"thinking": True, "tools": True, "vision": False, "context": 262144}
+
+    # a restart, with a provider that does not say: what was said before is still there
+    plain = ProviderManager.from_settings(settings, factory=lambda config, model: FakeBackend(model=model))
+    again = ModelCatalog(memory, plain)
+    assert again.capabilities("local:fake-big")["context"] == 262144
+
+
+@pytest.fixture
+def described_http(settings):
+    farm = Farm(capabilities={"local": {"fake-big": {"thinking": True, "tools": True, "vision": True, "context": 131072}}})
+    with TestClient(create_app(settings, make_providers(settings, farm))) as client:
+        client.app.state.users.create("root", PASSWORD, admin=True)
+        client.app.state.users.create("erwan", PASSWORD)
+        yield client
+
+
+def test_users_and_administrators_are_told_what_each_model_can_do(described_http):
+    admin, erwan = bearer(described_http, "root"), bearer(described_http)
+    described_http.patch("/v1/admin/catalog", json={"refs": ["local:fake-big"], "enabled": True}, headers=admin)
+    described_http.get("/v1/admin/catalog", params={"refresh": "true"}, headers=admin)  # asks the providers now
+    (model,) = listed(described_http, erwan)["models"]
+    assert model["capabilities"] == {"thinking": True, "tools": True, "vision": True, "context": 131072}
+    told = described_http.get("/v1/admin/models", headers=admin).json()
+    assert told["capabilities"]["fake-big"]["context"] == 131072
+    assert told["capabilities"]["other-model"] == {"thinking": None, "tools": None, "vision": None, "context": None}

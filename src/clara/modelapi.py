@@ -87,7 +87,7 @@ async def _personal(request: Request, person_id: int) -> list[dict]:
             ref = make_ref(provider, name)
             found.append({
                 "ref": ref, "provider": provider, "provider_label": catalog.provider_label(provider), "name": name,
-                "weight": 0, "own_key": True,
+                "weight": 0, "own_key": True, "capabilities": catalog.capabilities(ref),
             })
     return found
 

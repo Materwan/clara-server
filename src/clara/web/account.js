@@ -2,7 +2,7 @@
 
 import { api } from "./api.js";
 import { mark } from "./icons.js";
-import { SURFACE_NAMES, anyModel, chooseModel, costText, findModel, loadModels, modelSelect } from "./models.js";
+import { SURFACE_NAMES, abilityBadges, anyModel, chooseModel, costText, findModel, loadModels, modelSelect } from "./models.js";
 
 /** The surfaces in the order people know them: the known ones first, the others by name. */
 const surfaceOrder = (surfaces) => [...surfaces].sort((a, b) => {
@@ -170,7 +170,9 @@ export function mountAccount(container, user, onSignOut) {
         } catch (error) { toast(error.detail, true); }
         draw();
       }, `Model on ${SURFACE_NAMES[surface] || surface}`);
-      return h("label", { class: "field" }, SURFACE_NAMES[surface] || surface, select);
+      const inUse = findModel(models, models.choices[surface] ?? null) ?? models.default; // what answers on this surface
+      return h("label", { class: "field" }, SURFACE_NAMES[surface] || surface, select,
+        h("div", { class: "hint" }, "Can do: ", abilityBadges(inUse)));
     });
     return h("section", { class: "panel" }, head, h("div", { class: "panel-body stack" },
       h("div", { class: "model-grid" }, rows),

@@ -291,17 +291,18 @@ async def test_the_setting_lets_clara_fetch_any_address(memory, tmp_path):
 
 
 def test_the_files_routes_may_be_larger_than_the_others():
-    assert limit_for("/v1/chat") == DEFAULT_LIMIT
+    assert limit_for("/v1/settings") == DEFAULT_LIMIT
+    assert limit_for("/v1/chat") > DEFAULT_LIMIT and limit_for("/v1/chat/stream") > DEFAULT_LIMIT  # a message's files
     assert limit_for("/v1/projects/3/files") > DEFAULT_LIMIT and limit_for("/v1/documents/extract") > DEFAULT_LIMIT
 
 
 def test_a_request_that_is_too_big_is_refused_before_it_is_read(settings):
     with TestClient(create_app(settings, fake_providers(settings, FakeBackend()))) as http:
+        headers = {"Authorization": "Bearer secret-cli", "Content-Type": "application/json"}
         big = b"0" * (DEFAULT_LIMIT + 1)
-        answer = http.post("/v1/chat", content=big, headers={"Authorization": "Bearer secret-cli", "Content-Type": "application/json"})
+        answer = http.patch("/v1/settings", content=big, headers=headers)
         assert answer.status_code == 413
-        chunked = http.post("/v1/chat", content=iter([b"0" * 1_000_000] * 17),
-                            headers={"Authorization": "Bearer secret-cli", "Content-Type": "application/json"})
+        chunked = http.patch("/v1/settings", content=iter([b"0" * 1_000_000] * 17), headers=headers)
         assert chunked.status_code == 413  # no Content-Length: counted as it came
 
 

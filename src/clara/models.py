@@ -18,11 +18,12 @@ own provider and model, `/provider` and `/model`, stay the default).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 from .memory import Memory
 from .providers import ProviderError, ProviderManager, make_ref, split_ref
@@ -72,6 +73,42 @@ def show_weight(weight: float) -> str:
 
 
 @dataclass(frozen=True)
+class Capabilities:
+    """What a model can do, as far as its provider says: `thinking` (reasons before it answers), `tools` (calls
+    tools), `vision` (reads images) and `context` (the most tokens it takes). None: the provider does not say."""
+
+    thinking: bool | None = None
+    tools: bool | None = None
+    vision: bool | None = None
+    context: int | None = None
+
+    @classmethod
+    def from_record(cls, record: dict) -> Capabilities:
+        """From what a backend read of a model (llm.py); whatever is not of the right kind is unknown."""
+        def flag(key: str) -> bool | None:
+            value = record.get(key)
+            return value if isinstance(value, bool) else None
+
+        context = record.get("context")
+        known = isinstance(context, int) and not isinstance(context, bool) and context > 0
+        return cls(flag("thinking"), flag("tools"), flag("vision"), context if known else None)
+
+    @classmethod
+    def from_json(cls, text: str | None) -> Capabilities:
+        try:
+            record = json.loads(text or "{}")
+        except ValueError:
+            return cls()
+        return cls.from_record(record) if isinstance(record, dict) else cls()
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self))
+
+    def describe(self) -> dict:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class ModelInfo:
     ref: str
     provider: str
@@ -81,12 +118,14 @@ class ModelInfo:
     override: float | None  # the weight an administrator set (None: worked out)
     weight: float  # the credits a token costs
     listed: bool = True  # the provider offers it now
+    capabilities: Capabilities = Capabilities()  # what the provider says it can do (as last asked)
 
     def describe(self, provider_label: str = "") -> dict:
         return {
             "ref": self.ref, "provider": self.provider, "provider_label": provider_label or self.provider,
             "name": self.name, "size_b": self.size_b, "enabled": self.enabled, "weight": self.weight,
             "auto_weight": self.override is None, "listed": self.listed,
+            "capabilities": self.capabilities.describe(),
         }
 
 
@@ -135,7 +174,7 @@ class ModelCatalog:
             return {row["ref"]: row for row in self._memory.database.execute("SELECT * FROM models").fetchall()}
 
     def _upsert(self, ref: str, **fields) -> None:
-        unknown = set(fields) - {"enabled", "weight", "size_b"}
+        unknown = set(fields) - {"enabled", "weight", "size_b", "capabilities"}
         if unknown:  # the names go into the SQL: only ours
             raise ValueError(f"Unknown model fields: {', '.join(sorted(unknown))}")
         columns = ", ".join(fields)
@@ -152,8 +191,9 @@ class ModelCatalog:
         size = row["size_b"] if row is not None and row["size_b"] else size_from_name(name)
         override = row["weight"] if row is not None else None
         weight = override if override is not None else auto_weight(size, self.reference)
+        capabilities = Capabilities.from_json(row["capabilities"]) if row is not None else Capabilities()
         return ModelInfo(ref, provider, name, size, bool(row["enabled"]) if row is not None else False, override,
-                         weight, listed)
+                         weight, listed, capabilities)
 
     def info(self, ref: str) -> ModelInfo:
         return self._info(ref, self._row(ref))
@@ -164,6 +204,10 @@ class ModelCatalog:
             return self.info(ref).weight
         except ProviderError:
             return 1.0
+
+    def capabilities(self, ref: str) -> dict:
+        """What the provider says this model can do (see Capabilities), as the surfaces show it."""
+        return self.info(ref).capabilities.describe()
 
     # ------------------------------------------------------------------
     # What the providers offer (administrators)
@@ -192,6 +236,12 @@ class ModelCatalog:
                     size = parse_size(sizes.get(name))
                     if size is not None:
                         self._upsert(make_ref(provider, name), size_b=size)
+                try:
+                    found = await self._providers.capabilities_of(provider, names)
+                except Exception:
+                    found = {}  # a provider that cannot say keeps what it said before
+                for name, record in found.items():
+                    self._upsert(make_ref(provider, name), capabilities=Capabilities.from_record(record).to_json())
 
             await asyncio.gather(*(ask(provider) for provider in usable))
             for provider in list(self._listed):

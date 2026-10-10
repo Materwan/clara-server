@@ -18,6 +18,8 @@ The music site (musicweb/, at /music/) uses the same person and player, and thes
 
     GET    /v1/me/music/discover             the rows of Music Assistant's discover page (provider, item_id, name)
     GET    /v1/me/music/discover/items       ?provider=&item_id=: the items of one row
+    GET    /v1/me/music/playlists            the playlists of the library: {playlists}, the favorites first (`favorite`)
+    GET    /v1/me/music/playlist             ?uri=: one playlist opened: {playlist, tracks}, the tracks in its order
     GET    /v1/me/music/lookup               ?q=&media_type=: the library results, grouped by kind
     GET    /v1/me/music/now                  what the player plays, its position, shuffle, repeat and volume
     GET    /v1/me/music/queue                the queue, in Music Assistant's order
@@ -224,6 +226,22 @@ async def music_discover_items(
     client = _mine(request, caller.user.person_id)
     with _answering():
         return {"items": await client.discover_items(provider, item_id)}
+
+
+@router.get("/v1/me/music/playlists")
+async def music_playlists(caller: LoggedIn, request: Request) -> dict:
+    client = _mine(request, caller.user.person_id)
+    with _answering():
+        return {"playlists": await client.playlists()}
+
+
+@router.get("/v1/me/music/playlist")
+async def music_playlist(
+    caller: LoggedIn, request: Request, uri: str = Query(min_length=1, max_length=500),
+) -> dict:
+    client = _mine(request, caller.user.person_id)
+    with _answering():
+        return await client.playlist(uri)
 
 
 @router.get("/v1/me/music/lookup")

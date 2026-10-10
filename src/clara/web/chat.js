@@ -3,7 +3,7 @@
 
 import { ApiError, api, conversationPath, streamChat } from "./api.js";
 import { approvalCard, pendingApprovals } from "./approvals.js";
-import { DocumentError, MAX_TOTAL_CHARS, compose, readDocument, splitMessage, totalChars } from "./documents.js";
+import { DocumentError, MAX_TOTAL_CHARS, compose, imageNote, imagesOf, readAttachment, splitMessage, totalChars } from "./documents.js";
 import { icon, mark, ring } from "./icons.js";
 import { labelOf, renderGroups } from "./history.js";
 import { connectionCount, openConnections } from "./integrations.js";
@@ -17,8 +17,9 @@ const SURFACE = "web";
 const INSTRUCTIONS =
   "You are talking through Clara's web site, in a chat window. Markdown is displayed, but keep answers " +
   "short and conversational. Write mathematical formulas in LaTeX: $...$ inline and $$...$$ on their own lines " +
-  "(they are typeset). The user can attach files (PDF, Word, code, Markdown, text): their content comes in the " +
-  'message, each inside <document name="..." type="..."> tags. Refer to them by name. To quiz the user or to ' +
+  "(they are typeset). The user can attach files (PDF, Word, code, Markdown, text) and pictures: a document's content " +
+  'comes in the message, inside <document name="..." type="..."> tags; a picture is shown to you with the message. ' +
+  "Refer to them by name. To quiz the user or to " +
   "collect several answers at once, call the qcm tool: the page shows it as a form (radio buttons, check boxes " +
   "or a text box) and their answers come back in their next message.";
 
@@ -76,7 +77,7 @@ export function mountChat(container, user, { slot, fresh = false, project = null
   const input = h("textarea", { rows: 1, placeholder: `Message Clara`, "aria-label": "Message", enterkeyhint: "send" });
   const chips = h("div", { class: "chips" });
   const picker = h("input", { type: "file", multiple: true, hidden: true, onchange: () => { addFiles([...picker.files]); picker.value = ""; } });
-  const attach = h("button", { class: "ghost icon-btn", title: "Attach documents (PDF, Word, code, text)", "aria-label": "Attach documents", onclick: () => picker.click() }, icon("clip"));
+  const attach = h("button", { class: "ghost icon-btn", title: "Attach documents or pictures (PDF, Word, code, text, PNG, JPEG, GIF, WebP)", "aria-label": "Attach documents or pictures", onclick: () => picker.click() }, icon("clip"));
   const sendButton = h("button", { class: "send", "aria-label": "Send", title: "Send", onclick: send, disabled: true }, icon("send", { size: 19 }));
   const docInfo = h("span", { class: "grow docinfo" });
   const modelBox = h("span", { class: "model-box", hidden: true }); // the model picker, when an administrator offers a choice
@@ -462,7 +463,8 @@ export function mountChat(container, user, { slot, fresh = false, project = null
     const direct = typeof answers === "string";
     const text = direct ? answers : input.value;
     if (!direct && !text.trim() && !state.docs.length) return;
-    const message = direct ? text : compose(text, state.docs);
+    const attached = direct ? [] : state.docs;
+    const message = direct ? text : compose(text, attached);
     const conversation = state.current;
     if (!direct) {
       input.value = "";
@@ -471,7 +473,7 @@ export function mountChat(container, user, { slot, fresh = false, project = null
       renderChips();
       saveDraft(); // nothing is left to keep
     }
-    state.messages.push({ role: "user", content: message });
+    state.messages.push({ role: "user", content: [imageNote(attached), message].filter(Boolean).join("\n\n") });
     const reply = newReply();
     reply.live = true; // what draws it shows the dots, the caret and the spinners
     state.messages.push(reply);
@@ -495,6 +497,7 @@ export function mountChat(container, user, { slot, fresh = false, project = null
         ...who, user_name: displayName, message, conversation, instructions: INSTRUCTIONS,
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         project: state.project || undefined, // a new conversation goes in it; one that exists stays where it is
+        attachments: imagesOf(attached), // the pictures: the server reads them with the message
       };
       for await (const event of streamChat(request, state.abort.signal)) {
         if (event.type === "token") {
@@ -609,7 +612,7 @@ export function mountChat(container, user, { slot, fresh = false, project = null
     for (const file of files) {
       if (state.docs.some((doc) => doc.name === file.name)) { toast(`${file.name} is already attached.`); continue; }
       try {
-        const doc = await readDocument(file);
+        const doc = await readAttachment(file);
         if (totalChars([...state.docs, doc]) > MAX_TOTAL_CHARS) {
           toast(`${file.name} does not fit: a message holds about ${MAX_TOTAL_CHARS.toLocaleString()} characters of documents.`, true);
           continue;

@@ -62,6 +62,61 @@ async def test_discover_rows_come_from_the_recommendations_with_their_provider(m
 
 
 @pytest.mark.asyncio
+async def test_the_library_playlists_come_favorites_first_with_their_mark(memory):
+    seen = []
+    playlists = [
+        {"uri": "library://playlist/1", "media_type": "playlist", "item_id": "1", "provider": "library", "name": "Road",
+         "owner": "Erwan", "favorite": False},
+        {"uri": "library://playlist/2", "media_type": "playlist", "item_id": "2", "provider": "library",
+         "name": "Favorite tracks", "owner": "Erwan", "favorite": True},
+        {"uri": "library://playlist/3", "media_type": "playlist", "item_id": "3", "provider": "library",
+         "name": "Ambient", "owner": "", "favorite": False},
+    ]
+    client = music({"music/playlists/library_items": playlists}, seen)
+
+    found = await client.playlists()
+
+    assert [(card["title"], card["favorite"]) for card in found] == [
+        ("Favorite tracks", True), ("Road", False), ("Ambient", False)
+    ]
+    assert found[1]["subtitle"] == "Erwan" and found[2]["subtitle"] == "Playlist"
+    assert seen[0][0] == "music/playlists/library_items" and seen[0][1]["order_by"] == "sort_name"
+
+
+@pytest.mark.asyncio
+async def test_a_playlist_opened_gives_its_card_and_its_tracks_in_order_with_their_length(memory):
+    seen = []
+    no_length = {"uri": "library://track/8", "media_type": "track", "item_id": "8", "provider": "library", "name": "Ra",
+                 "artists": [{"name": "Joni"}], "duration": 0}
+    answers = {
+        "music/playlists/get": {"uri": "library://playlist/2", "media_type": "playlist", "item_id": "2",
+                                "provider": "library", "name": "Favorite tracks", "owner": "Erwan", "favorite": True},
+        "music/playlists/playlist_tracks": [TRACK, no_length],
+    }
+    client = music(answers, seen)
+
+    found = await client.playlist("library://playlist/2")
+
+    assert found["playlist"] | {"image": None} == {
+        "uri": "library://playlist/2", "type": "playlist", "title": "Favorite tracks", "subtitle": "Erwan",
+        "image": None, "favorite": True,
+    }
+    assert [(track["title"], track["subtitle"], track["duration"]) for track in found["tracks"]] == [
+        ("Blue", "Joni", 215), ("Ra", "Joni", None)
+    ]
+    assert sorted(command for command, _, _ in seen) == ["music/playlists/get", "music/playlists/playlist_tracks"]
+    assert all(args == {"item_id": "2", "provider_instance_id_or_domain": "library"} for _, args, _ in seen)
+
+
+@pytest.mark.asyncio
+async def test_only_a_playlist_uri_is_opened_as_a_playlist(memory):
+    client = music({})
+
+    with pytest.raises(ValueError):
+        await client.playlist("library://track/7")
+
+
+@pytest.mark.asyncio
 async def test_a_discover_row_gives_site_cards_and_skips_what_cannot_play(memory):
     items = [
         TRACK,
@@ -84,6 +139,30 @@ async def test_a_discover_row_gives_site_cards_and_skips_what_cannot_play(memory
         {"uri": "library://playlist/9", "type": "playlist", "title": "Mix", "subtitle": "Erwan", "image": None},
     ]
     assert seen == [("music/recommendations/items", {"provider": "library", "item_id": "recent"}, "Bearer token")]
+
+
+@pytest.mark.asyncio
+async def test_a_library_item_without_a_picture_borrows_it_from_the_provider_item_of_the_same_name(memory):
+    album = {"uri": "library://album/46", "media_type": "album", "name": "Golden"}
+    items = [
+        {"uri": "library://track/1", "media_type": "track", "name": "A", "album": album, "metadata": {}},
+        {"uri": "library://track/2", "media_type": "track", "name": "B", "album": album, "metadata": {}},
+        {"uri": "library://artist/3", "media_type": "artist", "name": "Cee", "metadata": None},
+    ]
+    hit = {"name": "golden", "media_type": "album", "image": {"proxy_id": "deezer-1"}}
+    bare = {"name": "Golden", "media_type": "album", "metadata": {"images": []}}
+    artist = {"name": "Cee", "media_type": "artist", "image": {"proxy_id": "deezer-2"}}
+    seen = []
+    client = music({
+        "music/recommendations/items": items,
+        "music/search": {"albums": [bare, hit], "artists": [artist]},
+    }, seen)
+
+    cards = await client.discover_items("library", "recent")
+
+    assert [card["image"] for card in cards] == [{"id": "deezer-1"}, {"id": "deezer-1"}, {"id": "deezer-2"}]
+    searched = sorted(args["search_query"] for command, args, _ in seen if command == "music/search")
+    assert searched == ["Cee", "Golden"]  # one search per album, however many tracks
 
 
 @pytest.mark.asyncio
@@ -259,6 +338,7 @@ def test_the_site_routes_answer_for_a_person_with_a_player(memory):
         "player_queues/get": {"state": "idle", "current_item": None, "current_index": None},
         "player_queues/items": [],
         "music/recommendations": [],
+        "music/playlists/library_items": [],
     }
     client, _ = app_for(memory, music(answers), "erwan")
     client.put("/v1/me/music", json={"player": PLAYER, "token": SECRET})
@@ -266,6 +346,7 @@ def test_the_site_routes_answer_for_a_person_with_a_player(memory):
     assert client.get("/v1/me/music/now").json()["state"] == "stopped"
     assert client.get("/v1/me/music/queue").json() == {"index": None, "items": []}
     assert client.get("/v1/me/music/discover").json() == {"rows": []}
+    assert client.get("/v1/me/music/playlists").json() == {"playlists": []}
     assert client.post("/v1/me/music/control", json={"action": "fly"}).status_code == 422
     assert client.post("/v1/me/music/queue/move", json={"queue_item_id": "q", "shift": 3}).status_code == 422
 
@@ -275,7 +356,24 @@ def test_the_site_routes_refuse_a_person_who_chose_no_player(memory):
 
     assert client.get("/v1/me/music/now").status_code == 409
     assert client.get("/v1/me/music/discover").status_code == 409
+    assert client.get("/v1/me/music/playlists").status_code == 409
     assert client.get("/v1/me/music/image", params={"id": "cover-7"}).status_code == 409
+
+
+def test_the_playlist_route_answers_with_the_playlist_and_refuses_what_is_not_one(memory):
+    answers = {
+        "players/all": PLAYERS,
+        "music/playlists/get": {"uri": "library://playlist/2", "media_type": "playlist", "item_id": "2",
+                                "provider": "library", "name": "Favorite tracks", "owner": "Erwan"},
+        "music/playlists/playlist_tracks": [TRACK],
+    }
+    client, _ = app_for(memory, music(answers), "erwan")
+    client.put("/v1/me/music", json={"player": PLAYER, "token": SECRET})
+
+    body = client.get("/v1/me/music/playlist", params={"uri": "library://playlist/2"}).json()
+
+    assert body["playlist"]["title"] == "Favorite tracks" and [track["title"] for track in body["tracks"]] == ["Blue"]
+    assert client.get("/v1/me/music/playlist", params={"uri": "library://track/7"}).status_code == 422
 
 
 def test_the_site_routes_need_a_server_with_music_assistant(memory):
@@ -496,6 +594,36 @@ def test_a_picture_without_a_proxy_id_is_kept_under_its_web_address():
     assert picture["id"].startswith("r") and REMOTE_PICTURES[picture["id"]] == "https://i.example/cover.jpg"
     assert _picture({"path": "/local/cover.jpg", "provider": "library", "proxy_id": None}) is None
     assert _picture(None) is None
+
+
+def test_a_playlist_without_a_picture_of_its_own_takes_the_thumbnail_of_its_metadata():
+    from clara.music import REMOTE_PICTURES, _card
+
+    card = _card(
+        {
+            "uri": "deezer--x://playlist/687945565",
+            "media_type": "playlist",
+            "name": "Hits Dance",
+            "owner": "Deezer",
+            "image": None,
+            "metadata": {
+                "images": [
+                    {"type": "fanart", "path": "https://i.example/fan.jpg", "provider": "deezer"},
+                    {"type": "thumb", "path": "https://i.example/thumb.jpg", "provider": "deezer"},
+                ]
+            },
+        }
+    )
+
+    assert REMOTE_PICTURES[card["image"]["id"]] == "https://i.example/thumb.jpg"
+
+
+def test_a_playlist_with_no_picture_anywhere_has_none():
+    from clara.music import _card
+
+    card = _card({"uri": "library://playlist/9", "media_type": "playlist", "name": "New", "metadata": {"images": []}})
+
+    assert card["image"] is None
 
 
 @pytest.mark.asyncio

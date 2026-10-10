@@ -19,6 +19,7 @@ LIMITS: tuple[tuple[re.Pattern[str], int], ...] = (
     (re.compile(r"^/v1/documents/extract$"), 31 * MEGABYTE),  # a PDF: see webapi.MAX_PDF_BYTES
     (re.compile(r"^/v1/documents/docx$"), 31 * MEGABYTE),  # a Word document: see webapi.MAX_DOCX_BYTES
     (re.compile(r"^/v1/turns/[^/]+/tool-results$"), 64 * MEGABYTE),  # what a client's tools read
+    (re.compile(r"^/v1/chat(/stream)?$"), 48 * MEGABYTE),  # a message's files, in base64: see attachments.py
 )
 
 
