@@ -57,6 +57,7 @@ class SystemPrompt:
         integrations: str = "",
         personality: list[str] | None = None,
         files: str = "",
+        vault: str = "",
     ) -> str:
         """The system prompt. `instructions` come from the client (what it is for, how to use
         its tools); `summary` replaces the older part of a long conversation. Only the date
@@ -100,6 +101,8 @@ class SystemPrompt:
             parts.append(f"{integrations.strip()}\n")
         if files.strip():
             parts.append(f"{files.strip()}\n")
+        if vault.strip():
+            parts.append(f"{vault.strip()}\n")
         if summary.strip():
             parts.append(f"## Earlier in this conversation (summary)\n{summary.strip()}\n")
         return "\n".join(parts)

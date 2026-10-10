@@ -63,9 +63,11 @@ from .tools import (
     urls_in,
 )
 from .usagelog import UsageLog
+from .vaulttools import VAULT_TOOLS
 
 if TYPE_CHECKING:
     from .integrations.broker import Broker
+    from .vault import Vault
 
 log = logging.getLogger(__name__)
 
@@ -301,8 +303,14 @@ class Agent:
         tasks: TaskService | None = None,
         integrations: Broker | None = None,
         conversation_files: ConversationFiles | None = None,
+        vault: Vault | None = None,
+        vault_allowed: Callable[[int], bool] | None = None,
+        vault_in_groups: bool = False,
     ):
         self.memory = memory
+        self.vault = vault  # the second brain (vault/), for the people `vault_allowed` says yes to (None: for nobody)
+        self.vault_allowed = vault_allowed
+        self.vault_in_groups = vault_in_groups  # offered in group conversations too: what a tool returns is seen by all
         self.conversation_files = conversation_files  # the files people sent in each conversation (conversationfiles.py)
         self.integrations = integrations  # what people connected (GitHub, Drive, folders), checked and run by the broker
         self.projects = projects  # the files of the conversations that are part of a project
@@ -540,6 +548,7 @@ class Agent:
                 integrations=self._integrations_context(request, person),
                 personality=self.memory.space_personality(request.space),
                 files=self._files_context(request.conversation_id),
+                vault=self.vault.prompt_block() if self._vault_offered(request, person) else "",
             )
             messages.append({"role": "system", "content": system})
             stored = self.memory.history(request.conversation_id, self.history_turns, state.upto_id)
@@ -559,6 +568,15 @@ class Agent:
         if request.project is None or request.ephemeral or self.projects is None:
             return None
         return self.projects.context(request.project, window or self.window)
+
+    def _vault_offered(self, request: ChatRequest, person: Person) -> bool:
+        """Does this person have the second brain in this conversation? Only the people the operator named, and
+        not where others read the answers (a group space), unless the operator said so."""
+        if self.vault is None or request.ephemeral or request.mode == "observe":
+            return False
+        if request.group and not self.vault_in_groups:
+            return False
+        return self.vault_allowed is not None and self.vault_allowed(person.id)
 
     def _integrations_context(self, request: ChatRequest, person: Person) -> str:
         if self.integrations is None or request.ephemeral or request.mode != "answer":
@@ -707,11 +725,12 @@ class Agent:
             return
         if request.files and not ephemeral and self.conversation_files is not None:
             self.conversation_files.save(conversation, person.id, request.files)
+        vault_on = self._vault_offered(request, person)
         context = ToolContext(
             person, self.memory, self.reminders, request.timezone, request.surface, request.user_id, conversation,
             self.notifier, roster=tuple(p for p in request.roster if p.id != person.id),
             projects=self.projects, project_id=request.project, markdown=self.markdown, tasks=self.tasks,
-            integrations=self.integrations,
+            integrations=self.integrations, vault=self.vault if vault_on else None,
             trusted_urls=None if self.web_fetch_any_url else self._trusted_urls(request, conversation),
             conversation_files=self.conversation_files, pictures=[],
         )
@@ -725,6 +744,8 @@ class Agent:
             hidden.add(QCM)  # the other clients have no form to show
         if self.markdown is None:
             hidden |= MARKDOWN_TOOLS
+        if not vault_on:
+            hidden |= VAULT_TOOLS
         if ephemeral or self.conversation_files is None or not self.conversation_files.of(conversation):
             hidden |= CONVERSATION_FILE_TOOLS  # nothing was sent in this conversation to read
         server_tools = [] if ephemeral or request.no_tools else self.toolbox.schemas_without(hidden)

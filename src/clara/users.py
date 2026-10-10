@@ -161,6 +161,14 @@ class Users:
             row = self._memory.database.execute("SELECT * FROM users WHERE name = ?", (name.strip().lower(),)).fetchone()
         return self._user(row) if row else None
 
+    def of_person(self, person_id: int) -> User | None:
+        """The user who is this person (any account they signed in with), if there is one."""
+        with self._memory.lock:
+            row = self._memory.database.execute(
+                "SELECT * FROM users WHERE person_id = ? ORDER BY name LIMIT 1", (person_id,)
+            ).fetchone()
+        return self._user(row) if row else None
+
     def list(self) -> list[User]:
         with self._memory.lock:
             rows = self._memory.database.execute("SELECT * FROM users ORDER BY name").fetchall()

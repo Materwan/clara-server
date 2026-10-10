@@ -42,6 +42,7 @@ from .web import WebClient, WebError
 
 if TYPE_CHECKING:
     from .integrations.broker import Broker
+    from .vault import Vault
 
 log = logging.getLogger(__name__)
 
@@ -87,6 +88,7 @@ class ToolContext:
     pictures: list[Image] = field(default_factory=list)  # pictures a tool read: the model sees them in its next round
     tasks: TaskService | None = None  # the person's to-do list, which the task tools change
     integrations: Broker | None = None  # what is connected (GitHub, Drive, folders): every call goes through it
+    vault: Vault | None = None  # the second brain (an Obsidian vault), for the people allowed to use it (vaulttools.py)
     # The addresses web_fetch may read: those the person wrote, and those web_search found. A page the model chose
     # by itself, or a link in a page, is not: what Clara knows about the person could leave in its address, written
     # by a page that told her to. None: any address (see CLARA_WEB_FETCH_ANY_URL).
@@ -1115,13 +1117,16 @@ def music_tools(music: MusicAssistant, accounts: MusicAccounts) -> list[Tool]:
 
 
 def default_toolbox(
-    web: WebClient | None = None, music: MusicAssistant | None = None, accounts: MusicAccounts | None = None
+    web: WebClient | None = None, music: MusicAssistant | None = None, accounts: MusicAccounts | None = None,
+    extra: list[Tool] | None = None,
 ) -> Toolbox:
     """The server's tools; the web ones only with a `web` client (it needs an Ollama API key), the music ones only
-    with a `music` client (Music Assistant is configured) and the accounts of the people who use it."""
+    with a `music` client (Music Assistant is configured) and the accounts of the people who use it. `extra` are
+    more tools, such as the vault's (vaulttools.py), which import this module."""
     return Toolbox(
         (web_tools(web) if web is not None else [])
         + (music_tools(music, accounts) if music is not None and accounts is not None else [])
+        + list(extra or [])
         + [
             Tool(
                 name="remember",

@@ -210,6 +210,18 @@ class Settings:
     # Music Assistant (music.py, the music_* tools and the Music page): its address. Each person's player and token
     # are their own (musicaccounts.py)
     music_assistant_url: str = ""
+    # The second brain (vault/): an Obsidian vault, a git repository shared with the person. Off without a path.
+    # Only the users named in vault_owners (else the administrators) get the vault_* tools, never in groups
+    vault_path: Path | None = None
+    vault_owners: frozenset[str] = frozenset()
+    vault_in_groups: bool = False
+    vault_git: bool = True  # commit every change (and pull/push when the repository has a remote)
+    vault_push: bool = True
+    vault_pull_seconds: int = 30  # at most one pull per this many seconds
+    vault_git_token: str = field(default="", repr=False)  # for pushing to an https remote that needs one
+    vault_embed_model: str = "nomic-embed-text"  # "off": no semantic search
+    vault_embed_host: str = ""  # default: the local Ollama host
+    vault_max_chars: int = 200_000
     notify_long_turn: int = 120  # a turn this long (seconds) notifies its person when done (0: never)
     # The traffic log (traffic.py): every request in and out, in data/logs
     traffic_log: bool = True
@@ -398,6 +410,18 @@ class Settings:
             web_tools=_flag(env, "CLARA_WEB_TOOLS", default=True),
             web_fetch_any_url=_flag(env, "CLARA_WEB_FETCH_ANY_URL"),
             music_assistant_url=text("MUSIC_ASSISTANT_URL").rstrip("/"),
+            vault_path=Path(text("CLARA_VAULT_PATH")).expanduser() if text("CLARA_VAULT_PATH") else None,
+            vault_owners=frozenset(
+                part.strip().lower() for part in text("CLARA_VAULT_OWNERS").replace(" ", ",").split(",") if part.strip()
+            ),
+            vault_in_groups=_flag(env, "CLARA_VAULT_IN_GROUPS"),
+            vault_git=_flag(env, "CLARA_VAULT_GIT", default=True),
+            vault_push=_flag(env, "CLARA_VAULT_PUSH", default=True),
+            vault_pull_seconds=_non_negative_int(env, "CLARA_VAULT_PULL_SECONDS", 30),
+            vault_git_token=text("CLARA_VAULT_GIT_TOKEN"),
+            vault_embed_model=text("CLARA_VAULT_EMBED_MODEL", "nomic-embed-text"),
+            vault_embed_host=text("CLARA_VAULT_EMBED_HOST").rstrip("/"),
+            vault_max_chars=_positive_int(env, "CLARA_VAULT_MAX_CHARS", 200_000),
             notify_long_turn=_non_negative_int(env, "CLARA_NOTIFY_LONG_TURN", 120),
             traffic_log=_flag(env, "CLARA_TRAFFIC_LOG", default=True),
             traffic_log_days=_positive_int(env, "CLARA_TRAFFIC_LOG_DAYS", 7),

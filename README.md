@@ -72,6 +72,7 @@ Both consoles run the same commands (the `/` is optional):
 | `/relation [<person> [<0-100>\|+n\|-n\|reset]]` | Clara's relationship with each person (see *Relationship*) |
 | `/chime [default on\|off \| <space> on\|off\|default]` | where Clara may answer Discord messages that are not for her (see *Discord*) |
 | `/discord [status\|start\|stop\|restart]` | the Discord bot built into the server (see *Discord*) |
+| `/vault [status\|sync\|health\|reindex [full]\|owners]` | the second brain (Obsidian vault): state, git sync, check-up, semantic index, who may use it (see *The second brain*) |
 | `/stop [now]` | stop the server: tell every client, refuse new questions, wait for running replies and agents, exit (`now`: do not wait); works from `clara-admin` too |
 | `/restart [now]` | pull, update, stop the careful way and start again (see *Restarting the server*); works from `clara-admin` too |
 | `/help [command]`, `/quit` | `/quit` stops the server like `/stop` from the embedded console, and only closes a remote one |
@@ -867,6 +868,52 @@ with all of them. The other clients cannot show one: she tells the person to loo
 | `GET /v1/markdown-files` | `?surface=&user_id=` the person's files, newest first |
 | `GET /v1/markdown-files/{id}`, `DELETE /v1/markdown-files/{id}` | `?surface=&user_id=` a file with its text; delete it |
 
+## The second brain (Obsidian vault)
+
+Clara shares an **Obsidian vault** with her owner: a git repository of markdown notes (the `second-brain` repository,
+next to this one), organised in numbered folders (inbox, daily notes, ideas, projects, areas, knowledge, sources,
+people, archive) with one template per kind of note. The vault's own `README.md` describes the structure for humans;
+`_clara/conventions.md` is Clara's operating manual; `_clara/schema.json` is the layout the tools follow (rename a
+folder or change a status list there and the tools follow).
+
+Turn it on in `.env` (see `.env.example`):
+
+```
+CLARA_VAULT_PATH=/home/you/Clara/second-brain     # a clone of the vault repository
+CLARA_VAULT_OWNERS=erwan                          # empty: the administrators
+```
+
+* **Who.** Only the *users* named in `CLARA_VAULT_OWNERS` (else the administrators) get the `vault_*` tools, on any
+  surface their accounts are signed in on (a Discord account counts once it is signed in as the user). Nobody else
+  even sees that a vault exists. **Never in group conversations** (a Discord server), where everybody reads what a tool
+  returns, unless `CLARA_VAULT_IN_GROUPS=true`.
+* **Git.** Every change Clara makes is a commit by `Clara` (`clara: create 2-ideas/Weekly review.md`). Before she works
+  she pulls (rebase, autostash; at most every `CLARA_VAULT_PULL_SECONDS`), and a few seconds after the last change she
+  pushes, so the Obsidian Git plugin on your computers sees it. She never force-pushes or discards: if a pull or push
+  cannot be done cleanly it is aborted, her work stays committed locally, and the problem is reported in the next tool
+  answers, in `vault_sync` and in `/vault`. Pushing needs credentials on the server: an SSH key, a credential helper, or
+  `CLARA_VAULT_GIT_TOKEN` for an https remote. The server pushes what is still waiting when it stops.
+* **Safety.** Paths are checked (no `..`, no hidden folder, symbolic links are not followed); Clara only writes `.md`
+  notes, never in `.obsidian/` or `_templates/`; names are unique in the vault; a deleted note goes to `.trash/` and
+  stays in git history; `vault_restore_note` brings back any earlier version, also of a deleted note.
+* **Semantic search.** An Ollama embedding model (`ollama pull nomic-embed-text`, `CLARA_VAULT_EMBED_MODEL`, `off`
+  disables) indexes the notes by passage in `data/vault_index.sqlite` (a cache). The index follows the notes by content
+  and is brought up to date when somebody searches (25 s at most per search: a first search over a big vault is partial;
+  `/vault reindex` does all of it). When the model is not reachable, she falls back to keyword search and says so.
+
+Her tools (`vaulttools.py`, the logic is in `vault/`):
+
+| Group | Tools |
+| --- | --- |
+| Look around | `vault_overview`, `vault_list`, `vault_read`, `vault_templates` |
+| Find | `vault_search` (keywords, ranked, accents ignored), `vault_semantic_search`, `vault_query` (type, status, tags, properties and dates, like Dataview), `vault_tags`, `vault_properties`, `vault_tasks` |
+| Graph | `vault_links` (links out, broken, backlinks, unlinked mentions), `vault_related`, `vault_health` (broken links, orphans, untyped, misplaced, stale, duplicate names) |
+| Write | `vault_capture` (inbox), `vault_create_note` (by type: folder, front matter, template), `vault_edit_note`, `vault_append_note` (also under a heading), `vault_rewrite_note`, `vault_set_properties` (properties and tags), `vault_set_task` |
+| Organise | `vault_move_note` (renames and moves, **updates every link**), `vault_delete_note` (to the trash), `vault_daily_append` / `vault_daily_read`, `vault_update_index` (the automatic list of an index / the Home note) |
+| History and sync | `vault_history`, `vault_restore_note`, `vault_sync`, `vault_reindex` |
+
+Operator console: `/vault [status|sync|health|reindex [full]|owners]`.
+
 ## QCM
 
 On the web site and in the desktop app (surfaces `web` and `app`; the tool is not offered on the others), Clara can
@@ -1203,6 +1250,10 @@ src/clara/
   models.py     the models users may choose, their weights (credits a token), each person's choice, Discord's model
   modelapi.py   the routes of models
   markdownfiles.py / markdownapi.py  the markdown files Clara writes (tools in tools.py), and their routes
+  vault/        the second brain: markdown.py (front matter, links, tags, tasks), notes.py (a note, BM25 search),
+                schema.py (the kinds of note and their folders), vault.py (every operation), git.py (commit, pull,
+                push), embeddings.py (semantic search), build.py (from the settings, who may use it)
+  vaulttools.py the vault_* tools the model calls
   qcm.py        the QCM form Clara asks (tool `qcm`): limits, checking, the answers message
   client.py     clara-chat (also shows reminders and notifications, and has /remind, /notify, /tasks and /task)
   admin.py      clara-admin (remote console)

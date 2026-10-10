@@ -7,6 +7,7 @@ the same handlers. A handler gets the raw argument text and returns text.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -29,6 +30,7 @@ from .settings import Settings
 from .tailscale import Tailscale
 from .traffic import TrafficLog
 from .users import UserError, Users, generate_password
+from .vault import VaultError
 
 log = logging.getLogger(__name__)
 
@@ -786,3 +788,35 @@ async def limit_command(ctx: CommandContext, args: str) -> str:
         return f"{user.name}: {show_limit(user.token_limit)}.{note}"
     except (ValueError, UserError) as error:
         raise CommandError(str(error)) from None
+
+
+@registry.command(
+    "vault",
+    "[status|sync|health|reindex [full]|owners]",
+    "The second brain (Obsidian vault): its state, sync with git, check-up, semantic index, who may use it",
+    lambda ctx: ["status", "sync", "health", "reindex", "owners"],
+)
+async def vault_command(ctx: CommandContext, args: str) -> str:
+    vault = ctx.agent.vault
+    if vault is None:
+        return "No vault: set CLARA_VAULT_PATH to an Obsidian vault (a git repository) and restart."
+    try:
+        word, _, rest = args.strip().partition(" ")
+        word = word.lower() or "status"
+        if word == "status":
+            return await asyncio.to_thread(vault.overview)
+        if word == "sync":
+            return await asyncio.to_thread(vault.sync)
+        if word == "health":
+            return await asyncio.to_thread(vault.health, 30)
+        if word == "reindex":
+            return await asyncio.to_thread(vault.reindex, rest.strip().lower() == "full", 3600.0)
+        if word == "owners":
+            owners = sorted(ctx.settings.vault_owners)
+            if owners:
+                return "Users who may use the vault (CLARA_VAULT_OWNERS): " + ", ".join(owners)
+            admins = [user.name for user in ctx.users.list() if user.is_admin and not user.disabled] if ctx.users else []
+            return "CLARA_VAULT_OWNERS is empty: the administrators may use the vault: " + (", ".join(admins) or "(none)")
+    except VaultError as error:
+        raise CommandError(str(error)) from None
+    raise CommandError("Usage: /vault [status|sync|health|reindex [full]|owners]")

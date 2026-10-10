@@ -109,6 +109,8 @@ from .traffic import TrafficLog, TrafficMiddleware
 from .usagelog import UsageLog
 from .userkeys import UserKeys
 from .users import Users
+from .vault import open_vault, owner_check
+from .vaulttools import vault_tools
 from .web import WebClient
 from .webapi import SIGNUPS, SIGNUPS_BLOCK, install, install_web
 
@@ -156,10 +158,12 @@ def create_app(
     user_keys = UserKeys(memory, integrations.vault, providers)
     models.user_keys = user_keys
     music_accounts = MusicAccounts(memory, integrations.vault)
+    users = Users(memory, settings.session_days, session_max_days=settings.session_max_days)
+    vault = open_vault(settings)  # the second brain, for the users who own it (None: not configured)
     agent = Agent(
         memory,
         providers,
-        default_toolbox(web, music, music_accounts),
+        default_toolbox(web, music, music_accounts, extra=vault_tools() if vault is not None else None),
         SystemPrompt(settings.system_prompt_file),
         history_turns=settings.history_turns,
         max_concurrent_llm=settings.max_concurrent_llm,
@@ -187,6 +191,9 @@ def create_app(
         tasks=tasks,
         integrations=integrations.broker,
         conversation_files=conversation_files,
+        vault=vault,
+        vault_allowed=owner_check(settings, users) if vault is not None else None,
+        vault_in_groups=settings.vault_in_groups,
     )
 
     async def integration_followup(approval, project_id, message):
@@ -212,7 +219,6 @@ def create_app(
         )
     lifecycle = Lifecycle(agent, reminders, tasks=tasks, schedules=schedules)
     restart = RestartService(settings.data_dir, lifecycle)
-    users = Users(memory, settings.session_days, session_max_days=settings.session_max_days)
     users.prune()
     tailscale = tailscale or Tailscale.from_settings(settings)
     if tailscale.enabled:
@@ -269,6 +275,8 @@ def create_app(
                 await music.aclose()
             for connector in integrations.connectors.values():
                 await connector.aclose()
+            if vault is not None:
+                await asyncio.to_thread(vault.close)  # pushes what is still waiting
             memory.close()
             if traffic is not None:
                 traffic.close()
@@ -295,6 +303,7 @@ def create_app(
     app.state.discord = discord_bot
     app.state.projects = projects
     app.state.markdown = markdown
+    app.state.vault = vault
     app.state.limits = limits
     app.state.usage_log = usage_log
     app.state.models = models
